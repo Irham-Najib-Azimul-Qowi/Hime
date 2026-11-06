@@ -1,0 +1,40 @@
+=================================================================
+NUSA DYNAMIC ISLAND - EXTRACTED ARTIFACT & DIRECTORY STRUCTURE
+=================================================================
+
+1. INSTALLER ARCHIVE CONTENTS (NusaSetup.exe - Inno Setup 6.7.0):
+-----------------------------------------------------------------
+NusaSetup.exe (2,945,252 bytes | SHA256: BC4133305B28B929ECA42CC32833DC4FD34002CE35676D27761942419F4D4B02)
+  ├── {app}\nusa.exe (1,265,664 bytes | Main executable)
+  └── install_script.iss (2,866 bytes | Decompiled Inno Setup script)
+
+2. LOCAL EXTRACTED WORKSPACE:
+-----------------------------
+extracted/
+  install_script.iss (2,866 bytes)
+  rdata_strings.txt (49,682 bytes)
+  {app}/
+    nusa.exe (1,265,664 bytes)
+
+3. RUNTIME LOCALAPPDATA STORAGE DIRECTORY (%LOCALAPPDATA%\Nusa):
+---------------------------------------------------------------
+C:\Users\<User>\AppData\Local\Nusa\
+  ├── Shelf/               (Directory for drag & drop file shelf storage)
+  ├── settings.txt         (Key-value plain text configuration file)
+  ├── tasks.txt / todo.txt (To-do items and completion status)
+  ├── water.txt            (Water tracking parameters and daily intake)
+  ├── focus.txt            (Pomodoro session history and active timer)
+  ├── shelf.txt            (File shelf metadata and list of pinned files)
+  ├── clipboard.txt        (Clipboard history items)
+  └── glass.log            (DirectComposition / glass rendering diagnostic log)
+
+4. PE BINARY SECTION LAYOUT (nusa.exe):
+----------------------------------------
+Format: PE32+ (64-bit AMD64) | Subsystem: Windows GUI (2) | Compiled with: Rust 1.8x (LLVM/MSVC)
+  .text    : VA 0x00001000, VSize 0x000D9000, Raw 0x00000400, Size 888,832 bytes (Executable code)
+  .rdata   : VA 0x000DA000, VSize 0x0002FE24, Raw 0x000D9400, Size 196,608 bytes (Read-only data, strings)
+  .data    : VA 0x0010A000, VSize 0x00001FA8, Raw 0x00109400, Size   3,584 bytes (Global mutable data)
+  .pdata   : VA 0x0010C000, VSize 0x00004C80, Raw 0x0010A200, Size  20,480 bytes (Exception unwinding info)
+  .fptable : VA 0x00111000, VSize 0x00000100, Raw 0x0010F000, Size     512 bytes (Guard CF function table)
+  .rsrc    : VA 0x00112000, VSize 0x00024B00, Raw 0x0010F200, Size 150,528 bytes (Icon multi-res group, version)
+  .reloc   : VA 0x00137000, VSize 0x00001144, Raw 0x00133E00, Size   4,608 bytes (Base relocations)

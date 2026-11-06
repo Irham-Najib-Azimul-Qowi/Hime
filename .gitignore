@@ -1,0 +1,135 @@
+# =============================================================================
+# Hime Assistant — Root .gitignore
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Operating System Files
+# -----------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# -----------------------------------------------------------------------------
+# 2. Editors & IDEs
+# -----------------------------------------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+# Visual Studio Code (allow team settings/recommendations, ignore user state)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+
+# -----------------------------------------------------------------------------
+# 3. Node.js & JavaScript/TypeScript (Tauri WebView / Web Components)
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+.next/
+out/
+dist/
+.turbo/
+
+# -----------------------------------------------------------------------------
+# 4. Rust & Cargo (Hime Desktop Core / Tauri 2.0)
+# -----------------------------------------------------------------------------
+target/
+**/src-tauri/target/
+**/*.rs.bk
+*.pdb
+
+# -----------------------------------------------------------------------------
+# 5. Python & Toolchain (Hermes Agent Integration)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# -----------------------------------------------------------------------------
+# 6. Android & Mobile (Hime Mobile)
+# -----------------------------------------------------------------------------
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+
+# -----------------------------------------------------------------------------
+# 7. Secrets, Credentials & Local Environment
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.token
+*session_tickets*
+
+# -----------------------------------------------------------------------------
+# 8. Databases & Local Persistent State
+# -----------------------------------------------------------------------------
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.9router/
+.hermes/
+
+# -----------------------------------------------------------------------------
+# 9. Logs & Agent Scratch Directories
+# -----------------------------------------------------------------------------
+*.log
+transcript*.jsonl
+scratch/
+# Ignore NTFS junction .agents so Git only tracks canonical .agent/
+.agents
+
+# -----------------------------------------------------------------------------
+# 10. Reverse Engineering External Source Materials (Managed Independently)
+# -----------------------------------------------------------------------------
+# Nested Git repositories cloned from upstream (preserve independence)
+RE/Hermes/00-source-materials/hermes-agent/
+RE/9ROUTER/00-source-materials/9router/
+
+# Nusa binary installer and unpacked binary assets
+RE/Nusa/00-source-materials/*.exe
+RE/Nusa/00-source-materials/*.zip
+RE/Nusa/00-source-materials/extracted/
