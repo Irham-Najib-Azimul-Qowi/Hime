@@ -5,14 +5,14 @@
 ## 1. Metadata
 
 - **Task ID:** TASK-00-01
-- **Phase:** PHASE 0 — Workspace Infrastructure & Governance
+- **Phase:** Phase 00 — Project Governance
 - **Title:** Initial Workspace Setup & Engineering Governance Baseline
 - **Priority:** CRITICAL
 - **Owner:** Senior Engineering Infrastructure Architect (AI Agent)
 - **Reviewer:** Project Owner / User
-- **Status:** **SELF-VERIFIED**
+- **Status:** **COMPLETED**
 - **Dependencies:** None
-- **Commit Reference:** Pending Git Initialization
+- **Commit Reference:** `8cf0070` (Baseline commit on branch `main`)
 
 ---
 
