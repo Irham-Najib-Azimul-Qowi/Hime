@@ -30,13 +30,21 @@ Dokumen ini merupakan indeks kanonikal seluruh aset berharga dalam ekosistem Him
 | **AST-INF-03** | Agent Operational Rules | Governance | `AGENTS.md` | ACTIVE | Internal Hime | Aturan permanen coding agent: evidence-first, minimal implementation, least privilege, security policy. |
 | **AST-INF-04** | Project Status Tracker | Governance | `PROJECT_STATUS.md` | ACTIVE | Internal Hime | Pelacak kemajuan fase proyek resmi berbasis 16 fase Master Plan. |
 | **AST-INF-05** | Engineering Backlog | Project Mgmt | `project-management/backlog/BACKLOG.md` | ACTIVE | Internal Hime | Daftar item backlog granular per fase dari Phase 00 hingga Phase 11. |
-| **AST-INF-06** | Risk Register | Security / Risk | `project-management/risks/RISK_REGISTER.md` | ACTIVE | Internal Hime | Register risiko komprehensif mencakup RSK-01 hingga RSK-08. |
+| **AST-INF-06** | Risk Register | Security / Risk | `project-management/risks/RISK_REGISTER.md` | ACTIVE | Internal Hime | Register risiko komprehensif mencakup RSK-01 hingga RSK-12. |
 | **AST-INF-07** | Decision Log | Architecture | `project-management/decisions/DECISION_LOG.md` | ACTIVE | Internal Hime | Log keputusan arsitektur dan tata kelola yang disetujui. |
 | **AST-INF-08** | Governance Policies | Governance | `docs/governance/` | ACTIVE | Internal Hime | 10 Dokumen tata kelola resmi (Workflow, DoD, Coding Standard, Security, Skills, Audit). |
 | **AST-INF-09** | Engineering Templates | Operations | `docs/` & `project-management/` | ACTIVE | Internal Hime | Template baku untuk Task, Phase, ADR, Code Review, QA, dan Security Review. |
 | **AST-INF-10** | Projects Source Workspace | Source Code | `Projects/` | PLANNED | Internal Hime | Direktori kanonikal kode sumber masa depan (Hime Desktop & Core) yang dilindungi `.gitkeep`. |
 | **AST-INF-11** | Tools & Automation | Scripts / Utilities | `tools/` & `scripts/` | PLANNED | Internal Hime | Direktori script build, packaging, dan tooling yang dilindungi `.gitkeep`. |
 | **AST-INF-12** | Documentation & Archive | Historical Docs | `Documentation/` & `Archive/` | PLANNED | Internal Hime | Direktori arsip dokumen lama dan catatan transisi yang dilindungi `.gitkeep`. |
+| **AST-INF-13** | License Register | Governance / Legal | `project-management/inventory/LICENSE-REGISTER.md` | ACTIVE | Internal Hime | Register lisensi kanonikal mencakup 87 dependensi langsung, 356 paket terkunci `uv.lock`, dan pemetaan risiko lisensi. |
+| **AST-INF-14** | Security Threat Model | Security / STRIDE | `project-management/security/THREAT-MODEL.md` | ACTIVE | Internal Hime | Model ancaman formal STRIDE mencakup trust boundaries, data flow, dan 10 skenario serangan mendalam. |
+| **AST-INF-15** | Security Baseline Specification | Security / Governance | `project-management/security/SECURITY-BASELINE.md` | ACTIVE | Internal Hime | Spesifikasi 10 kontrol keamanan rekayasa wajib (SEC-01 s/d SEC-10) untuk implementasi Hime. |
+| **AST-INF-16** | Engineering Foundation Reference | Engineering / Architecture | `project-management/engineering/ENGINEERING-FOUNDATION.md` | ACTIVE | Internal Hime | Rujukan kanonikal terpadu: hardware baseline, profil aset, arsitektur sistem, kontrol keamanan, dan batasan rekayasa. |
+| **AST-INF-17** | Consolidated Decision Register | Governance / Decisions | `project-management/engineering/DECISION-REGISTER.md` | ACTIVE | Internal Hime | Register pelacak 12 keputusan teknis, arsitektural, dan risiko residu Project Owner dengan rincian opsi dan trade-off. |
+| **AST-INF-18** | Implementation Roadmap | Project Mgmt / Roadmap | `project-management/engineering/IMPLEMENTATION-ROADMAP.md` | ACTIVE | Internal Hime | Peta jalan implementasi 11 workstream sadar dependensi dan batas hardware riil dari Phase 02 hingga Phase 15. |
+| **AST-INF-19** | Foundation Navigation Index | Documentation / Index | `project-management/engineering/FOUNDATION-INDEX.md` | ACTIVE | Internal Hime | Direktori navigasi cepat ke seluruh artefak fondasi rekayasa dan laporan audit kanonikal Phase 01. |
+| **AST-INF-20** | Phase 01 Acceptance Report | Governance / Acceptance | `project-management/PHASE-01-ACCEPTANCE.md` | ACTIVE | Internal Hime | Laporan penutupan formal dan penerimaan Phase 01 (Discovery & Technical Validation) untuk sign-off Project Owner. |
 
 ---
 

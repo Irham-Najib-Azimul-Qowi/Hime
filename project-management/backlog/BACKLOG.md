@@ -29,12 +29,12 @@
 - [x] **TASK-00-01:** Initial Workspace Setup, Environment Audit, AGENTS.md, Governance, Skill Curation. *(COMPLETED)*
 - [x] **TASK-00-02:** Workspace Git Initialization, Root `.gitignore`, Toolchain Verification, and Repository Protection. *(ACCEPTED)*
 
-### Phase 01: Discovery & Environment Audit *(IN PROGRESS)*
+### Phase 01: Discovery & Technical Validation *(COMPLETED)*
 - [x] **TASK-01-01:** Environment Baseline Validation — Verify runtime versions (Node.js, Python, uv, Git required; JDK, Android SDK future; Rust Phase 06–07; Docker optional) and workspace integrity against `ENVIRONMENT_AUDIT.md`. *(ACCEPTED)*
 - [x] **TASK-01-02:** Existing Project & Research Asset Inventory — Catalog all RE outputs, documentation, and research artifacts for completeness and accuracy. *(ACCEPTED)*
-- [-] **TASK-01-03:** Dependency and License Audit — Audit all external dependencies (Hermes, 9Router, agent skills) for license compatibility and version pinning. *(IN PROGRESS)*
-- [ ] **TASK-01-04:** Security & Runtime Environment Audit — Audit local security posture: file permissions, credential exposure, network bindings, and process isolation.
-- [ ] **TASK-01-05:** Discovery Consolidation & Phase Acceptance — Consolidate all Phase 01 findings into a formal Discovery Report and verify Phase Acceptance criteria.
+- [x] **TASK-01-03:** Dependency and License Audit — Audit all external dependencies (Hermes, 9Router, agent skills, Nusa clean-room) for license compatibility, version pinning, and publish canonical LICENSE-REGISTER.md. *(ACCEPTED)*
+- [x] **TASK-01-04:** Security & Runtime Environment Audit — Audit local security posture: Windows context, credential exposure, network bindings, IPC boundaries, STRIDE threat model, and security baseline. *(ACCEPTED)*
+- [x] **TASK-01-05:** Discovery Consolidation & Phase Acceptance — Consolidate all Phase 01 findings into a formal Engineering Foundation Package, Decision Register, Implementation Roadmap, and verify Phase Acceptance criteria. *(ACCEPTED)*
 
 ### Phase 02: Nusa Reverse Engineering *(RESEARCH COMPLETED — PENDING ACCEPTANCE)*
 - [x] **TASK-02-01:** Full reverse engineering of Nusa Dynamic Island (`nusetup.exe`) — 8 reports in `RE/Nusa/`.
