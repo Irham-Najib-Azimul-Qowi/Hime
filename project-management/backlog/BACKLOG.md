@@ -9,7 +9,7 @@
 | Phase | Phase Name | Status | Total Items | High Priority |
 |:---:|:---|:---:|:---:|:---:|
 | **PHASE 00** | Project Governance | **COMPLETED** | 2 | 2 |
-| **PHASE 01** | Discovery & Environment Audit | **READY** | 5 | 5 |
+| **PHASE 01** | Discovery & Environment Audit | **IN PROGRESS** | 5 | 5 |
 | **PHASE 02** | Nusa Reverse Engineering | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 1 | 1 |
 | **PHASE 03** | Hermes & 9Router Integration Audit | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 2 | 2 |
 | **PHASE 04** | Product & System Specification | **PLANNED** | 3 | 3 |
@@ -29,9 +29,9 @@
 - [x] **TASK-00-01:** Initial Workspace Setup, Environment Audit, AGENTS.md, Governance, Skill Curation. *(COMPLETED)*
 - [x] **TASK-00-02:** Workspace Git Initialization, Root `.gitignore`, Toolchain Verification, and Repository Protection. *(ACCEPTED)*
 
-### Phase 01: Discovery & Environment Audit *(READY)*
-- [ ] **TASK-01-01:** Environment Baseline Validation — Verify runtime versions (Node.js, Python, uv, Git required; JDK, Android SDK future; Rust Phase 06–07; Docker optional) and workspace integrity against `ENVIRONMENT_AUDIT.md`.
-- [ ] **TASK-01-02:** Existing Project & Research Asset Inventory — Catalog all RE outputs, documentation, and research artifacts for completeness and accuracy.
+### Phase 01: Discovery & Environment Audit *(IN PROGRESS)*
+- [x] **TASK-01-01:** Environment Baseline Validation — Verify runtime versions (Node.js, Python, uv, Git required; JDK, Android SDK future; Rust Phase 06–07; Docker optional) and workspace integrity against `ENVIRONMENT_AUDIT.md`. *(ACCEPTED)*
+- [-] **TASK-01-02:** Existing Project & Research Asset Inventory — Catalog all RE outputs, documentation, and research artifacts for completeness and accuracy. *(IN PROGRESS)*
 - [ ] **TASK-01-03:** Dependency and License Audit — Audit all external dependencies (Hermes, 9Router, agent skills) for license compatibility and version pinning.
 - [ ] **TASK-01-04:** Security & Runtime Environment Audit — Audit local security posture: file permissions, credential exposure, network bindings, and process isolation.
 - [ ] **TASK-01-05:** Discovery Consolidation & Phase Acceptance — Consolidate all Phase 01 findings into a formal Discovery Report and verify Phase Acceptance criteria.

@@ -1,7 +1,7 @@
 # Status Proyek (Project Status)
 ## Proyek: Hime Assistant
-**Terakhir Diperbarui:** 2026-11-07 (Phase 00 Closed)
-**Status Keseluruhan:** Phase 00 (Project Governance) Ditutup Formal — Siap Membuka Phase 01 (Discovery & Environment Audit)
+**Terakhir Diperbarui:** 2026-11-07 (Phase 01 Started)
+**Status Keseluruhan:** Phase 00 Ditutup Formal — Phase 01 (Discovery & Environment Audit) Berjalan: TASK-01-01 Ready for User Acceptance
 
 ---
 
@@ -33,7 +33,7 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 | Phase | Phase Name | Status | Catatan Status |
 |:---:|:---|:---:|:---|
 | **Phase 00** | Project Governance | **COMPLETED** | TASK-00-01 & TASK-00-02 disetujui; Phase 00 ditutup formal. |
-| **Phase 01** | Discovery & Environment Audit | **READY** | Backlog didefinisikan (TASK-01-01 s/d 01-05); siap dimulai. |
+| **Phase 01** | Discovery & Environment Audit | **IN PROGRESS** | TASK-01-01 diterima (ACCEPTED); TASK-01-02 berjalan. |
 | **Phase 02** | Nusa Reverse Engineering | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 8 Laporan teknis lengkap; formal acceptance sign-off pending. |
 | **Phase 03** | Hermes & 9Router Integration Audit | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 19 Laporan riset lengkap; formal acceptance sign-off pending. |
 | **Phase 04** | Product & System Specification | PLANNED | Kebutuhan produk, functional/non-functional requirements, use cases, behavior. |
@@ -62,7 +62,14 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 - [x] Resolusi junction duplikat REA; kanonikal di `.agent/skills/rea/`.
 - [x] Penyusunan template operasional (Task, Phase, ADR, Code Review, QA, Security Review, Phase Acceptance).
 - [x] Inisialisasi Git root workspace, konfigurasi `.gitignore`, dan konfigurasi remote origin (`TASK-00-02`).
-- [x] Penutupan formal Phase 00 via [`PHASE-00-ACCEPTANCE.md`](file:///x:/folder_ai/Hime/project-management/phases/PHASE-00-ACCEPTANCE.md) (disetujui pengguna).
+- [x] Penutupan formal Phase 00 via [`PHASE-00-ACCEPTANCE.md`](file:///x:/folder_ai/Hime/project-management/reviews/PHASE-00-ACCEPTANCE.md) (disetujui pengguna).
+
+### Phase 01: Discovery & Environment Audit *(IN PROGRESS)*
+- [x] **TASK-01-01:** Environment Baseline Validation (Laporan: `project-management/reviews/TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md` — *ACCEPTED*).
+- [-] **TASK-01-02:** Existing Project & Research Asset Inventory *(IN PROGRESS)*.
+- [ ] **TASK-01-03:** Dependency and License Audit.
+- [ ] **TASK-01-04:** Security & Runtime Environment Audit.
+- [ ] **TASK-01-05:** Discovery Consolidation & Phase Acceptance.
 
 ### Phase 02: Nusa Reverse Engineering *(RESEARCH COMPLETED — PENDING ACCEPTANCE)*
 - [x] Ekstraksi statis dan analisis biner DirectComposition, Win32 window management.
@@ -84,9 +91,8 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 
 ## 4. Langkah Berikutnya (Next Immediate Tasks)
 
-1. **Review & Acceptance Phase 00:** Pengguna meninjau laporan final review dan memberikan keputusan penerimaan TASK-00-02 dan penutupan Phase 00.
-2. **Phase 01 — Discovery & Environment Audit (Setelah Phase 00 Closed):**
-   - **TASK-01-01:** Environment Baseline Validation.
+1. **Review & Acceptance TASK-01-01:** Pengguna meninjau laporan baseline lingkungan (`TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md`) dan memberikan keputusan penerimaan.
+2. **Phase 01 — Eksekusi Lanjutan (Setelah TASK-01-01 Disetujui):**
    - **TASK-01-02:** Existing Project & Research Asset Inventory.
    - **TASK-01-03:** Dependency and License Audit.
    - **TASK-01-04:** Security & Runtime Environment Audit.
