@@ -33,7 +33,7 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 | Phase | Phase Name | Status | Catatan Status |
 |:---:|:---|:---:|:---|
 | **Phase 00** | Project Governance | **COMPLETED** | TASK-00-01 & TASK-00-02 disetujui; Phase 00 ditutup formal. |
-| **Phase 01** | Discovery & Environment Audit | **IN PROGRESS** | TASK-01-01 diterima (ACCEPTED); TASK-01-02 berjalan. |
+| **Phase 01** | Discovery & Environment Audit | **IN PROGRESS** | TASK-01-01 & 01-02 diterima (ACCEPTED); TASK-01-03 berjalan. |
 | **Phase 02** | Nusa Reverse Engineering | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 8 Laporan teknis lengkap; formal acceptance sign-off pending. |
 | **Phase 03** | Hermes & 9Router Integration Audit | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 19 Laporan riset lengkap; formal acceptance sign-off pending. |
 | **Phase 04** | Product & System Specification | PLANNED | Kebutuhan produk, functional/non-functional requirements, use cases, behavior. |
@@ -66,8 +66,8 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 
 ### Phase 01: Discovery & Environment Audit *(IN PROGRESS)*
 - [x] **TASK-01-01:** Environment Baseline Validation (Laporan: `project-management/reviews/TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md` — *ACCEPTED*).
-- [-] **TASK-01-02:** Existing Project & Research Asset Inventory *(IN PROGRESS)*.
-- [ ] **TASK-01-03:** Dependency and License Audit.
+- [x] **TASK-01-02:** Existing Project & Research Asset Inventory (Laporan: `project-management/reviews/TASK-01-02-ASSET-INVENTORY-REPORT.md`, Indeks: `project-management/inventory/ASSET-REGISTER.md` — *ACCEPTED*).
+- [-] **TASK-01-03:** Dependency and License Audit *(IN PROGRESS)*.
 - [ ] **TASK-01-04:** Security & Runtime Environment Audit.
 - [ ] **TASK-01-05:** Discovery Consolidation & Phase Acceptance.
 
@@ -91,9 +91,8 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 
 ## 4. Langkah Berikutnya (Next Immediate Tasks)
 
-1. **Review & Acceptance TASK-01-01:** Pengguna meninjau laporan baseline lingkungan (`TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md`) dan memberikan keputusan penerimaan.
-2. **Phase 01 — Eksekusi Lanjutan (Setelah TASK-01-01 Disetujui):**
-   - **TASK-01-02:** Existing Project & Research Asset Inventory.
+1. **Review & Acceptance TASK-01-02:** Pengguna meninjau laporan inventarisasi aset (`TASK-01-02-ASSET-INVENTORY-REPORT.md`) dan indeks aset (`ASSET-REGISTER.md`), lalu memberikan keputusan penerimaan.
+2. **Phase 01 — Eksekusi Lanjutan (Setelah TASK-01-02 Disetujui):**
    - **TASK-01-03:** Dependency and License Audit.
    - **TASK-01-04:** Security & Runtime Environment Audit.
    - **TASK-01-05:** Discovery Consolidation & Phase Acceptance.

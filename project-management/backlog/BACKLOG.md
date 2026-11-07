@@ -1,5 +1,5 @@
 # Project Backlog
-**Project:** Hime Assistant  
+**Project:** Hime Assistant
 **Last Updated:** 2026-11-06 (Post Final Governance Review)
 
 ---
@@ -31,8 +31,8 @@
 
 ### Phase 01: Discovery & Environment Audit *(IN PROGRESS)*
 - [x] **TASK-01-01:** Environment Baseline Validation — Verify runtime versions (Node.js, Python, uv, Git required; JDK, Android SDK future; Rust Phase 06–07; Docker optional) and workspace integrity against `ENVIRONMENT_AUDIT.md`. *(ACCEPTED)*
-- [-] **TASK-01-02:** Existing Project & Research Asset Inventory — Catalog all RE outputs, documentation, and research artifacts for completeness and accuracy. *(IN PROGRESS)*
-- [ ] **TASK-01-03:** Dependency and License Audit — Audit all external dependencies (Hermes, 9Router, agent skills) for license compatibility and version pinning.
+- [x] **TASK-01-02:** Existing Project & Research Asset Inventory — Catalog all RE outputs, documentation, and research artifacts for completeness and accuracy. *(ACCEPTED)*
+- [-] **TASK-01-03:** Dependency and License Audit — Audit all external dependencies (Hermes, 9Router, agent skills) for license compatibility and version pinning. *(IN PROGRESS)*
 - [ ] **TASK-01-04:** Security & Runtime Environment Audit — Audit local security posture: file permissions, credential exposure, network bindings, and process isolation.
 - [ ] **TASK-01-05:** Discovery Consolidation & Phase Acceptance — Consolidate all Phase 01 findings into a formal Discovery Report and verify Phase Acceptance criteria.
 
