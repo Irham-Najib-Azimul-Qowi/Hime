@@ -14,6 +14,16 @@ Dokumen ini menyediakan peta navigasi ringkas menuju seluruh dokumen sumber kano
 
 Setiap dokumen di bawah ini berfungsi sebagai satu-satunya sumber kebenaran (*single source of truth*) untuk domain teknisnya masing-masing.
 
+### Status Penerimaan Task Phase 01 (Governance Baseline):
+| Task ID | Nama Task | Status Resmi |
+|:---:|:---|:---:|
+| **TASK-01-01** | Environment Baseline Validation | **ACCEPTED** |
+| **TASK-01-02** | Existing Project & Research Asset Inventory | **ACCEPTED** |
+| **TASK-01-03** | Dependency and License Audit | **QUALIFIED ACCEPTANCE** |
+| **TASK-01-04** | Security & Runtime Environment Audit | **QUALIFIED ACCEPTANCE** |
+| **TASK-01-05** | Discovery Consolidation & Phase Acceptance | **QUALIFIED ACCEPTANCE** |
+| **PHASE-01** | Discovery & Technical Validation | **COMPLETED** |
+
 ---
 
 ## 2. Directory & Document Navigation Map

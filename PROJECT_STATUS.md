@@ -1,7 +1,7 @@
 # Status Proyek (Project Status)
 ## Proyek: Hime Assistant
 **Terakhir Diperbarui:** 2026-11-08 (Phase 01 Consolidation & Acceptance)
-**Status Keseluruhan:** Phase 00 & Phase 01 Ditutup Formal (COMPLETED) — Seluruh 5 Task Phase 01 ACCEPTED; Paket Fondasi Rekayasa Dikomit
+**Status Keseluruhan:** Phase 00 & Phase 01 Ditutup Formal (COMPLETED) — TASK-01-01 & 01-02 ACCEPTED, TASK-01-03 s/d 01-05 QUALIFIED ACCEPTANCE; Paket Fondasi Rekayasa Dikomit
 
 ---
 
@@ -26,7 +26,7 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
    - Baseline commit pertama dibuat: `chore: initialize Hime project governance baseline` (`8cf0070`).
    - Task TASK-00-02 resmi berstatus **ACCEPTED** (disetujui pengguna).
 4. **Discovery & Engineering Foundation Baseline — COMPLETED (Phase 01):**
-   - Audit kapasitas lingkungan host Windows 11 (TASK-01-01), inventarisasi aset & riset (TASK-01-02), audit dependensi & lisensi (TASK-01-03), audit keamanan & runtime (TASK-01-04), dan konsolidasi fondasi rekayasa (TASK-01-05) resmi disetujui (ACCEPTED).
+   - Audit kapasitas lingkungan host Windows 11 (TASK-01-01: ACCEPTED), inventarisasi aset & riset (TASK-01-02: ACCEPTED), audit dependensi & lisensi (TASK-01-03: QUALIFIED ACCEPTANCE), audit keamanan & runtime (TASK-01-04: QUALIFIED ACCEPTANCE), dan konsolidasi fondasi rekayasa (TASK-01-05: QUALIFIED ACCEPTANCE).
    - Paket Fondasi Rekayasa kanonikal (`ENGINEERING-FOUNDATION.md`, `DECISION-REGISTER.md`, `IMPLEMENTATION-ROADMAP.md`, `FOUNDATION-INDEX.md`) diterbitkan dan dikomit.
    - Penutupan formal Phase 01 disahkan melalui [`PHASE-01-ACCEPTANCE.md`](file:///x:/folder_ai/Hime/project-management/PHASE-01-ACCEPTANCE.md).
 
@@ -37,7 +37,7 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 | Phase | Phase Name | Status | Catatan Status |
 |:---:|:---|:---:|:---|
 | **Phase 00** | Project Governance | **COMPLETED** | TASK-00-01 & TASK-00-02 disetujui; Phase 00 ditutup formal. |
-| **Phase 01** | Discovery & Technical Validation | **COMPLETED** | Seluruh 5 task disetujui (ACCEPTED); Paket Fondasi Rekayasa diterbitkan; Phase 01 ditutup formal via PHASE-01-ACCEPTANCE.md. |
+| **Phase 01** | Discovery & Technical Validation | **COMPLETED** | TASK-01-01 & 01-02 ACCEPTED, TASK-01-03 s/d 01-05 QUALIFIED ACCEPTANCE; Paket Fondasi Rekayasa diterbitkan; Phase 01 ditutup formal via PHASE-01-ACCEPTANCE.md. |
 | **Phase 02** | Nusa Reverse Engineering | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 8 Laporan teknis lengkap; formal acceptance sign-off pending. |
 | **Phase 03** | Hermes & 9Router Integration Audit | **RESEARCH COMPLETED (PENDING ACCEPTANCE)** | 19 Laporan riset lengkap; formal acceptance sign-off pending. |
 | **Phase 04** | Product & System Specification | PLANNED | Kebutuhan produk, functional/non-functional requirements, use cases, behavior. |
@@ -71,9 +71,9 @@ Proyek Hime Assistant telah berhasil menyelesaikan seluruh fondasi tata kelola r
 ### Phase 01: Discovery & Technical Validation *(COMPLETED)*
 - [x] **TASK-01-01:** Environment Baseline Validation (Laporan: `project-management/reviews/TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md` — *ACCEPTED*).
 - [x] **TASK-01-02:** Existing Project & Research Asset Inventory (Laporan: `project-management/reviews/TASK-01-02-ASSET-INVENTORY-REPORT.md`, Indeks: `project-management/inventory/ASSET-REGISTER.md` — *ACCEPTED*).
-- [x] **TASK-01-03:** Dependency and License Audit (Laporan: `project-management/reviews/TASK-01-03-DEPENDENCY-LICENSE-AUDIT.md`, Register: `project-management/inventory/LICENSE-REGISTER.md` — *ACCEPTED*).
-- [x] **TASK-01-04:** Security & Runtime Environment Audit (Laporan: `project-management/reviews/TASK-01-04-SECURITY-RUNTIME-AUDIT.md`, Threat Model: `project-management/security/THREAT-MODEL.md`, Baseline: `project-management/security/SECURITY-BASELINE.md` — *ACCEPTED*).
-- [x] **TASK-01-05:** Discovery Consolidation & Phase Acceptance (Laporan: `project-management/PHASE-01-ACCEPTANCE.md`, Fondasi: `project-management/engineering/` — *ACCEPTED*).
+- [x] **TASK-01-03:** Dependency and License Audit (Laporan: `project-management/reviews/TASK-01-03-DEPENDENCY-LICENSE-AUDIT.md`, Register: `project-management/inventory/LICENSE-REGISTER.md` — *QUALIFIED ACCEPTANCE*).
+- [x] **TASK-01-04:** Security & Runtime Environment Audit (Laporan: `project-management/reviews/TASK-01-04-SECURITY-RUNTIME-AUDIT.md`, Threat Model: `project-management/security/THREAT-MODEL.md`, Baseline: `project-management/security/SECURITY-BASELINE.md` — *QUALIFIED ACCEPTANCE*).
+- [x] **TASK-01-05:** Discovery Consolidation & Phase Acceptance (Laporan: `project-management/PHASE-01-ACCEPTANCE.md`, Fondasi: `project-management/engineering/` — *QUALIFIED ACCEPTANCE*).
 - [x] Penutupan formal Phase 01 via [`PHASE-01-ACCEPTANCE.md`](file:///x:/folder_ai/Hime/project-management/PHASE-01-ACCEPTANCE.md) (disetujui pengguna).
 
 ### Phase 02: Nusa Reverse Engineering *(RESEARCH COMPLETED — PENDING ACCEPTANCE)*

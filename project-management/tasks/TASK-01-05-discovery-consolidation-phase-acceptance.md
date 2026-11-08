@@ -10,12 +10,12 @@
 - **Priority:** CRITICAL
 - **Owner:** Senior Infrastructure Architect & Project Governance Specialist
 - **Reviewer:** Project Owner / User
-- **Status:** **ACCEPTED (Qualified Acceptance)**
+- **Status:** **QUALIFIED ACCEPTANCE**
 - **Dependencies:**
   - TASK-01-01 — Environment Baseline Validation (Accepted)
   - TASK-01-02 — Existing Project & Research Asset Inventory (Accepted)
-  - TASK-01-03 — Dependency and License Audit (Accepted)
-  - TASK-01-04 — Security & Runtime Environment Audit (Accepted)
+  - TASK-01-03 — Dependency and License Audit (Qualified Acceptance)
+  - TASK-01-04 — Security & Runtime Environment Audit (Qualified Acceptance)
 - **Commit Reference:** Pending Phase 01 Formal Closure Approval
 
 ---
@@ -55,7 +55,7 @@ Tugas ini menetapkan satu rujukan definitif yang merekonsiliasi keputusan teknis
 
 ## 4. Acceptance Criteria & Verification Matrix
 
-- [x] **AC-1 (Accepted Tasks Representation):** Keempat task sebelumnya (TASK-01-01 s/d TASK-01-04) direpresentasikan dengan status *Accepted* secara akurat dan konsisten.
+- [x] **AC-1 (Accepted Tasks Representation):** Keempat task sebelumnya direpresentasikan dengan status formal masing-masing (TASK-01-01 & 01-02: Accepted; TASK-01-03 & 01-04: Qualified Acceptance).
 - [x] **AC-2 (Engineering Foundation Package):** Dokumen kanonikal [`ENGINEERING-FOUNDATION.md`](file:///x:/folder_ai/Hime/project-management/engineering/ENGINEERING-FOUNDATION.md) diterbitkan, mencakup baseline hardware, runtime, aset, arsitektur, standar, dan batasan rekayasa.
 - [x] **AC-3 (Hardware Realism Preserved):** Nilai terukur (RAM bebas ~3.71 GB, Intel Core i5-8250U, Intel UHD Graphics 620) dibedakan secara tegas dari target alokasi memori dan estimasi kinerja. Pendekatan inferensi awal Cloud AI ditegaskan.
 - [x] **AC-4 (Asset & Dependency Rigor):** Batasan clean-room Nusa ditegaskan; dependensi Hermes dinyatakan sebagai `356 locked/resolved packages (direct + transitive)` dengan jumlah transitif murni `NOT SEPARATELY COUNTED`; ketiadaan lockfile pada 9Router dicatat transparan.

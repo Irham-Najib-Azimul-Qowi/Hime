@@ -15,11 +15,11 @@
 Phase 01 (Discovery & Technical Validation) telah menuntaskan seluruh investigasi penemuan teknis, audit empiris lingkungan host Windows 11, inventarisasi aset dan lisensi pihak ketiga, analisis batas-batas keamanan sistem (STRIDE Threat Model & SEC-01 s/d SEC-10), serta konsolidasi Paket Fondasi Rekayasa (*Engineering Foundation Package*) untuk ekosistem Hime Assistant.
 
 Seluruh 5 task dalam Phase 01 telah diselesaikan dengan bukti empiris (*evidence-first*):
-- **TASK-01-01 (Environment Baseline Validation):** Telah mendapatkan *Qualified Acceptance* dari Project Owner.
-- **TASK-01-02 (Existing Project & Research Asset Inventory):** Telah mendapatkan *Qualified Acceptance* dari Project Owner.
+- **TASK-01-01 (Environment Baseline Validation):** Telah mendapatkan penerimaan resmi (*Accepted*) dari Project Owner.
+- **TASK-01-02 (Existing Project & Research Asset Inventory):** Telah mendapatkan penerimaan resmi (*Accepted*) dari Project Owner.
 - **TASK-01-03 (Dependency and License Audit):** Telah mendapatkan *Qualified Acceptance* dari Project Owner.
 - **TASK-01-04 (Security & Runtime Environment Audit):** Telah mendapatkan *Qualified Acceptance* dari Project Owner.
-- **TASK-01-05 (Discovery Consolidation & Phase Acceptance):** Diselesaikan melalui penerbitan Paket Fondasi Rekayasa kanonikal dan laporan penutupan ini (**READY FOR USER ACCEPTANCE**).
+- **TASK-01-05 (Discovery Consolidation & Phase Acceptance):** Telah mendapatkan *Qualified Acceptance* dari Project Owner.
 
 Dengan tersusunnya seluruh artefak fondasi rekayasa dan register keputusan tata kelola, **Phase 01 resmi DITUTUP (COMPLETED)** setelah mendapatkan tanda tangan persetujuan (*formal sign-off*) dari Project Owner.
 
@@ -51,11 +51,11 @@ Berikut adalah audit lengkap terhadap 13 deliverable kanonikal yang dihasilkan s
 
 | Task ID | Judul Task | Penanggung Jawab | Status Akhir | Keterangan Verifikasi |
 |:---:|:---|:---:|:---:|:---|
-| **TASK-01-01** | Environment Baseline Validation | Senior Infrastructure Architect | **ACCEPTED** | Disetujui Project Owner via *Qualified Acceptance*. |
-| **TASK-01-02** | Existing Project & Research Asset Inventory | Repository Specialist | **ACCEPTED** | Disetujui Project Owner via *Qualified Acceptance*. |
-| **TASK-01-03** | Dependency and License Audit | Compliance Specialist | **ACCEPTED** | Disetujui Project Owner via *Qualified Acceptance*. |
-| **TASK-01-04** | Security & Runtime Environment Audit | Senior Security Architect | **ACCEPTED** | Disetujui Project Owner via *Qualified Acceptance*. |
-| **TASK-01-05** | Discovery Consolidation & Phase Acceptance | System Architect & Governance Lead | **ACCEPTED** | Paket Fondasi Rekayasa lengkap; disetujui Project Owner. |
+| **TASK-01-01** | Environment Baseline Validation | Senior Infrastructure Architect | **ACCEPTED** | Disetujui Project Owner (*Accepted*). |
+| **TASK-01-02** | Existing Project & Research Asset Inventory | Repository Specialist | **ACCEPTED** | Disetujui Project Owner (*Accepted*). |
+| **TASK-01-03** | Dependency and License Audit | Compliance Specialist | **QUALIFIED ACCEPTANCE** | Disetujui Project Owner (*Qualified Acceptance*). |
+| **TASK-01-04** | Security & Runtime Environment Audit | Senior Security Architect | **QUALIFIED ACCEPTANCE** | Disetujui Project Owner (*Qualified Acceptance*). |
+| **TASK-01-05** | Discovery Consolidation & Phase Acceptance | System Architect & Governance Lead | **QUALIFIED ACCEPTANCE** | Disetujui Project Owner (*Qualified Acceptance*). |
 
 ---
 
@@ -127,7 +127,7 @@ Seluruh keputusan teknis, arsitektural, dan risiko residu telah dikonsolidasikan
 
 | Kriteria Penyelesaian Phase 01 | Status Evaluasi | Bukti Artefak Pendukung |
 |:---|:---:|:---|
-| Seluruh 5 task Phase 01 diselesaikan secara berurutan dan berbasis bukti | **TERPENUHI** | TASK-01-01 s/d 01-04 Accepted; TASK-01-05 Ready for Acceptance. |
+| Seluruh 5 task Phase 01 diselesaikan secara berurutan dan berbasis bukti | **TERPENUHI** | TASK-01-01 & 01-02 Accepted; TASK-01-03 s/d 01-05 Qualified Acceptance. |
 | Lingkungan host Windows 11 diinspeksi secara empiris tanpa asumsi | **TERPENUHI** | Laporan TASK-01-01 (`TASK-01-01-ENVIRONMENT-BASELINE-REPORT.md`). |
 | Inventaris seluruh aset proyek dan riset tercatat dalam register kanonikal | **TERPENUHI** | Register Aset (`ASSET-REGISTER.md`) & Laporan TASK-01-02. |
 | Audit dependensi dan lisensi pihak ketiga tuntas dengan dekomposisi ketat | **TERPENUHI** | Register Lisensi (`LICENSE-REGISTER.md`) & Laporan TASK-01-03. |
@@ -143,7 +143,7 @@ Seluruh keputusan teknis, arsitektural, dan risiko residu telah dikonsolidasikan
 ## 8. Formal Recommendation & Closure of Phase 01
 
 Berdasarkan pemenuhan 100% kriteria penerimaan:
-1. **TASK-01-05 resmi berstatus DITERIMA (`ACCEPTED`)**.
+1. **TASK-01-05 resmi berstatus DITERIMA DENGAN KUALIFIKASI (`QUALIFIED ACCEPTANCE`)**.
 2. **Phase 01 (Discovery & Technical Validation) resmi DITUTUP (`COMPLETED`)** atas persetujuan Project Owner pada TASK-01-06.
 3. Seluruh dokumentasi penemuan, batasan arsitektur, baseline keamanan, dan peta jalan implementasi dikomit ke repositori lokal Git dengan pesan:
    `docs(discovery): complete phase 01 discovery and engineering foundation`
@@ -156,7 +156,7 @@ Berdasarkan pemenuhan 100% kriteria penerimaan:
 *(Bagian ini akan diisi dan disahkan oleh Project Owner pada saat persetujuan resmi diberikan)*
 
 **Pernyataan Persetujuan (*Sign-off Statement*):**
-*Dengan ini diverifikasi bahwa seluruh hasil pekerjaan, deliverables, dan kriteria penerimaan untuk Phase 01 (Discovery & Technical Validation) telah ditinjau dan disetujui. Task TASK-01-05 resmi diterima (ACCEPTED), Phase 01 resmi ditutup (COMPLETED), dan tim diizinkan untuk memproses penutupan formal Phase 02/03 serta mempersiapkan Phase 04.*
+*Dengan ini diverifikasi bahwa seluruh hasil pekerjaan, deliverables, dan kriteria penerimaan untuk Phase 01 (Discovery & Technical Validation) telah ditinjau dan disetujui (TASK-01-01 & TASK-01-02: Accepted; TASK-01-03, TASK-01-04, TASK-01-05: Qualified Acceptance). Phase 01 resmi ditutup (COMPLETED), dan tim diizinkan untuk memproses penutupan formal Phase 02/03 serta mempersiapkan Phase 04.*
 
 - **Sign-off Authority:** Project Owner (Pengguna)
 - **Status Otorisasi:** Disetujui melalui instruksi penutupan Phase 01 (TASK-01-06)
