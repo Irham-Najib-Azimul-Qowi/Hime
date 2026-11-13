@@ -66,3 +66,4 @@ Hime queries device security posture exclusively through official platform APIs:
 - Screen time tracking utilizes `UsageStatsManager.queryUsageStats()`.
 - Access requires user authorization via `Settings.ACTION_USAGE_ACCESS_SETTINGS`.
 - Usage telemetry remains 100% on-device; only aggregate distraction counts are shared with Hime Core for schedule nudging according to the chosen strictness mode (*Relaxed*, *Balanced*, or *Strict*).
+

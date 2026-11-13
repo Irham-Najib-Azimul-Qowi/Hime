@@ -1,4 +1,15 @@
 export type ThemeMode = 'dark' | 'light';
 export type IslandPresentationMode = 'integrated' | 'floating';
-export type DesktopView = 'overview' | 'assistant' | 'activity' | 'tasks' | 'storage' | 'devices' | 'notifications' | 'settings';
+export type DesktopView =
+  | 'overview'
+  | 'assistant'
+  | 'activity'
+  | 'tasks'
+  | 'productivity'
+  | 'documents'
+  | 'storage'
+  | 'devices'
+  | 'notifications'
+  | 'settings';
+
 

@@ -5,13 +5,13 @@
 
 ## 1. POSISI SAAT INI
 
-- **Fase Aktif:** **Phase 12 — Productivity & Documents** (Kanban, Local Workspace Documents, Markdown Parsing & Editor, PDF Ingestion, Agenda Sync)
-- **Status Phase 11:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
-- **Tugas Berjalan:** Penutupan formal Phase 11 (Mobile & Device Layer) dan inisialisasi **Phase 12 (Productivity & Documents)**
-- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-12-PRODUCTIVITY-AND-DOCUMENTS.md` untuk persiapan arsitektur Productivity & Document Workspace.
+- **Fase Aktif:** **Phase 13 — Browser and Developer Workspace**
+- **Status Phase 12:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
+- **Tugas Berjalan:** Penutupan formal Phase 12 (Productivity & Documents) dan inisialisasi **Phase 13 (Browser and Developer Workspace)**
+- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-13-BROWSER-AND-DEVELOPER-WORKSPACE.md` untuk persiapan arsitektur Browser Automation & Developer Workspace.
 - **Cara Melanjutkan Setelah Sesi Terputus:**
-  1. Jalankan `powershell -File scripts/test.ps1` untuk memverifikasi seluruh 97 test lulus 100%.
-  2. Buat branch `phase/12-productivity-documents` dari commit Phase 11 dan lanjutkan eksekusi Fase 12.
+  1. Jalankan `powershell -File scripts/test.ps1` untuk memverifikasi seluruh 102 test lulus 100%.
+  2. Buat branch `phase/13-browser-dev-workspace` dari commit Phase 12 dan lanjutkan eksekusi Fase 13.
 
 ---
 
@@ -31,8 +31,8 @@
 | **Phase 09** | Hime Intelligence Core | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-09-COMPLETION-REPORT.md` | Policy L0–L4, Tool Gateway, Task Engine, Event Buffer, Memory Token Budget, Island Translation, 76 tests. |
 | **Phase 10** | Storage Intelligence | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-10-COMPLETION-REPORT.md` | Indexer, Storage Analyzer, Duplicates/Versions, Smart Organizer, Download Intelligence, Safe Ops (Staging, Hime Recycle, 1-Click Restore), 89 tests. |
 | **Phase 11** | Hime Mobile & Device Layer | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-11-COMPLETION-REPORT.md` | Android Kotlin Compose (`apps/mobile/`), mTLS Local CA, QR anti-replay pairing, remote approvals (UR-02/04), posture audit (UR-12), chunked SHA-256 transfer, 97 tests. |
-| **Phase 12** | Productivity & Documents | `READY TO START` | — | Kanban accountability, pengingat HP/desktop, DOCX/XLSX/PDF. |
-| **Phase 13** | Browser & Developer Workspace | `PLANNED` | — | Playwright browser profile Hime, GitHub/Drive integration. |
+| **Phase 12** | Productivity & Documents | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-12-COMPLETION-REPORT.md` | Kanban accountability, pengingat HP/desktop, DOCX/HTML report generation, Academic ID template (TNR 12, margin 4-3-3-3), PDF merge, Artcraft discovery, 102 tests. |
+| **Phase 13** | Browser & Developer Workspace | `READY TO START` | — | Playwright browser profile Hime, GitHub/Drive integration, sandboxed developer terminal. |
 | **Phase 14** | Specialist Agents & Skills | `PLANNED` | — | Registri specialist agent, quality bar, anti-loop. |
 | **Phase 15** | Hardening, Release & Linux | `PLANNED` | — | MSIX installer, benchmark resource, Linux beta. |
 

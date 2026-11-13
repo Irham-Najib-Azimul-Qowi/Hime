@@ -37,3 +37,4 @@ export interface FileTransfer {
   started_at: number;
   completed_at?: number;
 }
+

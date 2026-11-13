@@ -429,6 +429,102 @@ impl ToolGateway {
                 idempotent: false,
                 timeout_ms: 5000,
             },
+            ToolDefinition {
+                id: "productivity.tasks_create".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "Create a structured task in Kanban workspace from natural language or parameters".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "priority": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                        "due_date": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "productivity.tasks_list".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "List active tasks and backlog items from Kanban workspace".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "productivity.accountability_mode".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "Inspect or configure the user's accountability strictness mode (relaxed, balanced, strict)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["relaxed", "balanced", "strict"] }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "documents.create_report".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Generate structured academic or business report documents (Akademik-ID TNR 12/1.5 or Modern)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["title", "markdown_body", "destination_path"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "markdown_body": { "type": "string" },
+                        "template_name": { "type": "string" },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "documents.merge_pdfs".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Merge multiple PDF documents into a unified output file".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_paths", "destination_path"],
+                    "properties": {
+                        "source_paths": { "type": "array", "items": { "type": "string" } },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "documents.artcraft_discover".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Discover local ArtCraft / WordCraft / FigCraft availability and interchange integration".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
         ]
     }
 
@@ -894,6 +990,78 @@ impl ToolGateway {
                     "file_name": file_name,
                     "existing_transfer": matched,
                 }))
+            }
+
+            "productivity.tasks_create" => {
+                let title = params["title"].as_str().ok_or("Missing required field 'title'")?;
+                let desc = params.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let priority = params.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+                let due_date = params.get("due_date").and_then(|v| v.as_i64());
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                let task_id = format!("ptask-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let task = hime_storage::ProductivityTaskRecord {
+                    id: task_id,
+                    board_id: "board-default".to_string(),
+                    column_id: "col-todo".to_string(),
+                    title: title.to_string(),
+                    description: desc,
+                    priority: priority.to_string(),
+                    status: "todo".to_string(),
+                    due_date,
+                    estimated_minutes: None,
+                    actual_minutes: None,
+                    labels: None,
+                    parent_task_id: None,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                };
+                self.storage.create_productivity_task(&task).map_err(|e| e.to_string())?;
+                serde_json::to_value(&task).map_err(|e| e.to_string())
+            }
+
+            "productivity.tasks_list" => {
+                let tasks = self.storage.list_productivity_tasks("board-default").map_err(|e| e.to_string())?;
+                serde_json::to_value(&tasks).map_err(|e| e.to_string())
+            }
+
+            "productivity.accountability_mode" => {
+                if let Some(mode) = params.get("mode").and_then(|v| v.as_str()) {
+                    let mut settings = self.storage.get_accountability_settings().map_err(|e| e.to_string())?;
+                    settings.mode = mode.to_string();
+                    self.storage.set_accountability_settings(&settings).map_err(|e| e.to_string())?;
+                    serde_json::to_value(&settings).map_err(|e| e.to_string())
+                } else {
+                    let settings = self.storage.get_accountability_settings().map_err(|e| e.to_string())?;
+                    serde_json::to_value(&settings).map_err(|e| e.to_string())
+                }
+            }
+
+            "documents.create_report" => {
+                let title = params["title"].as_str().ok_or("Missing required field 'title'")?;
+                let body = params["markdown_body"].as_str().ok_or("Missing required field 'markdown_body'")?;
+                let dest = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let res = crate::documents::DocumentOperations::create_report(std::path::Path::new(dest), title, body, None).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "documents.merge_pdfs" => {
+                let dest = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let sources = params["source_paths"]
+                    .as_array()
+                    .ok_or("Missing required array 'source_paths'")?
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>();
+                let res = crate::documents::DocumentOperations::merge_documents(&sources, std::path::Path::new(dest)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "documents.artcraft_discover" => {
+                let disc = crate::documents::ArtcraftAdapter::discover();
+                serde_json::to_value(&disc).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("Unknown tool handler '{}'", tool_id)),

@@ -30,6 +30,8 @@ pub struct CoreServer {
     pub ai: Arc<AiOrchestrator>,
     pub storage_engine: Arc<crate::storage::StorageEngine>,
     pub device_manager: Arc<crate::device::DeviceManager>,
+    pub productivity_engine: Arc<crate::productivity::ProductivityEngine>,
+    pub document_engine: Arc<crate::documents::DocumentEngine>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -104,6 +106,13 @@ impl CoreServer {
             ).expect("Failed to init device manager")
         }));
 
+        let productivity_engine = Arc::new(crate::productivity::ProductivityEngine::new(storage.clone()));
+        let document_engine = Arc::new(crate::documents::DocumentEngine::new(storage.clone(), &base_dir).unwrap_or_else(|_| {
+            let tmp = std::env::temp_dir().join(format!("hime_doc_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let _ = std::fs::create_dir_all(&tmp);
+            crate::documents::DocumentEngine::new(storage.clone(), &tmp).expect("Failed to init document engine")
+        }));
+
         Self {
             version: "0.1.0".to_string(),
             event_bus,
@@ -117,6 +126,8 @@ impl CoreServer {
             ai,
             storage_engine,
             device_manager,
+            productivity_engine,
+            document_engine,
         }
     }
 
@@ -1350,6 +1361,273 @@ impl CoreServer {
                     Ok(transfers) => JsonRpcResponse::success(req_id, serde_json::to_value(transfers).unwrap_or_default()),
                     Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
                 }
+            }
+
+            // --- Phase 12: Productivity, Accountability & Documents Endpoints ---
+
+            "productivity.kanban.board.get" => {
+                match self.productivity_engine.kanban.ensure_default_board() {
+                    Ok(board) => {
+                        let cols = self.storage.list_kanban_columns(&board.id).unwrap_or_default();
+                        JsonRpcResponse::success(req_id, serde_json::json!({
+                            "board": board,
+                            "columns": cols,
+                        }))
+                    }
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.kanban.columns.list" => {
+                let params = req.params.unwrap_or_default();
+                let board_id = params.get("board_id").and_then(|v| v.as_str()).unwrap_or("board-default");
+                match self.storage.list_kanban_columns(board_id) {
+                    Ok(cols) => JsonRpcResponse::success(req_id, serde_json::to_value(cols).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.tasks.create" => {
+                let params = req.params.unwrap_or_default();
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("New Task");
+                let board_id = params.get("board_id").and_then(|v| v.as_str()).unwrap_or("board-default");
+                let column_id = params.get("column_id").and_then(|v| v.as_str()).unwrap_or("col-todo");
+                let priority = params.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+                let description = params.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let due_date = params.get("due_date").and_then(|v| v.as_i64());
+                let est_min = params.get("estimated_minutes").and_then(|v| v.as_i64());
+                let labels = params.get("labels").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                let task_id = format!("ptask-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let task = hime_storage::ProductivityTaskRecord {
+                    id: task_id,
+                    board_id: board_id.to_string(),
+                    column_id: column_id.to_string(),
+                    title: title.to_string(),
+                    description,
+                    priority: priority.to_string(),
+                    status: "todo".to_string(),
+                    due_date,
+                    estimated_minutes: est_min,
+                    actual_minutes: None,
+                    labels,
+                    parent_task_id: None,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                };
+
+                match self.storage.create_productivity_task(&task) {
+                    Ok(()) => JsonRpcResponse::success(req_id, serde_json::to_value(task).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.tasks.list" => {
+                let params = req.params.unwrap_or_default();
+                let board_id = params.get("board_id").and_then(|v| v.as_str()).unwrap_or("board-default");
+                match self.storage.list_productivity_tasks(board_id) {
+                    Ok(tasks) => JsonRpcResponse::success(req_id, serde_json::to_value(tasks).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.tasks.move" => {
+                let params = req.params.unwrap_or_default();
+                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                let column_id = params.get("column_id").and_then(|v| v.as_str()).unwrap_or("");
+                let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("in_progress");
+
+                match self.storage.update_productivity_task_column(task_id, column_id, status) {
+                    Ok(updated) => JsonRpcResponse::success(req_id, serde_json::json!({ "task_id": task_id, "updated": updated })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.tasks.parse_natural" => {
+                let params = req.params.unwrap_or_default();
+                let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let (title, priority, due_date) = self.productivity_engine.kanban.parse_task_natural_language(text);
+                JsonRpcResponse::success(req_id, serde_json::json!({
+                    "title": title,
+                    "priority": priority,
+                    "due_date": due_date
+                }))
+            }
+
+            "productivity.tasks.subtasks_propose" => {
+                let params = req.params.unwrap_or_default();
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let subtasks = self.productivity_engine.kanban.propose_subtasks(title);
+                let list: Vec<serde_json::Value> = subtasks
+                    .into_iter()
+                    .map(|(t, m)| serde_json::json!({ "title": t, "estimated_minutes": m }))
+                    .collect();
+                JsonRpcResponse::success(req_id, serde_json::Value::Array(list))
+            }
+
+            "productivity.schedules.plan" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("sched-new");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("Study Session");
+                let subject = params.get("subject").and_then(|v| v.as_str()).unwrap_or("General");
+                let start = params.get("desired_start").and_then(|v| v.as_i64()).unwrap_or(0);
+                let duration = params.get("duration_minutes").and_then(|v| v.as_i64()).unwrap_or(60);
+                let priority = params.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+
+                match self.productivity_engine.scheduler.plan_study_session(id, title, subject, start, duration, priority) {
+                    Ok(sched) => JsonRpcResponse::success(req_id, serde_json::to_value(sched).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.schedules.list" => {
+                match self.storage.list_study_schedules() {
+                    Ok(scheds) => JsonRpcResponse::success(req_id, serde_json::to_value(scheds).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.schedules.reschedule" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let new_start = params.get("new_start").and_then(|v| v.as_i64()).unwrap_or(0);
+                let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("User rescheduled");
+
+                match self.productivity_engine.scheduler.reschedule_session(id, new_start, reason) {
+                    Ok(sched) => JsonRpcResponse::success(req_id, serde_json::to_value(sched).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.accountability.get" => {
+                match self.productivity_engine.accountability.get_settings() {
+                    Ok(settings) => JsonRpcResponse::success(req_id, serde_json::to_value(settings).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.accountability.set_mode" => {
+                let params = req.params.unwrap_or_default();
+                let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("balanced");
+                match self.productivity_engine.accountability.set_mode(mode) {
+                    Ok(settings) => JsonRpcResponse::success(req_id, serde_json::to_value(settings).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.accountability.checkin" => {
+                let params = req.params.unwrap_or_default();
+                let count = params.get("pending_critical_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                match self.productivity_engine.accountability.generate_startup_checkin(count) {
+                    Ok(greeting) => JsonRpcResponse::success(req_id, serde_json::to_value(greeting).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.screentime.record" => {
+                let params = req.params.unwrap_or_default();
+                let app = params.get("app_name").and_then(|v| v.as_str()).unwrap_or("App");
+                let title = params.get("window_title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let category = params.get("category").and_then(|v| v.as_str()).unwrap_or("productive");
+                let duration = params.get("duration_secs").and_then(|v| v.as_i64()).unwrap_or(0);
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                let sid = format!("st-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let session = hime_storage::ScreenTimeSessionRecord {
+                    id: sid,
+                    app_name: app.to_string(),
+                    window_title: title,
+                    category: category.to_string(),
+                    duration_secs: duration,
+                    timestamp: now,
+                };
+
+                match self.storage.record_screen_time_session(&session) {
+                    Ok(()) => JsonRpcResponse::success(req_id, serde_json::json!({ "recorded": true })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.screentime.list" => {
+                let params = req.params.unwrap_or_default();
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                match self.storage.list_screen_time_sessions(limit) {
+                    Ok(sessions) => JsonRpcResponse::success(req_id, serde_json::to_value(sessions).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.screentime.clear" => {
+                match self.storage.clear_screen_time_sessions() {
+                    Ok(deleted) => JsonRpcResponse::success(req_id, serde_json::json!({ "deleted_count": deleted })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "productivity.screentime.nudge" => {
+                let params = req.params.unwrap_or_default();
+                let urgent_task = params.get("urgent_task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let sessions = self.storage.list_screen_time_sessions(20).unwrap_or_default();
+                match self.productivity_engine.accountability.evaluate_distraction_nudge(&sessions, urgent_task) {
+                    Ok(nudge) => JsonRpcResponse::success(req_id, serde_json::to_value(nudge).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "documents.create_report" => {
+                let params = req.params.unwrap_or_default();
+                let job_id = params.get("job_id").and_then(|v| v.as_str()).unwrap_or("job-new");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("Report");
+                let body = params.get("markdown_body").and_then(|v| v.as_str()).unwrap_or("");
+                let tmpl = params.get("template_name").and_then(|v| v.as_str()).unwrap_or("Akademik-ID");
+                let dest = params.get("destination_path").and_then(|v| v.as_str()).unwrap_or("output.html");
+
+                match self.document_engine.service.create_report_job(job_id, title, body, tmpl, std::path::Path::new(dest)).await {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "documents.merge_pdfs" => {
+                let params = req.params.unwrap_or_default();
+                let job_id = params.get("job_id").and_then(|v| v.as_str()).unwrap_or("merge-job");
+                let dest = params.get("destination_path").and_then(|v| v.as_str()).unwrap_or("merged.pdf");
+                let sources = params.get("source_paths")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|p| p.as_str()).map(std::path::PathBuf::from).collect::<Vec<_>>())
+                    .unwrap_or_default();
+
+                match self.document_engine.service.merge_pdfs_job(job_id, &sources, std::path::Path::new(dest)).await {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "documents.compress" => {
+                let params = req.params.unwrap_or_default();
+                let job_id = params.get("job_id").and_then(|v| v.as_str()).unwrap_or("compress-job");
+                let src = params.get("source_path").and_then(|v| v.as_str()).unwrap_or("");
+                let dest = params.get("destination_path").and_then(|v| v.as_str()).unwrap_or("");
+
+                match self.document_engine.service.compress_job(job_id, std::path::Path::new(src), std::path::Path::new(dest)).await {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "documents.jobs.list" => {
+                match self.storage.list_document_jobs() {
+                    Ok(jobs) => JsonRpcResponse::success(req_id, serde_json::to_value(jobs).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "documents.artcraft.discover" => {
+                let disc = crate::documents::ArtcraftAdapter::discover();
+                JsonRpcResponse::success(req_id, serde_json::to_value(disc).unwrap_or_default())
             }
 
             other => JsonRpcResponse::error(

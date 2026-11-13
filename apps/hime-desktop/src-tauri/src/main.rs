@@ -6,13 +6,19 @@ use tracing::info;
 use hime_desktop::{
     cancel_conversation_logic, cancel_task_logic, create_conversation_logic, create_task_logic,
     devices_list_logic, devices_pairing_start_logic, devices_revoke_logic, devices_storage_get_logic,
-    devices_transfers_list_logic, execute_tool_logic, get_activity_events_logic, get_ai_models_logic,
-    get_ai_status_logic, get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
-    list_conversations_logic, list_credentials_logic, ping_core_logic, resolve_approval_logic,
-    send_conversation_message_logic, storage_get_analysis_logic, storage_get_duplicates_logic,
-    storage_get_operations_logic, storage_get_rules_logic, storage_restore_operation_logic,
-    storage_scan_logic, storage_search_logic, storage_toggle_rule_logic, store_credential_logic,
-    PingResult,
+    devices_transfers_list_logic, documents_artcraft_discover_logic, documents_create_report_logic,
+    documents_jobs_list_logic, documents_merge_pdfs_logic, execute_tool_logic,
+    get_activity_events_logic, get_ai_models_logic, get_ai_status_logic,
+    get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
+    kanban_board_get_logic, kanban_columns_list_logic, list_conversations_logic,
+    list_credentials_logic, ping_core_logic, productivity_accountability_checkin_logic,
+    productivity_accountability_get_logic, productivity_accountability_set_mode_logic,
+    productivity_schedules_list_logic, productivity_schedules_plan_logic,
+    productivity_tasks_create_logic, productivity_tasks_list_logic, productivity_tasks_move_logic,
+    productivity_tasks_parse_natural_logic, resolve_approval_logic, send_conversation_message_logic,
+    storage_get_analysis_logic, storage_get_duplicates_logic, storage_get_operations_logic,
+    storage_get_rules_logic, storage_restore_operation_logic, storage_scan_logic,
+    storage_search_logic, storage_toggle_rule_logic, store_credential_logic, PingResult,
 };
 #[cfg(windows)]
 use hime_ipc::transport::windows_pipe::DEFAULT_HIME_PIPE;
@@ -460,6 +466,274 @@ async fn devices_transfers_list(device_id: Option<String>) -> Result<Vec<serde_j
     }
 }
 
+// =========================================================================
+// Phase 12 Commands
+// =========================================================================
+
+#[command]
+async fn kanban_board_get() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        kanban_board_get_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn kanban_columns_list(board_id: String) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        kanban_columns_list_logic(DEFAULT_HIME_PIPE, &board_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = board_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_tasks_create(
+    board_id: String,
+    column_id: String,
+    title: String,
+    description: Option<String>,
+    priority: Option<String>,
+    due_date: Option<i64>,
+    tags: Option<String>,
+    subtasks: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_tasks_create_logic(
+            DEFAULT_HIME_PIPE,
+            &board_id,
+            &column_id,
+            &title,
+            description.as_deref(),
+            priority.as_deref(),
+            due_date,
+            tags.as_deref(),
+            subtasks.as_deref(),
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (board_id, column_id, title, description, priority, due_date, tags, subtasks);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_tasks_list(
+    board_id: Option<String>,
+    column_id: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        productivity_tasks_list_logic(
+            DEFAULT_HIME_PIPE,
+            board_id.as_deref(),
+            column_id.as_deref(),
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (board_id, column_id);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_tasks_move(id: String, column_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_tasks_move_logic(DEFAULT_HIME_PIPE, &id, &column_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, column_id);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_tasks_parse_natural(text: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_tasks_parse_natural_logic(DEFAULT_HIME_PIPE, &text).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_schedules_plan(
+    title: String,
+    subject: String,
+    start_time: i64,
+    duration_minutes: i64,
+    priority: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_schedules_plan_logic(
+            DEFAULT_HIME_PIPE,
+            &title,
+            &subject,
+            start_time,
+            duration_minutes,
+            priority.as_deref(),
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (title, subject, start_time, duration_minutes, priority);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_schedules_list(is_completed: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        productivity_schedules_list_logic(DEFAULT_HIME_PIPE, is_completed).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = is_completed;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_accountability_get() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_accountability_get_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_accountability_set_mode(
+    mode: String,
+    opt_in_screen_time: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_accountability_set_mode_logic(
+            DEFAULT_HIME_PIPE,
+            &mode,
+            opt_in_screen_time,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (mode, opt_in_screen_time);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn productivity_accountability_checkin() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        productivity_accountability_checkin_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn documents_create_report(
+    template_id: String,
+    title: String,
+    author: String,
+    institution: Option<String>,
+    abstract_text: Option<String>,
+    sections: Vec<serde_json::Value>,
+    target_format: Option<String>,
+    output_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        documents_create_report_logic(
+            DEFAULT_HIME_PIPE,
+            &template_id,
+            &title,
+            &author,
+            institution.as_deref(),
+            abstract_text.as_deref(),
+            sections,
+            target_format.as_deref(),
+            output_path.as_deref(),
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (template_id, title, author, institution, abstract_text, sections, target_format, output_path);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn documents_merge_pdfs(
+    input_paths: Vec<String>,
+    output_path: Option<String>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        documents_merge_pdfs_logic(DEFAULT_HIME_PIPE, input_paths, output_path.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (input_paths, output_path);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn documents_jobs_list(limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        documents_jobs_list_logic(DEFAULT_HIME_PIPE, limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn documents_artcraft_discover() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        documents_artcraft_discover_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -493,6 +767,21 @@ fn main() {
             devices_revoke,
             devices_storage_get,
             devices_transfers_list,
+            kanban_board_get,
+            kanban_columns_list,
+            productivity_tasks_create,
+            productivity_tasks_list,
+            productivity_tasks_move,
+            productivity_tasks_parse_natural,
+            productivity_schedules_plan,
+            productivity_schedules_list,
+            productivity_accountability_get,
+            productivity_accountability_set_mode,
+            productivity_accountability_checkin,
+            documents_create_report,
+            documents_merge_pdfs,
+            documents_jobs_list,
+            documents_artcraft_discover,
             window_set_always_on_top,
             window_set_size_mode,
             window_minimize,

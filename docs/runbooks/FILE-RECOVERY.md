@@ -75,3 +75,4 @@ If the host machine experienced a sudden power loss or process kill during a fil
 - **Default Retention:** 30 days in Hime Recycle.
 - **Capacity Limits:** When Hime Recycle exceeds 10% of total disk space, Hime alerts the user via the Dynamic Island and Notification Center with a proposal to purge items older than 30 days.
 - **Explicit User Consent:** Automatic silent deletion is prohibited. The user must approve recycle purge operations.
+

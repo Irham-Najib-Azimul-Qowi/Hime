@@ -12,6 +12,9 @@ pub enum StorageError {
 
     #[error("Storage migration failed: {0}")]
     MigrationFailed(String),
+
+    #[error("Item not found: {0}")]
+    NotFound(String),
 }
 
 pub struct Database {
@@ -234,7 +237,86 @@ impl Database {
                 started_at INTEGER NOT NULL,
                 completed_at INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_transfers_device ON file_transfers(device_id);",
+            CREATE INDEX IF NOT EXISTS idx_transfers_device ON file_transfers(device_id);
+
+            -- Phase 12: Productivity, Accountability & Documents
+            CREATE TABLE IF NOT EXISTS kanban_boards (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS kanban_columns (
+                id TEXT PRIMARY KEY,
+                board_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                wip_limit INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_columns_board ON kanban_columns(board_id);
+
+            CREATE TABLE IF NOT EXISTS productivity_tasks (
+                id TEXT PRIMARY KEY,
+                board_id TEXT NOT NULL,
+                column_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                priority TEXT NOT NULL,
+                status TEXT NOT NULL,
+                due_date INTEGER,
+                estimated_minutes INTEGER,
+                actual_minutes INTEGER,
+                labels TEXT,
+                parent_task_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_prod_tasks_board ON productivity_tasks(board_id);
+            CREATE INDEX IF NOT EXISTS idx_prod_tasks_column ON productivity_tasks(column_id);
+
+            CREATE TABLE IF NOT EXISTS study_schedules (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                start_time INTEGER NOT NULL,
+                end_time INTEGER NOT NULL,
+                priority TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rescheduled_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_schedules_start ON study_schedules(start_time);
+
+            CREATE TABLE IF NOT EXISTS accountability_settings (
+                id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                screen_time_opt_in INTEGER NOT NULL,
+                last_checkin_at INTEGER,
+                daily_reflection_notes TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS screen_time_sessions (
+                id TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                window_title TEXT,
+                category TEXT NOT NULL,
+                duration_secs INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_screen_time_timestamp ON screen_time_sessions(timestamp);
+
+            CREATE TABLE IF NOT EXISTS document_jobs (
+                id TEXT PRIMARY KEY,
+                operation TEXT NOT NULL,
+                source_path TEXT,
+                target_path TEXT,
+                status TEXT NOT NULL,
+                format TEXT NOT NULL,
+                metadata TEXT,
+                created_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );",
         )?;
 
         // Ensure backward compatibility if audit_events already existed without hash columns
@@ -1633,6 +1715,211 @@ impl Database {
 
         Ok(items)
     }
+
+    // --- Phase 12: Productivity, Accountability & Documents ---
+
+    pub fn create_kanban_board(&self, board: &KanbanBoardRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_boards (id, title, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET title = ?2, description = ?3, updated_at = ?5",
+            rusqlite::params![board.id, board.title, board.description, board.created_at, board.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_kanban_boards(&self) -> Result<Vec<KanbanBoardRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, title, description, created_at, updated_at FROM kanban_boards ORDER BY updated_at DESC")?;
+        let rows = stmt.query_map([], map_kanban_board)?;
+        let mut boards = Vec::new();
+        for b in rows {
+            boards.push(b?);
+        }
+        Ok(boards)
+    }
+
+    pub fn get_kanban_board(&self, board_id: &str) -> Result<Option<KanbanBoardRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, title, description, created_at, updated_at FROM kanban_boards WHERE id = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![board_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_kanban_board(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn create_kanban_column(&self, col: &KanbanColumnRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_columns (id, board_id, title, position, wip_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET title = ?3, position = ?4, wip_limit = ?5",
+            rusqlite::params![col.id, col.board_id, col.title, col.position, col.wip_limit],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_kanban_columns(&self, board_id: &str) -> Result<Vec<KanbanColumnRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, board_id, title, position, wip_limit FROM kanban_columns WHERE board_id = ?1 ORDER BY position ASC")?;
+        let rows = stmt.query_map(rusqlite::params![board_id], map_kanban_column)?;
+        let mut cols = Vec::new();
+        for c in rows {
+            cols.push(c?);
+        }
+        Ok(cols)
+    }
+
+    pub fn create_productivity_task(&self, task: &ProductivityTaskRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO productivity_tasks (id, board_id, column_id, title, description, priority, status, due_date, estimated_minutes, actual_minutes, labels, parent_task_id, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(id) DO UPDATE SET
+                column_id = ?3, title = ?4, description = ?5, priority = ?6, status = ?7, due_date = ?8,
+                estimated_minutes = ?9, actual_minutes = ?10, labels = ?11, parent_task_id = ?12, updated_at = ?14, completed_at = ?15",
+            rusqlite::params![
+                task.id, task.board_id, task.column_id, task.title, task.description, task.priority,
+                task.status, task.due_date, task.estimated_minutes, task.actual_minutes, task.labels,
+                task.parent_task_id, task.created_at, task.updated_at, task.completed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_productivity_tasks(&self, board_id: &str) -> Result<Vec<ProductivityTaskRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, board_id, column_id, title, description, priority, status, due_date, estimated_minutes, actual_minutes, labels, parent_task_id, created_at, updated_at, completed_at
+             FROM productivity_tasks WHERE board_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![board_id], map_productivity_task)?;
+        let mut tasks = Vec::new();
+        for t in rows {
+            tasks.push(t?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn update_productivity_task_column(&self, task_id: &str, column_id: &str, status: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let completed_at = if status == "done" { Some(now) } else { None };
+        let rows = conn.execute(
+            "UPDATE productivity_tasks SET column_id = ?2, status = ?3, updated_at = ?4, completed_at = COALESCE(?5, completed_at) WHERE id = ?1",
+            rusqlite::params![task_id, column_id, status, now, completed_at],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn create_study_schedule(&self, schedule: &StudyScheduleRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO study_schedules (id, title, subject, start_time, end_time, priority, status, rescheduled_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET title = ?2, subject = ?3, start_time = ?4, end_time = ?5, priority = ?6, status = ?7, rescheduled_reason = ?8",
+            rusqlite::params![
+                schedule.id, schedule.title, schedule.subject, schedule.start_time, schedule.end_time,
+                schedule.priority, schedule.status, schedule.rescheduled_reason
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_study_schedules(&self) -> Result<Vec<StudyScheduleRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, subject, start_time, end_time, priority, status, rescheduled_reason
+             FROM study_schedules ORDER BY start_time ASC",
+        )?;
+        let rows = stmt.query_map([], map_study_schedule)?;
+        let mut schedules = Vec::new();
+        for s in rows {
+            schedules.push(s?);
+        }
+        Ok(schedules)
+    }
+
+    pub fn get_accountability_settings(&self) -> Result<AccountabilitySettingsRecord, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, mode, screen_time_opt_in, last_checkin_at, daily_reflection_notes FROM accountability_settings WHERE id = 'default'")?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(map_accountability_settings(row)?)
+        } else {
+            Ok(AccountabilitySettingsRecord {
+                id: "default".to_string(),
+                mode: "balanced".to_string(),
+                screen_time_opt_in: false,
+                last_checkin_at: None,
+                daily_reflection_notes: None,
+            })
+        }
+    }
+
+    pub fn set_accountability_settings(&self, settings: &AccountabilitySettingsRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let opt_in = if settings.screen_time_opt_in { 1 } else { 0 };
+        conn.execute(
+            "INSERT INTO accountability_settings (id, mode, screen_time_opt_in, last_checkin_at, daily_reflection_notes)
+             VALUES ('default', ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET mode = ?1, screen_time_opt_in = ?2, last_checkin_at = ?3, daily_reflection_notes = ?4",
+            rusqlite::params![settings.mode, opt_in, settings.last_checkin_at, settings.daily_reflection_notes],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_screen_time_session(&self, session: &ScreenTimeSessionRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO screen_time_sessions (id, app_name, window_title, category, duration_secs, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![session.id, session.app_name, session.window_title, session.category, session.duration_secs, session.timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_screen_time_sessions(&self, limit: usize) -> Result<Vec<ScreenTimeSessionRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, app_name, window_title, category, duration_secs, timestamp FROM screen_time_sessions ORDER BY timestamp DESC LIMIT ?1")?;
+        let rows = stmt.query_map(rusqlite::params![limit], map_screen_time_session)?;
+        let mut sessions = Vec::new();
+        for s in rows {
+            sessions.push(s?);
+        }
+        Ok(sessions)
+    }
+
+    pub fn clear_screen_time_sessions(&self) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute("DELETE FROM screen_time_sessions", [])?;
+        Ok(count)
+    }
+
+    pub fn create_document_job(&self, job: &DocumentJobRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO document_jobs (id, operation, source_path, target_path, status, format, metadata, created_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET status = ?5, target_path = ?4, metadata = ?7, completed_at = ?9",
+            rusqlite::params![job.id, job.operation, job.source_path, job.target_path, job.status, job.format, job.metadata, job.created_at, job.completed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_document_jobs(&self) -> Result<Vec<DocumentJobRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id, operation, source_path, target_path, status, format, metadata, created_at, completed_at FROM document_jobs ORDER BY created_at DESC LIMIT 50")?;
+        let rows = stmt.query_map([], map_document_job)?;
+        let mut jobs = Vec::new();
+        for j in rows {
+            jobs.push(j?);
+        }
+        Ok(jobs)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1956,6 +2243,178 @@ fn map_file_transfer(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileTransferRe
         sha256: row.get(7)?,
         started_at: row.get(8)?,
         completed_at: row.get(9)?,
+    })
+}
+
+// --- Phase 12: Productivity, Accountability & Documents Records ---
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct KanbanBoardRecord {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_kanban_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanBoardRecord> {
+    Ok(KanbanBoardRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct KanbanColumnRecord {
+    pub id: String,
+    pub board_id: String,
+    pub title: String,
+    pub position: i64,
+    pub wip_limit: Option<i64>,
+}
+
+fn map_kanban_column(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanColumnRecord> {
+    Ok(KanbanColumnRecord {
+        id: row.get(0)?,
+        board_id: row.get(1)?,
+        title: row.get(2)?,
+        position: row.get(3)?,
+        wip_limit: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProductivityTaskRecord {
+    pub id: String,
+    pub board_id: String,
+    pub column_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: String, // "low" | "medium" | "high" | "critical"
+    pub status: String,   // "todo" | "in_progress" | "review" | "done"
+    pub due_date: Option<i64>,
+    pub estimated_minutes: Option<i64>,
+    pub actual_minutes: Option<i64>,
+    pub labels: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+fn map_productivity_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProductivityTaskRecord> {
+    Ok(ProductivityTaskRecord {
+        id: row.get(0)?,
+        board_id: row.get(1)?,
+        column_id: row.get(2)?,
+        title: row.get(3)?,
+        description: row.get(4)?,
+        priority: row.get(5)?,
+        status: row.get(6)?,
+        due_date: row.get(7)?,
+        estimated_minutes: row.get(8)?,
+        actual_minutes: row.get(9)?,
+        labels: row.get(10)?,
+        parent_task_id: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+        completed_at: row.get(14)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StudyScheduleRecord {
+    pub id: String,
+    pub title: String,
+    pub subject: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub priority: String,
+    pub status: String,
+    pub rescheduled_reason: Option<String>,
+}
+
+fn map_study_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<StudyScheduleRecord> {
+    Ok(StudyScheduleRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        subject: row.get(2)?,
+        start_time: row.get(3)?,
+        end_time: row.get(4)?,
+        priority: row.get(5)?,
+        status: row.get(6)?,
+        rescheduled_reason: row.get(7)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AccountabilitySettingsRecord {
+    pub id: String,
+    pub mode: String, // "relaxed" | "balanced" | "strict"
+    pub screen_time_opt_in: bool,
+    pub last_checkin_at: Option<i64>,
+    pub daily_reflection_notes: Option<String>,
+}
+
+fn map_accountability_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountabilitySettingsRecord> {
+    let opt_in_int: i64 = row.get(2)?;
+    Ok(AccountabilitySettingsRecord {
+        id: row.get(0)?,
+        mode: row.get(1)?,
+        screen_time_opt_in: opt_in_int != 0,
+        last_checkin_at: row.get(3)?,
+        daily_reflection_notes: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ScreenTimeSessionRecord {
+    pub id: String,
+    pub app_name: String,
+    pub window_title: Option<String>,
+    pub category: String, // "productive" | "study" | "distracting"
+    pub duration_secs: i64,
+    pub timestamp: i64,
+}
+
+fn map_screen_time_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScreenTimeSessionRecord> {
+    Ok(ScreenTimeSessionRecord {
+        id: row.get(0)?,
+        app_name: row.get(1)?,
+        window_title: row.get(2)?,
+        category: row.get(3)?,
+        duration_secs: row.get(4)?,
+        timestamp: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DocumentJobRecord {
+    pub id: String,
+    pub operation: String,
+    pub source_path: Option<String>,
+    pub target_path: Option<String>,
+    pub status: String,
+    pub format: String,
+    pub metadata: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+fn map_document_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentJobRecord> {
+    Ok(DocumentJobRecord {
+        id: row.get(0)?,
+        operation: row.get(1)?,
+        source_path: row.get(2)?,
+        target_path: row.get(3)?,
+        status: row.get(4)?,
+        format: row.get(5)?,
+        metadata: row.get(6)?,
+        created_at: row.get(7)?,
+        completed_at: row.get(8)?,
     })
 }
 
@@ -2418,5 +2877,150 @@ mod tests {
         let updated = db.list_file_transfers(Some("dev-pixel-8")).unwrap();
         assert_eq!(updated[0].status, "completed");
         assert!(updated[0].completed_at.is_some());
+    }
+
+    #[test]
+    fn test_phase12_productivity_and_documents_storage() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Kanban Board & Columns
+        let board = KanbanBoardRecord {
+            id: "board-semester-1".to_string(),
+            title: "Academic & Personal Projects".to_string(),
+            description: Some("Tracking coursework and development".to_string()),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.create_kanban_board(&board).unwrap();
+
+        let boards = db.list_kanban_boards().unwrap();
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].id, "board-semester-1");
+
+        let col_todo = KanbanColumnRecord {
+            id: "col-todo".to_string(),
+            board_id: "board-semester-1".to_string(),
+            title: "To Do".to_string(),
+            position: 1,
+            wip_limit: None,
+        };
+        let col_done = KanbanColumnRecord {
+            id: "col-done".to_string(),
+            board_id: "board-semester-1".to_string(),
+            title: "Done".to_string(),
+            position: 2,
+            wip_limit: None,
+        };
+        db.create_kanban_column(&col_todo).unwrap();
+        db.create_kanban_column(&col_done).unwrap();
+
+        let cols = db.list_kanban_columns("board-semester-1").unwrap();
+        assert_eq!(cols.len(), 2);
+
+        // 2. Productivity Task
+        let task = ProductivityTaskRecord {
+            id: "task-p12-01".to_string(),
+            board_id: "board-semester-1".to_string(),
+            column_id: "col-todo".to_string(),
+            title: "Tugas Metodologi Penelitian Bab 1".to_string(),
+            description: Some("Latar belakang dan perumusan masalah".to_string()),
+            priority: "high".to_string(),
+            status: "todo".to_string(),
+            due_date: Some(1732000000),
+            estimated_minutes: Some(120),
+            actual_minutes: None,
+            labels: Some("academic,urgent".to_string()),
+            parent_task_id: None,
+            created_at: 1000,
+            updated_at: 1000,
+            completed_at: None,
+        };
+        db.create_productivity_task(&task).unwrap();
+
+        let tasks = db.list_productivity_tasks("board-semester-1").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Tugas Metodologi Penelitian Bab 1");
+
+        // Move task to Done
+        let moved = db.update_productivity_task_column("task-p12-01", "col-done", "done").unwrap();
+        assert!(moved);
+        let updated_tasks = db.list_productivity_tasks("board-semester-1").unwrap();
+        assert_eq!(updated_tasks[0].status, "done");
+        assert_eq!(updated_tasks[0].column_id, "col-done");
+        assert!(updated_tasks[0].completed_at.is_some());
+
+        // 3. Study Schedules
+        let schedule = StudyScheduleRecord {
+            id: "sched-01".to_string(),
+            title: "Sistem Terdistribusi — Persiapan UTS".to_string(),
+            subject: "Distributed Systems".to_string(),
+            start_time: 1731600000,
+            end_time: 1731607200,
+            priority: "critical".to_string(),
+            status: "scheduled".to_string(),
+            rescheduled_reason: None,
+        };
+        db.create_study_schedule(&schedule).unwrap();
+
+        let schedules = db.list_study_schedules().unwrap();
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].subject, "Distributed Systems");
+
+        // 4. Accountability Settings (default vs custom)
+        let default_settings = db.get_accountability_settings().unwrap();
+        assert_eq!(default_settings.mode, "balanced");
+        assert!(!default_settings.screen_time_opt_in);
+
+        let custom_settings = AccountabilitySettingsRecord {
+            id: "default".to_string(),
+            mode: "strict".to_string(),
+            screen_time_opt_in: true,
+            last_checkin_at: Some(1500),
+            daily_reflection_notes: Some("Productive focus day".to_string()),
+        };
+        db.set_accountability_settings(&custom_settings).unwrap();
+
+        let fetched_settings = db.get_accountability_settings().unwrap();
+        assert_eq!(fetched_settings.mode, "strict");
+        assert!(fetched_settings.screen_time_opt_in);
+
+        // 5. Screen Time Tracking (opt-in)
+        let session = ScreenTimeSessionRecord {
+            id: "st-01".to_string(),
+            app_name: "Code.exe".to_string(),
+            window_title: Some("Hime Workspace — Rust".to_string()),
+            category: "productive".to_string(),
+            duration_secs: 1800,
+            timestamp: 1600,
+        };
+        db.record_screen_time_session(&session).unwrap();
+
+        let sessions = db.list_screen_time_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].app_name, "Code.exe");
+
+        // Clear sessions
+        let cleared = db.clear_screen_time_sessions().unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(db.list_screen_time_sessions(10).unwrap().len(), 0);
+
+        // 6. Document Jobs
+        let doc_job = DocumentJobRecord {
+            id: "doc-job-01".to_string(),
+            operation: "convert".to_string(),
+            source_path: Some("report.md".to_string()),
+            target_path: Some("report.docx".to_string()),
+            status: "completed".to_string(),
+            format: "docx".to_string(),
+            metadata: Some("{\"template\":\"Academic-ID\"}".to_string()),
+            created_at: 2000,
+            completed_at: Some(2005),
+        };
+        db.create_document_job(&doc_job).unwrap();
+
+        let jobs = db.list_document_jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].operation, "convert");
+        assert_eq!(jobs[0].format, "docx");
     }
 }

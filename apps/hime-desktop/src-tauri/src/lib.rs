@@ -985,3 +985,211 @@ pub async fn devices_transfers_list_logic(pipe_name: &str, device_id: Option<&st
     .await?;
     Ok(val.as_array().cloned().unwrap_or_default())
 }
+
+// =========================================================================
+// Phase 12 Productivity & Documents Logic
+// =========================================================================
+
+pub async fn kanban_board_get_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "productivity.kanban.board.get", None).await
+}
+
+pub async fn kanban_columns_list_logic(pipe_name: &str, board_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "productivity.kanban.columns.list",
+        Some(serde_json::json!({ "board_id": board_id })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn productivity_tasks_create_logic(
+    pipe_name: &str,
+    board_id: &str,
+    column_id: &str,
+    title: &str,
+    description: Option<&str>,
+    priority: Option<&str>,
+    due_date: Option<i64>,
+    tags: Option<&str>,
+    subtasks: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "productivity.tasks.create",
+        Some(serde_json::json!({
+            "board_id": board_id,
+            "column_id": column_id,
+            "title": title,
+            "description": description,
+            "priority": priority.unwrap_or("medium"),
+            "due_date": due_date,
+            "tags": tags,
+            "subtasks": subtasks,
+        })),
+    )
+    .await
+}
+
+pub async fn productivity_tasks_list_logic(
+    pipe_name: &str,
+    board_id: Option<&str>,
+    column_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "productivity.tasks.list",
+        Some(serde_json::json!({
+            "board_id": board_id,
+            "column_id": column_id,
+        })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn productivity_tasks_move_logic(
+    pipe_name: &str,
+    id: &str,
+    column_id: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "productivity.tasks.move",
+        Some(serde_json::json!({ "id": id, "column_id": column_id })),
+    )
+    .await
+}
+
+pub async fn productivity_tasks_parse_natural_logic(
+    pipe_name: &str,
+    text: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "productivity.tasks.parse_natural",
+        Some(serde_json::json!({ "text": text })),
+    )
+    .await
+}
+
+pub async fn productivity_schedules_plan_logic(
+    pipe_name: &str,
+    title: &str,
+    subject: &str,
+    start_time: i64,
+    duration_minutes: i64,
+    priority: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "productivity.schedules.plan",
+        Some(serde_json::json!({
+            "title": title,
+            "subject": subject,
+            "start_time": start_time,
+            "duration_minutes": duration_minutes,
+            "priority": priority.unwrap_or("medium"),
+        })),
+    )
+    .await
+}
+
+pub async fn productivity_schedules_list_logic(
+    pipe_name: &str,
+    is_completed: Option<bool>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "productivity.schedules.list",
+        Some(serde_json::json!({ "is_completed": is_completed })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn productivity_accountability_get_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "productivity.accountability.get", None).await
+}
+
+pub async fn productivity_accountability_set_mode_logic(
+    pipe_name: &str,
+    mode: &str,
+    opt_in_screen_time: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "productivity.accountability.set_mode",
+        Some(serde_json::json!({
+            "mode": mode,
+            "opt_in_screen_time": opt_in_screen_time.unwrap_or(false),
+        })),
+    )
+    .await
+}
+
+pub async fn productivity_accountability_checkin_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "productivity.accountability.checkin", None).await
+}
+
+pub async fn documents_create_report_logic(
+    pipe_name: &str,
+    template_id: &str,
+    title: &str,
+    author: &str,
+    institution: Option<&str>,
+    abstract_text: Option<&str>,
+    sections: Vec<serde_json::Value>,
+    target_format: Option<&str>,
+    output_path: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "documents.create_report",
+        Some(serde_json::json!({
+            "template_id": template_id,
+            "title": title,
+            "author": author,
+            "institution": institution,
+            "abstract_text": abstract_text,
+            "sections": sections,
+            "target_format": target_format.unwrap_or("docx"),
+            "output_path": output_path,
+        })),
+    )
+    .await
+}
+
+pub async fn documents_merge_pdfs_logic(
+    pipe_name: &str,
+    input_paths: Vec<String>,
+    output_path: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "documents.merge_pdfs",
+        Some(serde_json::json!({
+            "input_paths": input_paths,
+            "output_path": output_path,
+        })),
+    )
+    .await
+}
+
+pub async fn documents_jobs_list_logic(
+    pipe_name: &str,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "documents.jobs.list",
+        Some(serde_json::json!({ "limit": limit.unwrap_or(20) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn documents_artcraft_discover_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "documents.artcraft.discover", None).await
+}

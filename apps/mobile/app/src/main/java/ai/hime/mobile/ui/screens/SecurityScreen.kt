@@ -122,3 +122,4 @@ private fun SecurityItem(
         Text(detail, color = TextSecondary, fontSize = 11.sp)
     }
 }
+

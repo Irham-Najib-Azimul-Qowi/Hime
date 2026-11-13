@@ -181,3 +181,4 @@ CREATE TABLE IF NOT EXISTS storage_backups (
   - Download completion and duplicate detection.
   - Backup snapshot creation, manifest calculation, and tamper detection.
   - IPC JSON-RPC endpoints dispatch.
+

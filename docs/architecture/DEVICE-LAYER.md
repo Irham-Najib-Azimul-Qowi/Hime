@@ -113,3 +113,4 @@ sequenceDiagram
 - Desktop administrator can revoke any paired device with one click (`devices.revoke`).
 - Core updates device status to `revoked` in SQLite and terminates active WebSocket sessions.
 - Any subsequent RPC request bearing the revoked certificate fingerprint is immediately rejected with HTTP/RPC `UNAUTHORIZED`.
+

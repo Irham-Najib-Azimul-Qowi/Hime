@@ -50,3 +50,4 @@ In version 1.0, Hime does not run external cloud relays or open UPnP ports to th
 ### Negative / Trade-offs
 - Remote access outside the home Wi-Fi requires users to configure a mesh VPN (e.g., Tailscale).
 - Background syncing requires an ongoing notification to avoid Android OEM task killing.
+

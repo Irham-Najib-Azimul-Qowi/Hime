@@ -68,3 +68,4 @@
 3. **Verification Point:**
    - Device status changes to `REVOKED`.
    - Any subsequent WebSocket or RPC request from the Android phone is immediately rejected by Hime Core with `UNAUTHORIZED (Device access revoked)`.
+

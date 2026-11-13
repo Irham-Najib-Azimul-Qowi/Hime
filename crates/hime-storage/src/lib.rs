@@ -1,8 +1,10 @@
 pub mod database;
 
 pub use database::{
-    AuditEventRecord, ConversationRecord, Database, DeviceStorageSummaryRecord, DuplicateGroup,
-    ExtensionBreakdown, FileOperationRecord, FileRuleRecord, FileTransferRecord, IndexedFileRecord,
-    MemoryRecord, MessageRecord, PairedDeviceRecord, PairingTokenRecord, StorageAnalysisReport,
-    StorageBackupRecord, StorageError, TaskRecord, TokenValidationResult, ToolExecutionRecord,
+    AccountabilitySettingsRecord, AuditEventRecord, ConversationRecord, Database,
+    DeviceStorageSummaryRecord, DocumentJobRecord, DuplicateGroup, ExtensionBreakdown,
+    FileOperationRecord, FileRuleRecord, FileTransferRecord, IndexedFileRecord, KanbanBoardRecord,
+    KanbanColumnRecord, MemoryRecord, MessageRecord, PairedDeviceRecord, PairingTokenRecord,
+    ProductivityTaskRecord, ScreenTimeSessionRecord, StorageAnalysisReport, StorageBackupRecord,
+    StorageError, StudyScheduleRecord, TaskRecord, TokenValidationResult, ToolExecutionRecord,
 };

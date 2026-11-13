@@ -54,3 +54,4 @@ class KeystoreManager {
         return signedBytes.joinToString("") { "%02x".format(it) }
     }
 }
+

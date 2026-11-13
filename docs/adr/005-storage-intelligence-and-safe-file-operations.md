@@ -63,3 +63,4 @@ We implement the **Storage Intelligence Engine** in `crates/hime-core/src/storag
 - Tested on synthetic directory trees via automated integration suite `tests/storage_integration.rs` (10 passing tests).
 - Verified crash recovery rollback of uncommitted staging files.
 - Verified one-click restoration of moved and deleted files from Hime Recycle with identical SHA-256 hash match.
+
