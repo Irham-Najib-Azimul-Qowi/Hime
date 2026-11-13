@@ -44,6 +44,24 @@ pub fn redact_sensitive_text(input: &str) -> String {
     sanitized
 }
 
+/// Redacts API keys and bearer tokens specifically.
+pub fn redact_api_keys(input: &str) -> String {
+    let mut sanitized = input.to_string();
+    for (regex, replacement) in PATTERNS.iter().take(4) {
+        sanitized = regex.replace_all(&sanitized, *replacement).to_string();
+    }
+    sanitized
+}
+
+/// Redacts private chain-of-thought blocks (<think>...</think>, <thought>...</thought>).
+pub fn redact_chain_of_thought(input: &str) -> String {
+    let mut sanitized = input.to_string();
+    for (regex, replacement) in PATTERNS.iter().skip(4) {
+        sanitized = regex.replace_all(&sanitized, *replacement).to_string();
+    }
+    sanitized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

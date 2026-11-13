@@ -27,6 +27,10 @@ pub enum SystemEvent {
     AgentStreamChunk {
         delta: String,
     },
+    TaskUpdated {
+        task_id: String,
+        status: String,
+    },
     ShutdownInitiated,
 }
 

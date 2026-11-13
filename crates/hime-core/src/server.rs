@@ -11,7 +11,7 @@ use hime_ipc::protocol::{
 };
 use hime_ipc::session::ScopedNonceTracker;
 use hime_security::csprng::generate_token_256;
-use hime_security::policy::{Action, DefaultSecurityPolicy, PolicyDecision, PolicyEnforcer};
+use hime_security::policy::{Action, PolicyDecision, PolicyEnforcer, PolicyEngine};
 use hime_storage::Database;
 
 use crate::ai::AiOrchestrator;
@@ -63,10 +63,11 @@ impl CoreServer {
         );
 
         let event_bus = EventBus::new(128);
-        let policy: Arc<dyn PolicyEnforcer> = Arc::new(DefaultSecurityPolicy::new());
+        let policy_engine = Arc::new(PolicyEngine::new());
+        let policy: Arc<dyn PolicyEnforcer> = Arc::clone(&policy_engine) as Arc<dyn PolicyEnforcer>;
         let ai = Arc::new(AiOrchestrator::new(
             Arc::clone(&storage),
-            Arc::clone(&policy),
+            Arc::clone(&policy_engine),
             event_bus.clone(),
             20129,
         ));
@@ -716,6 +717,368 @@ impl CoreServer {
                         "status": if cancelled { "generation_stopped" } else { "no_active_turn" }
                     }),
                 )
+            }
+
+            // Phase 09 — Intelligence Core RPC Handlers
+            "tools.list" => {
+                let tools = self.ai.tool_gateway.list_tools().await;
+                JsonRpcResponse::success(req_id, serde_json::to_value(tools).unwrap_or_default())
+            }
+
+            "tools.execute" => {
+                let params = req.params.unwrap_or_default();
+                let tool_id = params
+                    .get("tool_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tool_params = params.get("params").cloned().unwrap_or(serde_json::json!({}));
+                let ticket = params.get("approval_ticket").and_then(|v| v.as_str());
+                let idempotency_key = params.get("idempotency_key").and_then(|v| v.as_str());
+
+                if tool_id.is_empty() {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        "tool_id parameter is required",
+                        None,
+                    );
+                }
+
+                match self
+                    .ai
+                    .tool_gateway
+                    .execute_tool("desktop", tool_id, tool_params, ticket, idempotency_key)
+                    .await
+                {
+                    Ok(result) => {
+                        JsonRpcResponse::success(req_id, serde_json::to_value(result).unwrap_or_default())
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        POLICY_VIOLATION,
+                        format!("Tool execution rejected: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "orchestrator.execute_plan" => {
+                let params = req.params.unwrap_or_default();
+                let steps_val = params.get("steps").cloned().unwrap_or(serde_json::json!([]));
+                let steps: Vec<crate::ai::orchestrator::PlanStep> = match serde_json::from_value(steps_val) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req_id,
+                            INVALID_REQUEST,
+                            format!("Invalid plan steps format: {}", e),
+                            None,
+                        );
+                    }
+                };
+
+                match self.ai.execute_orchestrated_plan("desktop", steps).await {
+                    Ok(summary) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(summary).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Plan execution error: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "task.engine.list" => {
+                let params = req.params.unwrap_or_default();
+                let status_filter = params.get("status").and_then(|v| v.as_str());
+                match self.ai.task_engine.list_tasks(status_filter) {
+                    Ok(tasks) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(tasks).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        format!("Task engine error: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "task.engine.create" => {
+                let params = req.params.unwrap_or_default();
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "task-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()
+                        )
+                    });
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("New Task");
+                let description = params.get("description").and_then(|v| v.as_str());
+                let priority = params.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+
+                match self.ai.task_engine.submit_task(&id, title, description, priority) {
+                    Ok(record) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(record).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Failed to create task: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "task.engine.update_status" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let status_str = params.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let progress = params.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                let status = match crate::ai::task_engine::TaskStatus::parse(status_str) {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req_id,
+                            INVALID_REQUEST,
+                            format!("Invalid task status: {}", status_str),
+                            None,
+                        );
+                    }
+                };
+
+                match self.ai.task_engine.transition_status(id, status, progress) {
+                    Ok(updated) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({ "id": id, "updated": updated, "status": status_str }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Transition failed: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "task.engine.retry" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.ai.task_engine.retry_task(id) {
+                    Ok(record) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(record).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Retry failed: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "task.engine.cancel" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.ai.task_engine.cancel_task(id) {
+                    Ok(cancelled) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({ "id": id, "cancelled": cancelled }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Cancel failed: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "memory.list" => {
+                let params = req.params.unwrap_or_default();
+                let cat = params.get("category").and_then(|v| v.as_str());
+                match self.ai.memory_engine.list_memories(cat) {
+                    Ok(items) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(items).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        format!("Memory query failed: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "memory.insert" => {
+                let params = req.params.unwrap_or_default();
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "mem-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()
+                        )
+                    });
+                let source = params.get("source").and_then(|v| v.as_str()).unwrap_or("user");
+                let category = params.get("category").and_then(|v| v.as_str()).unwrap_or("general");
+                let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let score = params.get("relevance_score").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let retention = params.get("retention_policy").and_then(|v| v.as_str()).unwrap_or("permanent");
+
+                match self.ai.memory_engine.insert_memory(&id, source, category, content, score, retention) {
+                    Ok(item) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(item).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Failed to store memory: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "memory.delete" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.ai.memory_engine.delete_memory(id) {
+                    Ok(deleted) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({ "id": id, "deleted": deleted }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Failed to delete memory: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "memory.context" => {
+                let params = req.params.unwrap_or_default();
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let max_tokens = params.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+                let items = self.ai.memory_engine.build_prompt_context(query, max_tokens);
+                JsonRpcResponse::success(req_id, serde_json::to_value(items).unwrap_or_default())
+            }
+
+            "resource.get_mode" => {
+                let mode = self.ai.resource_manager.get_mode();
+                let max_concurrent = self.ai.resource_manager.max_concurrent_tasks();
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "mode": format!("{:?}", mode),
+                        "max_concurrent_tasks": max_concurrent
+                    }),
+                )
+            }
+
+            "resource.set_mode" => {
+                let params = req.params.unwrap_or_default();
+                let mode_str = params.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                let mode = match mode_str.to_lowercase().as_str() {
+                    "efficiency" => crate::ai::resource::ResourceMode::Efficiency,
+                    "performance" => crate::ai::resource::ResourceMode::Performance,
+                    _ => crate::ai::resource::ResourceMode::Balanced,
+                };
+                self.ai.resource_manager.set_mode(mode);
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "status": "updated",
+                        "mode": format!("{:?}", mode),
+                        "max_concurrent_tasks": self.ai.resource_manager.max_concurrent_tasks()
+                    }),
+                )
+            }
+
+            "translate.selection" => {
+                let params = req.params.unwrap_or_default();
+                let target_lang = params.get("target_lang").and_then(|v| v.as_str()).unwrap_or("id");
+                let explicit_text = params.get("text").and_then(|v| v.as_str());
+
+                let result = if let Some(txt) = explicit_text {
+                    self.ai.translation_service.translate_text(txt, target_lang).await
+                } else {
+                    self.ai.translation_service.capture_and_translate(target_lang).await
+                };
+
+                match result {
+                    Ok(tr) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(tr).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Translation error: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "translate.set_opt_in" => {
+                let params = req.params.unwrap_or_default();
+                let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                self.ai.translation_service.set_opted_in(enabled);
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({ "status": "updated", "opted_in": enabled }),
+                )
+            }
+
+            "translate.get_opt_in" => {
+                let opted_in = self.ai.translation_service.is_opted_in();
+                JsonRpcResponse::success(req_id, serde_json::json!({ "opted_in": opted_in }))
+            }
+
+            "events.recent" => {
+                let params = req.params.unwrap_or_default();
+                let since_id = params.get("since_id").and_then(|v| v.as_u64());
+                let events = self.ai.event_engine.get_recent_events(since_id).await;
+                JsonRpcResponse::success(req_id, serde_json::to_value(events).unwrap_or_default())
+            }
+
+            "audit.verify" => {
+                match self.storage.verify_audit_trail() {
+                    Ok(is_valid) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({
+                            "chain_valid": is_valid,
+                            "hash_algorithm": "SHA-256",
+                            "tamper_detected": !is_valid
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        format!("Audit trail verification failed: {}", e),
+                        None,
+                    ),
+                }
             }
 
             other => JsonRpcResponse::error(

@@ -6,6 +6,8 @@ export interface DynamicIslandProps {
   status: SystemStatus | null;
   isCoreOnline: boolean;
   activeActivity: string | null;
+  translationResult?: { original: string; translated: string } | null;
+  onClearTranslation?: () => void;
   onOpenOmnibox: () => void;
   onTriggerPing: () => void;
   onTriggerPolicyTest: () => void;
@@ -16,6 +18,8 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
   status,
   isCoreOnline,
   activeActivity,
+  translationResult,
+  onClearTranslation,
   onOpenOmnibox,
   onTriggerPing,
   onTriggerPolicyTest,
@@ -23,8 +27,9 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // If there is active tool/agent activity, show activity state
+  // If there is active tool/agent activity or translation, show state
   const isActivityState = Boolean(activeActivity);
+  const hasTranslation = Boolean(translationResult);
 
   return (
     <div
@@ -39,30 +44,86 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
       <div
         className="app-no-drag"
         onClick={() => {
-          if (!isActivityState) {
+          if (!isActivityState && !hasTranslation) {
             setIsExpanded(!isExpanded);
           }
         }}
         style={{
-          minWidth: isExpanded ? '480px' : isActivityState ? '380px' : '310px',
-          maxWidth: '600px',
-          height: isExpanded ? '110px' : '40px',
+          minWidth: hasTranslation ? '520px' : isExpanded ? '480px' : isActivityState ? '380px' : '310px',
+          maxWidth: '640px',
+          height: hasTranslation ? '120px' : isExpanded ? '110px' : '40px',
           backgroundColor: 'var(--island-bg)',
-          borderRadius: isExpanded ? 'var(--radius-xl)' : 'var(--radius-pill)',
+          borderRadius: (isExpanded || hasTranslation) ? 'var(--radius-xl)' : 'var(--radius-pill)',
           border: '1px solid var(--island-border)',
           boxShadow: 'var(--island-shadow)',
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: isExpanded ? 'space-between' : 'center',
-          padding: isExpanded ? '12px 18px' : '0 14px',
-          cursor: 'pointer',
+          justifyContent: (isExpanded || hasTranslation) ? 'space-between' : 'center',
+          padding: (isExpanded || hasTranslation) ? '12px 18px' : '0 14px',
+          cursor: hasTranslation ? 'default' : 'pointer',
           transition:
             'min-width var(--duration-expand) var(--ease-spring), height var(--duration-expand) var(--ease-spring), border-radius var(--duration-expand) var(--ease-spring), background-color var(--duration-normal) ease-out',
           backdropFilter: 'blur(12px)',
           overflow: 'hidden',
         }}
       >
-        {/* Compact / Idle Bar */}
+        {/* Translation Banner Mode */}
+        {hasTranslation && translationResult ? (
+          <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', height: '100%', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Badge variant="cyan" size="xs">TERJEMAHAN ID</Badge>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '300px' }}>
+                  "{translationResult.original}"
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(translationResult.translated);
+                  }}
+                  className="btn-pressable"
+                  style={{
+                    backgroundColor: 'var(--bg-surface-2)',
+                    border: '1px solid var(--border-medium)',
+                    borderRadius: 'var(--radius-xs)',
+                    padding: '2px 8px',
+                    fontSize: 'var(--text-2xs)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Salin
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onClearTranslation?.();
+                  }}
+                  className="btn-pressable"
+                  style={{
+                    backgroundColor: 'var(--bg-surface-2)',
+                    border: '1px solid var(--border-medium)',
+                    borderRadius: 'var(--radius-xs)',
+                    padding: '2px 8px',
+                    fontSize: 'var(--text-2xs)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)', marginTop: '4px' }}>
+              {translationResult.translated}
+            </div>
+            <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+              Island Intelligence • Privacy Opt-in Verified
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Compact / Idle Bar */}
         <div
           style={{
             display: 'flex',
@@ -228,6 +289,8 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
               Named Pipe: {status?.named_pipe || '\\\\.\\pipe\\hime-ipc'}
             </div>
           </div>
+        )}
+          </>
         )}
       </div>
     </div>

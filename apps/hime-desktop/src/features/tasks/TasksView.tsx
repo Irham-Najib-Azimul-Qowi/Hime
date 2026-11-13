@@ -62,7 +62,12 @@ export const TasksView: React.FC<TasksViewProps> = ({
       case 'running':
         return <Badge variant="cyan" dot>Running</Badge>;
       case 'completed':
-        return <Badge variant="success">Completed</Badge>;
+      case 'succeeded':
+        return <Badge variant="success">Succeeded</Badge>;
+      case 'waiting_approval':
+        return <Badge variant="warning" dot>Waiting Approval</Badge>;
+      case 'paused':
+        return <Badge variant="default">Paused</Badge>;
       case 'cancelled':
         return <Badge variant="default">Cancelled</Badge>;
       case 'failed':

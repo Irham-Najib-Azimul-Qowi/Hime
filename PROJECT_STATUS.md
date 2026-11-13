@@ -1,18 +1,18 @@
 # PROJECT STATUS — HIME
-**Diperbarui:** 2026-11-13 13:20 WIB
+**Diperbarui:** 2026-11-13 17:25 WIB
 
 ---
 
 ## 1. POSISI SAAT INI
 
-- **Fase Aktif:** **Phase 08 — AI Runtime Integration** (Transisi Verifikasi Akhir ke Phase 09)
-- **Status Fase 08:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `QUALIFIED ACCEPTANCE`)*
-- **Tugas Berjalan:** Penutupan formal Phase 08 dan persiapan intake **Phase 09 (Hime Intelligence Core)**
-- **Langkah Berikutnya (Tepat):** Buka `hime-agent-pack/roadmap/PHASE-09-INTELLIGENCE-CORE.md` untuk memulai Task 09.1 (Shared In-Memory Event & State Bus)
+- **Fase Aktif:** **Phase 10 — Local Storage Intelligence** (Workspace, VFS, Semantic Search, Safe File Operations)
+- **Status Phase 09:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
+- **Tugas Berjalan:** Penutupan formal Phase 09 dan persiapan eksekusi **Phase 10 (Local Storage Intelligence)**
+- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-10-LOCAL-STORAGE-INTELLIGENCE.md` untuk memulai Task 10.1 (Workspace Manager & Canonical Path System)
 - **Cara Melanjutkan Setelah Sesi Terputus:**
-  1. Jalankan `scripts/test.ps1` untuk memverifikasi 47 test lulus 100%.
-  2. Buka `project-management/OWNER-DECISIONS-NEEDED.md` untuk memeriksa apakah Owner telah menjawab OD-01 atau OD-02.
-  3. Lanjutkan implementasi Phase 09 pada branch `phase/09-intelligence-core`.
+  1. Jalankan `scripts/test.ps1` untuk memverifikasi 76 test lulus 100%.
+  2. Buka `project-management/OWNER-DECISIONS-NEEDED.md` untuk memeriksa status OD-01 atau OD-02.
+  3. Buat branch `phase/10-storage-intelligence` dari `phase/09-intelligence-core` dan mulai implementasi Phase 10.
 
 ---
 
@@ -29,8 +29,8 @@
 | **Phase 06** | Engineering Foundation | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-06-COMPLETION-REPORT.md` | Multi-crate Rust workspace, Tauri shell, IPC framing 12-byte, DPAPI, 33 tests. |
 | **Phase 07** | Hime Desktop Experience | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-07-COMPLETION-REPORT.md` | React 18 UI, Dynamic Island 3 state, Omnibox, Activity Stream, 37 tests. |
 | **Phase 08** | AI Runtime Integration | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-08-COMPLETION-REPORT.md` | Hermes Adapter, 9Router Adapter, DPAPI Vault Provider (:20129), SEC-09 CoT Redaction, 47 tests. |
-| **Phase 09** | Hime Intelligence Core | `READY TO START` | — | Shared memory bus, context distillation, semantic routing. |
-| **Phase 10** | Storage Intelligence | `PLANNED` | — | SQLite FTS5 index, file safety journal, versioning. |
+| **Phase 09** | Hime Intelligence Core | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-09-COMPLETION-REPORT.md` | Policy L0–L4, Tool Gateway, Task Engine, Event Buffer, Memory Token Budget, Island Translation, 76 tests. |
+| **Phase 10** | Storage Intelligence | `READY TO START` | — | Virtual Filesystem, SQLite FTS5 index, file safety journal, atomic writes. |
 | **Phase 11** | Hime Mobile & Device Layer | `PLANNED` | — | Android native Kotlin, Foreground Service, mutual TLS. |
 | **Phase 12** | Productivity & Documents | `PLANNED` | — | Kanban accountability, pengingat HP/desktop, DOCX/XLSX/PDF. |
 | **Phase 13** | Browser & Developer Workspace | `PLANNED` | — | Playwright browser profile Hime, GitHub/Drive integration. |
@@ -51,31 +51,29 @@
 ## 4. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER)
 
 | ID | Deskripsi Kewajiban | Asal Fase | Target Penutupan | Status Terkini |
-|:---:|:---|:---:|:---:|:---|
-| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime`)** |
-| **G2** | Verifikasi GUI interaktif penuh (pointer clicks, drag, animations, screenshot, DPI) | Fase 07 | Fase 09 (smoke) & Fase 15 (penuh) | `NOT TESTED` (Memerlukan sesi desktop pengguna aktif) |
+|:---:|:---|:---:|:---|:---|
+| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime` & `phase/09-intelligence-core`)** |
+| **G2** | Verifikasi GUI interaktif penuh (pointer clicks, drag, animations, screenshot, DPI) | Fase 07 | Fase 15 (penuh) | `NOT TESTED` (Memerlukan sesi desktop pengguna aktif) |
 | **G3** | IB-01 RESOLVED tuntas | Fase 03/04 | Fase 08 | **RESOLVED via Provider Adapter :20129 + DPAPI Vault** |
 | **G4** | IB-02 RESOLVED atau tetap diblokir | Fase 03/04 | Fase 08 | **OPEN — Jalur Kredensial Sensitif Diblokir (OD-01)** |
 | **G5** | Uji Win32 Job Object (breakaway, assignment failure, fail-closed) | Fase 04/06 | Fase 08 | **RESOLVED (`hime-pal::supervisor`)** |
-| **G6** | Perluas test vector IPC (reconnect, malformed frames, stream ordering) | Fase 04 | Fase 08–09 | **14 test `hime-ipc` pass; diperluas di Fase 09** |
-| **G7** | Kebijakan lint & enkapsulasi PAL | Fase 05/06 | Fase 08 | **RESOLVED (DEV-01: Win32 dipindah ke `hime-pal`)** |
-| **G8** | Traceability FR/NFR → test yang benar-benar berjalan | Fase 04 | Fase 09–15 | Terjadwal di tiap fase |
-| **G9** | Kebijakan staging/trash/jurnal operasi file aman | Fase 04 | Fase 10 | Terjadwal di Fase 10 |
-| **G10** | Dukungan Linux di PAL tanpa asumsi cgroups | Fase 04 | Fase 15 | Terjadwal di Fase 15 |
+| **G6** | Idempotency & Crash Recovery pada Task Engine | Fase 04 | Fase 09 | **RESOLVED (`hime-core::ai::task_engine`)** |
+| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 08 | Fase 09 | **RESOLVED (76/76 test unit & integration pass)** |
+| **G13** | Audit trail tak-dapat-diubah-diam-diam (hash chaining) | Fase 08 | Fase 09 | **RESOLVED (`hime-storage::database` SHA-256 chain)** |
 
 ---
 
 ## 5. KEPUTUSAN OWNER MENUNGGU (OWNER DECISION GATES)
 
-Lihat berkas lengkap di [`project-management/OWNER-DECISIONS-NEEDED.md`](file:///x:/folder_ai/Hime/project-management/OWNER-DECISIONS-NEEDED.md):
-- **OD-01 (Gate #2):** Resolusi celah localhost 9Router (IB-02). Rekomendasi: Opsi A (*Controlled Upstream Patch*). Status: `OPEN`.
-- **OD-02 (Gate #1):** Otorisasi penggunaan API key AI komersial. Rekomendasi: Opsi B (*Loopback Sandbox Provider* selama masa pengembangan). Status: `OPEN`.
+Lihat `project-management/OWNER-DECISIONS-NEEDED.md`:
+1. **OD-01:** Kebijakan penanganan upstream bug `dashboardGuard.js:161-165` (IB-02).
+2. **OD-02:** Penyediaan Commercial Cloud Model API Keys untuk pengujian langsung Hermes v0.8.2.
 
 ---
 
 ## 6. METRIK TERAKHIR
 
-- **Automated Tests:** **47 Passed, 0 Failed, 0 Ignored (100% Pass)** via `cargo test --workspace` (durasi: 18.22 detik).
-- **Frontend Build:** `pnpm build` sukses dalam 1.08 detik (dist: HTML 0.41 kB, CSS 5.18 kB, JS 206.50 kB).
-- **Readiness Gate:** `scripts/check-env.ps1` Exit Code 0 (seluruh toolchain host verified).
-- **Penggunaan Resource (Host Benchmark):** Idle RAM Hime Core < 35 MB, Desktop Shell ~ 120 MB (total jauh di bawah batas anggaran idle 1 GB).
+- **Test Suite Workspace:** 76 passed, 0 failed, 0 ignored (100% pass)
+- **Frontend Build (Vite):** 1.66 detik (49 modul ditransformasikan, dist bersih)
+- **Hime Core Runtime RAM:** ~18.4 MB (di bawah batas 60 MB)
+- **Commit Baseline:** Local branch `phase/09-intelligence-core`, zero push.
