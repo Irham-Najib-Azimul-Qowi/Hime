@@ -135,6 +135,64 @@ impl Database {
                 retention_policy TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS indexed_files (
+                path TEXT PRIMARY KEY,
+                parent_dir TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                extension TEXT,
+                size_bytes INTEGER NOT NULL,
+                modified_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                is_dir BOOLEAN NOT NULL,
+                content_hash TEXT,
+                mime_type TEXT,
+                indexed_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_files_parent ON indexed_files(parent_dir);
+            CREATE INDEX IF NOT EXISTS idx_files_size ON indexed_files(size_bytes);
+            CREATE INDEX IF NOT EXISTS idx_files_ext ON indexed_files(extension);
+            CREATE INDEX IF NOT EXISTS idx_files_hash ON indexed_files(content_hash);
+
+            CREATE TABLE IF NOT EXISTS file_operations (
+                id TEXT PRIMARY KEY,
+                op_type TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                destination_path TEXT,
+                backup_path TEXT,
+                source_hash TEXT,
+                dest_hash TEXT,
+                actor TEXT NOT NULL,
+                approval_id TEXT,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                error_message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_ops_status ON file_operations(status);
+
+            CREATE TABLE IF NOT EXISTS file_rules (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                target_dir TEXT NOT NULL,
+                naming_template TEXT,
+                action TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS storage_backups (
+                id TEXT PRIMARY KEY,
+                source_root TEXT NOT NULL,
+                backup_destination TEXT NOT NULL,
+                file_count INTEGER NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                manifest_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                verified_at INTEGER
             );",
         )?;
 
@@ -785,6 +843,481 @@ impl Database {
         )?;
         Ok(rows > 0)
     }
+
+    // =========================================================================
+    // Phase 10: Filesystem Indexing & Storage Intelligence
+    // =========================================================================
+
+    pub fn upsert_indexed_file(&self, file: &IndexedFileRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO indexed_files (
+                path, parent_dir, file_name, extension, size_bytes,
+                modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(path) DO UPDATE SET
+                parent_dir = ?2,
+                file_name = ?3,
+                extension = ?4,
+                size_bytes = ?5,
+                modified_at = ?6,
+                created_at = ?7,
+                is_dir = ?8,
+                content_hash = ?9,
+                mime_type = ?10,
+                indexed_at = ?11",
+            rusqlite::params![
+                file.path,
+                file.parent_dir,
+                file.file_name,
+                file.extension,
+                file.size_bytes,
+                file.modified_at,
+                file.created_at,
+                file.is_dir,
+                file.content_hash,
+                file.mime_type,
+                file.indexed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_indexed_file(&self, path: &str) -> Result<Option<IndexedFileRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files WHERE path = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_indexed_file(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_indexed_file(&self, path: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM indexed_files WHERE path = ?1", rusqlite::params![path])?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_indexed_files_under_dir(&self, dir_prefix: &str) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("{}%", dir_prefix);
+        let rows = conn.execute(
+            "DELETE FROM indexed_files WHERE path LIKE ?1",
+            rusqlite::params![pattern],
+        )?;
+        Ok(rows)
+    }
+
+    pub fn search_indexed_files(&self, query: &str, limit: usize) -> Result<Vec<IndexedFileRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files
+             WHERE file_name LIKE ?1 OR path LIKE ?1
+             ORDER BY modified_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_indexed_file)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn list_indexed_files_in_dir(&self, parent_dir: &str) -> Result<Vec<IndexedFileRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files
+             WHERE parent_dir = ?1
+             ORDER BY is_dir DESC, file_name ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![parent_dir], map_indexed_file)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn find_files_by_hash(&self, hash: &str) -> Result<Vec<IndexedFileRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files
+             WHERE content_hash = ?1 AND is_dir = 0
+             ORDER BY modified_at ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![hash], map_indexed_file)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn count_indexed_files(&self) -> Result<i64, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT COUNT(*) FROM indexed_files")?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn get_storage_analysis(&self, top_n: usize) -> Result<StorageAnalysisReport, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let (total_files, total_bytes): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM indexed_files WHERE is_dir = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let mut ext_stmt = conn.prepare(
+            "SELECT COALESCE(extension, 'none'), COUNT(*), SUM(size_bytes)
+             FROM indexed_files
+             WHERE is_dir = 0
+             GROUP BY extension
+             ORDER BY SUM(size_bytes) DESC
+             LIMIT 15",
+        )?;
+        let ext_rows = ext_stmt.query_map([], |row| {
+            Ok(ExtensionBreakdown {
+                extension: row.get(0)?,
+                count: row.get(1)?,
+                total_bytes: row.get(2)?,
+            })
+        })?;
+        let mut by_extension = Vec::new();
+        for r in ext_rows {
+            by_extension.push(r?);
+        }
+
+        let mut large_stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files
+             WHERE is_dir = 0
+             ORDER BY size_bytes DESC
+             LIMIT ?1",
+        )?;
+        let large_rows = large_stmt.query_map(rusqlite::params![top_n as i64], map_indexed_file)?;
+        let mut largest_files = Vec::new();
+        for r in large_rows {
+            largest_files.push(r?);
+        }
+
+        let thirty_days_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64 - (30 * 86400);
+
+        let mut old_stmt = conn.prepare(
+            "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+             FROM indexed_files
+             WHERE is_dir = 0 AND (parent_dir LIKE '%download%' OR parent_dir LIKE '%Download%') AND modified_at < ?1
+             ORDER BY modified_at ASC
+             LIMIT ?2",
+        )?;
+        let old_rows = old_stmt.query_map(rusqlite::params![thirty_days_ago, top_n as i64], map_indexed_file)?;
+        let mut old_downloads = Vec::new();
+        for r in old_rows {
+            old_downloads.push(r?);
+        }
+
+        Ok(StorageAnalysisReport {
+            total_files,
+            total_bytes,
+            by_extension,
+            largest_files,
+            old_downloads,
+        })
+    }
+
+    pub fn find_duplicate_candidates(&self) -> Result<Vec<DuplicateGroup>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT content_hash, size_bytes, COUNT(*) as cnt
+             FROM indexed_files
+             WHERE is_dir = 0 AND content_hash IS NOT NULL AND content_hash != ''
+             GROUP BY content_hash, size_bytes
+             HAVING cnt > 1
+             ORDER BY size_bytes * cnt DESC
+             LIMIT 50",
+        )?;
+        let group_rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut duplicate_groups = Vec::new();
+        for g in group_rows {
+            let (hash, size) = g?;
+            let mut file_stmt = conn.prepare(
+                "SELECT path, parent_dir, file_name, extension, size_bytes, modified_at, created_at, is_dir, content_hash, mime_type, indexed_at
+                 FROM indexed_files
+                 WHERE content_hash = ?1
+                 ORDER BY modified_at ASC",
+            )?;
+            let file_rows = file_stmt.query_map(rusqlite::params![hash], map_indexed_file)?;
+            let mut files = Vec::new();
+            for f in file_rows {
+                files.push(f?);
+            }
+            duplicate_groups.push(DuplicateGroup {
+                content_hash: hash,
+                size_bytes: size,
+                files,
+            });
+        }
+        Ok(duplicate_groups)
+    }
+
+    // =========================================================================
+    // Phase 10: Safe File Operations Journal
+    // =========================================================================
+
+    pub fn record_file_operation(&self, op: &FileOperationRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO file_operations (
+                id, op_type, source_path, destination_path, backup_path,
+                source_hash, dest_hash, actor, approval_id, status,
+                started_at, completed_at, error_message
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+                status = ?10,
+                dest_hash = ?7,
+                completed_at = ?12,
+                error_message = ?13",
+            rusqlite::params![
+                op.id,
+                op.op_type,
+                op.source_path,
+                op.destination_path,
+                op.backup_path,
+                op.source_hash,
+                op.dest_hash,
+                op.actor,
+                op.approval_id,
+                op.status,
+                op.started_at,
+                op.completed_at,
+                op.error_message,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_file_operation_status(
+        &self,
+        id: &str,
+        status: &str,
+        dest_hash: Option<&str>,
+        completed: bool,
+        error: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = if completed {
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            )
+        } else {
+            None
+        };
+
+        let rows = conn.execute(
+            "UPDATE file_operations
+             SET status = ?2, dest_hash = COALESCE(?3, dest_hash), completed_at = COALESCE(?4, completed_at), error_message = ?5
+             WHERE id = ?1",
+            rusqlite::params![id, status, dest_hash, now, error],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_file_operation(&self, id: &str) -> Result<Option<FileOperationRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, op_type, source_path, destination_path, backup_path,
+                    source_hash, dest_hash, actor, approval_id, status,
+                    started_at, completed_at, error_message
+             FROM file_operations WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_file_operation(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_file_operations(&self, limit: usize) -> Result<Vec<FileOperationRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, op_type, source_path, destination_path, backup_path,
+                    source_hash, dest_hash, actor, approval_id, status,
+                    started_at, completed_at, error_message
+             FROM file_operations
+             ORDER BY started_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_file_operation)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_uncommitted_file_operations(&self) -> Result<Vec<FileOperationRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, op_type, source_path, destination_path, backup_path,
+                    source_hash, dest_hash, actor, approval_id, status,
+                    started_at, completed_at, error_message
+             FROM file_operations
+             WHERE status IN ('staged', 'in_progress')",
+        )?;
+        let rows = stmt.query_map([], map_file_operation)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    // =========================================================================
+    // Phase 10: File Rules & Smart Organization
+    // =========================================================================
+
+    pub fn create_file_rule(&self, rule: &FileRuleRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO file_rules (
+                id, name, pattern, target_dir, naming_template, action, is_active, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = ?2, pattern = ?3, target_dir = ?4, naming_template = ?5, action = ?6, is_active = ?7, updated_at = ?9",
+            rusqlite::params![
+                rule.id,
+                rule.name,
+                rule.pattern,
+                rule.target_dir,
+                rule.naming_template,
+                rule.action,
+                rule.is_active,
+                rule.created_at,
+                rule.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_file_rules(&self) -> Result<Vec<FileRuleRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, pattern, target_dir, naming_template, action, is_active, created_at, updated_at
+             FROM file_rules
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], map_file_rule)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_file_rule(&self, id: &str) -> Result<Option<FileRuleRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, pattern, target_dir, naming_template, action, is_active, created_at, updated_at
+             FROM file_rules WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_file_rule(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn update_file_rule_active(&self, id: &str, is_active: bool) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let rows = conn.execute(
+            "UPDATE file_rules SET is_active = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, is_active, now],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_file_rule(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM file_rules WHERE id = ?1", rusqlite::params![id])?;
+        Ok(rows > 0)
+    }
+
+    // =========================================================================
+    // Phase 10: Storage Backups & Integrity
+    // =========================================================================
+
+    pub fn create_backup_record(&self, backup: &StorageBackupRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO storage_backups (
+                id, source_root, backup_destination, file_count, total_bytes, manifest_hash, created_at, verified_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                backup.id,
+                backup.source_root,
+                backup.backup_destination,
+                backup.file_count,
+                backup.total_bytes,
+                backup.manifest_hash,
+                backup.created_at,
+                backup.verified_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_backup_records(&self) -> Result<Vec<StorageBackupRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, source_root, backup_destination, file_count, total_bytes, manifest_hash, created_at, verified_at
+             FROM storage_backups
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], map_storage_backup)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn verify_backup_record(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let rows = conn.execute(
+            "UPDATE storage_backups SET verified_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
+        Ok(rows > 0)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -881,6 +1414,147 @@ fn map_memory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> 
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct IndexedFileRecord {
+    pub path: String,
+    pub parent_dir: String,
+    pub file_name: String,
+    pub extension: Option<String>,
+    pub size_bytes: i64,
+    pub modified_at: i64,
+    pub created_at: i64,
+    pub is_dir: bool,
+    pub content_hash: Option<String>,
+    pub mime_type: Option<String>,
+    pub indexed_at: i64,
+}
+
+fn map_indexed_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedFileRecord> {
+    Ok(IndexedFileRecord {
+        path: row.get(0)?,
+        parent_dir: row.get(1)?,
+        file_name: row.get(2)?,
+        extension: row.get(3)?,
+        size_bytes: row.get(4)?,
+        modified_at: row.get(5)?,
+        created_at: row.get(6)?,
+        is_dir: row.get(7)?,
+        content_hash: row.get(8)?,
+        mime_type: row.get(9)?,
+        indexed_at: row.get(10)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileOperationRecord {
+    pub id: String,
+    pub op_type: String,
+    pub source_path: String,
+    pub destination_path: Option<String>,
+    pub backup_path: Option<String>,
+    pub source_hash: Option<String>,
+    pub dest_hash: Option<String>,
+    pub actor: String,
+    pub approval_id: Option<String>,
+    pub status: String,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+    pub error_message: Option<String>,
+}
+
+fn map_file_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileOperationRecord> {
+    Ok(FileOperationRecord {
+        id: row.get(0)?,
+        op_type: row.get(1)?,
+        source_path: row.get(2)?,
+        destination_path: row.get(3)?,
+        backup_path: row.get(4)?,
+        source_hash: row.get(5)?,
+        dest_hash: row.get(6)?,
+        actor: row.get(7)?,
+        approval_id: row.get(8)?,
+        status: row.get(9)?,
+        started_at: row.get(10)?,
+        completed_at: row.get(11)?,
+        error_message: row.get(12)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileRuleRecord {
+    pub id: String,
+    pub name: String,
+    pub pattern: String,
+    pub target_dir: String,
+    pub naming_template: Option<String>,
+    pub action: String,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_file_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRuleRecord> {
+    Ok(FileRuleRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        pattern: row.get(2)?,
+        target_dir: row.get(3)?,
+        naming_template: row.get(4)?,
+        action: row.get(5)?,
+        is_active: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StorageBackupRecord {
+    pub id: String,
+    pub source_root: String,
+    pub backup_destination: String,
+    pub file_count: i64,
+    pub total_bytes: i64,
+    pub manifest_hash: String,
+    pub created_at: i64,
+    pub verified_at: Option<i64>,
+}
+
+fn map_storage_backup(row: &rusqlite::Row<'_>) -> rusqlite::Result<StorageBackupRecord> {
+    Ok(StorageBackupRecord {
+        id: row.get(0)?,
+        source_root: row.get(1)?,
+        backup_destination: row.get(2)?,
+        file_count: row.get(3)?,
+        total_bytes: row.get(4)?,
+        manifest_hash: row.get(5)?,
+        created_at: row.get(6)?,
+        verified_at: row.get(7)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExtensionBreakdown {
+    pub extension: String,
+    pub count: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StorageAnalysisReport {
+    pub total_files: i64,
+    pub total_bytes: i64,
+    pub by_extension: Vec<ExtensionBreakdown>,
+    pub largest_files: Vec<IndexedFileRecord>,
+    pub old_downloads: Vec<IndexedFileRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DuplicateGroup {
+    pub content_hash: String,
+    pub size_bytes: i64,
+    pub files: Vec<IndexedFileRecord>,
 }
 
 #[cfg(test)]
@@ -1104,5 +1778,166 @@ mod tests {
         // Delete
         assert!(db.delete_memory_item("mem-1").unwrap());
         assert!(db.get_memory_item("mem-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_phase10_storage_indexed_files_and_analysis() {
+        let db = Database::open_in_memory().unwrap();
+
+        let f1 = IndexedFileRecord {
+            path: "C:\\Users\\Satoshi\\Documents\\paper.pdf".to_string(),
+            parent_dir: "C:\\Users\\Satoshi\\Documents".to_string(),
+            file_name: "paper.pdf".to_string(),
+            extension: Some("pdf".to_string()),
+            size_bytes: 2048,
+            modified_at: 1000,
+            created_at: 900,
+            is_dir: false,
+            content_hash: Some("hash-abc-1".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            indexed_at: 1050,
+        };
+
+        let f2 = IndexedFileRecord {
+            path: "C:\\Users\\Satoshi\\Downloads\\paper_copy.pdf".to_string(),
+            parent_dir: "C:\\Users\\Satoshi\\Downloads".to_string(),
+            file_name: "paper_copy.pdf".to_string(),
+            extension: Some("pdf".to_string()),
+            size_bytes: 2048,
+            modified_at: 500, // old download
+            created_at: 500,
+            is_dir: false,
+            content_hash: Some("hash-abc-1".to_string()), // duplicate hash!
+            mime_type: Some("application/pdf".to_string()),
+            indexed_at: 1050,
+        };
+
+        let f3 = IndexedFileRecord {
+            path: "C:\\Users\\Satoshi\\Projects\\app.rs".to_string(),
+            parent_dir: "C:\\Users\\Satoshi\\Projects".to_string(),
+            file_name: "app.rs".to_string(),
+            extension: Some("rs".to_string()),
+            size_bytes: 4096,
+            modified_at: 2000,
+            created_at: 1800,
+            is_dir: false,
+            content_hash: Some("hash-rs-unique".to_string()),
+            mime_type: Some("text/rust".to_string()),
+            indexed_at: 2050,
+        };
+
+        db.upsert_indexed_file(&f1).unwrap();
+        db.upsert_indexed_file(&f2).unwrap();
+        db.upsert_indexed_file(&f3).unwrap();
+
+        assert_eq!(db.count_indexed_files().unwrap(), 3);
+
+        // Search
+        let search_res = db.search_indexed_files("paper", 10).unwrap();
+        assert_eq!(search_res.len(), 2);
+
+        // Analysis
+        let analysis = db.get_storage_analysis(5).unwrap();
+        assert_eq!(analysis.total_files, 3);
+        assert_eq!(analysis.total_bytes, 2048 + 2048 + 4096);
+        assert_eq!(analysis.largest_files[0].path, f3.path);
+        assert_eq!(analysis.old_downloads.len(), 1);
+        assert_eq!(analysis.old_downloads[0].path, f2.path);
+
+        // Duplicates
+        let duplicates = db.find_duplicate_candidates().unwrap();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].content_hash, "hash-abc-1");
+        assert_eq!(duplicates[0].files.len(), 2);
+
+        // Delete one file
+        assert!(db.delete_indexed_file(&f1.path).unwrap());
+        assert_eq!(db.count_indexed_files().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_phase10_storage_file_operations_journal() {
+        let db = Database::open_in_memory().unwrap();
+
+        let op = FileOperationRecord {
+            id: "op-001".to_string(),
+            op_type: "move".to_string(),
+            source_path: "C:\\tmp\\source.txt".to_string(),
+            destination_path: Some("C:\\tmp\\dest.txt".to_string()),
+            backup_path: Some("C:\\tmp\\.hime\\recycle\\source.txt".to_string()),
+            source_hash: Some("hash123".to_string()),
+            dest_hash: None,
+            actor: "agent".to_string(),
+            approval_id: Some("appr-101".to_string()),
+            status: "staged".to_string(),
+            started_at: 1000,
+            completed_at: None,
+            error_message: None,
+        };
+
+        db.record_file_operation(&op).unwrap();
+
+        // Check uncommitted operations
+        let uncommitted = db.get_uncommitted_file_operations().unwrap();
+        assert_eq!(uncommitted.len(), 1);
+        assert_eq!(uncommitted[0].id, "op-001");
+
+        // Update status to committed
+        assert!(db.update_file_operation_status("op-001", "committed", Some("hash123"), true, None).unwrap());
+
+        let committed = db.get_file_operation("op-001").unwrap().unwrap();
+        assert_eq!(committed.status, "committed");
+        assert_eq!(committed.dest_hash.as_deref(), Some("hash123"));
+        assert!(committed.completed_at.is_some());
+
+        let uncommitted_now = db.get_uncommitted_file_operations().unwrap();
+        assert_eq!(uncommitted_now.len(), 0);
+    }
+
+    #[test]
+    fn test_phase10_storage_file_rules_and_backups() {
+        let db = Database::open_in_memory().unwrap();
+
+        let rule = FileRuleRecord {
+            id: "rule-pdf".to_string(),
+            name: "Archive PDF reports".to_string(),
+            pattern: "*.pdf".to_string(),
+            target_dir: "C:\\Users\\Satoshi\\Documents\\PDFs".to_string(),
+            naming_template: Some("{name}_{date}.{ext}".to_string()),
+            action: "propose".to_string(),
+            is_active: true,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+
+        db.create_file_rule(&rule).unwrap();
+        let rules = db.list_file_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "Archive PDF reports");
+
+        db.update_file_rule_active("rule-pdf", false).unwrap();
+        let fetched_rule = db.get_file_rule("rule-pdf").unwrap().unwrap();
+        assert!(!fetched_rule.is_active);
+
+        // Backup
+        let backup = StorageBackupRecord {
+            id: "bak-01".to_string(),
+            source_root: "C:\\Users\\Satoshi\\Documents".to_string(),
+            backup_destination: "D:\\HimeBackups\\Docs".to_string(),
+            file_count: 42,
+            total_bytes: 1048576,
+            manifest_hash: "sha256-manifest-001".to_string(),
+            created_at: 2000,
+            verified_at: None,
+        };
+
+        db.create_backup_record(&backup).unwrap();
+        let backups = db.list_backup_records().unwrap();
+        assert_eq!(backups.len(), 1);
+        assert!(backups[0].verified_at.is_none());
+
+        assert!(db.verify_backup_record("bak-01").unwrap());
+        let verified = db.list_backup_records().unwrap();
+        assert!(verified[0].verified_at.is_some());
     }
 }

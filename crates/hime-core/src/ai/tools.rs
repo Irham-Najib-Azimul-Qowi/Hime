@@ -45,10 +45,38 @@ pub struct ToolGateway {
     storage: Arc<Database>,
     policy: Arc<PolicyEngine>,
     event_bus: EventBus,
+    ops_engine: Arc<crate::storage::operations::SafeFileOperationsEngine>,
 }
 
 impl ToolGateway {
     pub fn new(storage: Arc<Database>, policy: Arc<PolicyEngine>, event_bus: EventBus) -> Self {
+        let mut map = HashMap::new();
+        for t in Self::create_default_tools() {
+            map.insert(t.id.clone(), t);
+        }
+
+        let base_dir = hime_pal::PlatformPaths::app_data_dir();
+        let ops_engine = Arc::new(crate::storage::operations::SafeFileOperationsEngine::new(storage.clone(), &base_dir).unwrap_or_else(|_| {
+            let tmp = std::env::temp_dir().join(format!("hime_ops_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let _ = std::fs::create_dir_all(&tmp);
+            crate::storage::operations::SafeFileOperationsEngine::new(storage.clone(), &tmp).expect("Failed to init fallback storage ops engine")
+        }));
+
+        Self {
+            tools: Arc::new(RwLock::new(map)),
+            storage,
+            policy,
+            event_bus,
+            ops_engine,
+        }
+    }
+
+    pub fn with_ops_engine(
+        storage: Arc<Database>,
+        policy: Arc<PolicyEngine>,
+        event_bus: EventBus,
+        ops_engine: Arc<crate::storage::operations::SafeFileOperationsEngine>,
+    ) -> Self {
         let mut map = HashMap::new();
         for t in Self::create_default_tools() {
             map.insert(t.id.clone(), t);
@@ -59,6 +87,7 @@ impl ToolGateway {
             storage,
             policy,
             event_bus,
+            ops_engine,
         }
     }
 
@@ -178,6 +207,150 @@ impl ToolGateway {
                 risk_level: RiskLevel::L0ReadOnly,
                 idempotent: true,
                 timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "storage.search_files".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Search indexed files by query string or keyword in name/path".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.inspect_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Inspect full indexed metadata and content hash of a specific file".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "storage.analyze".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Retrieve disk usage breakdown, largest files, and cleanable candidates".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "top_n": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.find_duplicates".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Find duplicate file groups matching identical SHA-256 hashes".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.propose_move".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Create a proposal to safely reorganize or move a file according to naming rules".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_path", "target_dir"],
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "target_dir": { "type": "string" },
+                        "naming_template": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "storage.execute_move".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Execute an atomic safe file move (staging, hash verification, Hime Recycle, journal)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_path", "destination_path"],
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "storage.delete_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Safely move a file to Hime Recycle (reversibly) with required approval".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L3Destructive,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.restore_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Restore a previously moved or deleted file from Hime Recycle using operation ID".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["operation_id"],
+                    "properties": {
+                        "operation_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.handle_new_download".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Inspect a newly downloaded file for completion (.crdownload/.part), duplicate detection, or version candidates".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["download_path"],
+                    "properties": {
+                        "download_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
             },
         ]
     }
@@ -305,7 +478,7 @@ impl ToolGateway {
         }
 
         // Step 4: Dispatch tool execution
-        let exec_result = self.dispatch_tool_logic(tool_id, &params).await;
+        let exec_result = self.dispatch_tool_logic(client_id, tool_id, &params).await;
 
         let (success, raw_output, err_msg) = match exec_result {
             Ok(val) => (true, val, None),
@@ -352,6 +525,7 @@ impl ToolGateway {
 
     async fn dispatch_tool_logic(
         &self,
+        client_id: &str,
         tool_id: &str,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
@@ -470,6 +644,108 @@ impl ToolGateway {
                     "target_lang": target,
                     "translated": translated
                 }))
+            }
+
+            "storage.search_files" => {
+                let query = params["query"].as_str().ok_or("Missing required field 'query'")?;
+                let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+                let files = self.storage.search_indexed_files(query, limit).map_err(|e| e.to_string())?;
+                serde_json::to_value(&files).map_err(|e| e.to_string())
+            }
+
+            "storage.inspect_file" => {
+                let path = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                self.policy.validate_path_safety(path).map_err(|e| format!("Security validation rejected path: {}", e))?;
+                let file = self.storage.get_indexed_file(path).map_err(|e| e.to_string())?;
+                serde_json::to_value(&file).map_err(|e| e.to_string())
+            }
+
+            "storage.analyze" => {
+                let top_n = params["top_n"].as_u64().unwrap_or(10) as usize;
+                let analysis = self.storage.get_storage_analysis(top_n).map_err(|e| e.to_string())?;
+                serde_json::to_value(&analysis).map_err(|e| e.to_string())
+            }
+
+            "storage.find_duplicates" => {
+                let duplicates = self.storage.find_duplicate_candidates().map_err(|e| e.to_string())?;
+                serde_json::to_value(&duplicates).map_err(|e| e.to_string())
+            }
+
+            "storage.propose_move" => {
+                let source_path = params["source_path"].as_str().ok_or("Missing required field 'source_path'")?;
+                let target_dir = params["target_dir"].as_str().ok_or("Missing required field 'target_dir'")?;
+                let template = params["naming_template"].as_str();
+
+                self.policy.validate_path_safety(source_path).map_err(|e| format!("Security validation rejected path: {}", e))?;
+                self.policy.validate_path_safety(target_dir).map_err(|e| format!("Security validation rejected path: {}", e))?;
+
+                let src_p = std::path::Path::new(source_path);
+                let fname = src_p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dest_name = if let Some(tmpl) = template {
+                    let stem = src_p.file_stem().unwrap_or_default().to_string_lossy();
+                    let ext = src_p.extension().unwrap_or_default().to_string_lossy();
+                    tmpl.replace("{name}", &stem).replace("{ext}", &ext)
+                } else {
+                    fname
+                };
+                let dest_p = std::path::Path::new(target_dir).join(dest_name);
+
+                Ok(serde_json::json!({
+                    "proposal_id": format!("prop-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+                    "source_path": source_path,
+                    "suggested_destination": dest_p.to_string_lossy(),
+                    "reason": "Rule-based organization proposal"
+                }))
+            }
+
+            "storage.execute_move" => {
+                let source_path = params["source_path"].as_str().ok_or("Missing required field 'source_path'")?;
+                let dest_path = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let op_id = format!("op-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.safe_move(
+                    &op_id,
+                    std::path::Path::new(source_path),
+                    std::path::Path::new(dest_path),
+                    client_id,
+                    None,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.delete_file" => {
+                let path = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                let op_id = format!("del-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.safe_delete(
+                    &op_id,
+                    std::path::Path::new(path),
+                    client_id,
+                    None,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.restore_file" => {
+                let original_op_id = params["operation_id"].as_str().ok_or("Missing required field 'operation_id'")?;
+                let restore_op_id = format!("res-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.restore_file(
+                    &restore_op_id,
+                    original_op_id,
+                    client_id,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.handle_new_download" => {
+                let download_path = params["download_path"].as_str().ok_or("Missing required field 'download_path'")?;
+                let download_intel = crate::storage::download::DownloadIntelligence::new(self.storage.clone(), self.ops_engine.clone());
+                let report = download_intel.inspect_download(std::path::Path::new(download_path)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&report).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("Unknown tool handler '{}'", tool_id)),

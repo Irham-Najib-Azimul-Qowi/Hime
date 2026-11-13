@@ -824,3 +824,122 @@ pub async fn cancel_conversation_logic(pipe_name: &str) -> Result<serde_json::Va
         Err("Unsupported on this platform".to_string())
     }
 }
+
+// -----------------------------------------------------------------------------
+// Phase 10: Storage Intelligence IPC Logic
+// -----------------------------------------------------------------------------
+
+pub async fn send_rpc_request(
+    pipe_name: &str,
+    method: &str,
+    params: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        let mut client = connect_pipe_client(pipe_name)
+            .await
+            .map_err(|e| format!("Hime Core is unavailable: {}", e))?;
+
+        let req = JsonRpcRequest::new(
+            format!("req-{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()).as_str(),
+            method,
+            params,
+        );
+        let payload = req
+            .to_bytes()
+            .map_err(|e| format!("Serialization error: {}", e))?;
+        let frame =
+            Frame::new(MsgType::Request, payload).map_err(|e| format!("Framing error: {}", e))?;
+
+        frame
+            .write_to(&mut client)
+            .await
+            .map_err(|e| format!("IPC write error: {}", e))?;
+
+        let resp_frame = Frame::read_from(&mut client)
+            .await
+            .map_err(|e| format!("IPC read error: {}", e))?;
+        let resp = JsonRpcResponse::from_slice(&resp_frame.payload)
+            .map_err(|e| format!("JSON-RPC parse error: {}", e))?;
+
+        if let Some(err) = resp.error {
+            Err(format!("IPC Error ({}): {}", err.code, err.message))
+        } else {
+            Ok(resp.result.unwrap_or_default())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pipe_name, method, params);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+pub async fn storage_get_analysis_logic(pipe_name: &str, top_n: Option<usize>) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "storage.analysis",
+        Some(serde_json::json!({ "top_n": top_n.unwrap_or(10) })),
+    )
+    .await
+}
+
+pub async fn storage_get_duplicates_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "storage.duplicates", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn storage_get_operations_logic(pipe_name: &str, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "storage.operations.list",
+        Some(serde_json::json!({ "limit": limit.unwrap_or(50) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn storage_restore_operation_logic(pipe_name: &str, original_op_id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "storage.operations.restore",
+        Some(serde_json::json!({
+            "original_op_id": original_op_id,
+            "actor": "desktop_user"
+        })),
+    )
+    .await
+}
+
+pub async fn storage_get_rules_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "storage.rules.list", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn storage_toggle_rule_logic(pipe_name: &str, id: &str, is_active: bool) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "storage.rules.toggle",
+        Some(serde_json::json!({ "id": id, "is_active": is_active })),
+    )
+    .await
+}
+
+pub async fn storage_search_logic(pipe_name: &str, query: &str, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "storage.search",
+        Some(serde_json::json!({ "query": query, "limit": limit.unwrap_or(20) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn storage_scan_logic(pipe_name: &str, root_path: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "storage.scan",
+        Some(serde_json::json!({ "root_path": root_path })),
+    )
+    .await
+}

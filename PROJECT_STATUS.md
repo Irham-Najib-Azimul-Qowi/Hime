@@ -1,18 +1,17 @@
 # PROJECT STATUS — HIME
-**Diperbarui:** 2026-11-13 17:25 WIB
+**Diperbarui:** 2026-11-13 20:45 WIB
 
 ---
 
 ## 1. POSISI SAAT INI
 
-- **Fase Aktif:** **Phase 10 — Local Storage Intelligence** (Workspace, VFS, Semantic Search, Safe File Operations)
-- **Status Phase 09:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
-- **Tugas Berjalan:** Penutupan formal Phase 09 dan persiapan eksekusi **Phase 10 (Local Storage Intelligence)**
-- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-10-LOCAL-STORAGE-INTELLIGENCE.md` untuk memulai Task 10.1 (Workspace Manager & Canonical Path System)
+- **Fase Aktif:** **Phase 11 — Mobile and Device Layer** (Android Companion, Cross-Device Sync, Tailscale Mesh & Remote Execution)
+- **Status Phase 10:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
+- **Tugas Berjalan:** Penutupan formal Phase 10 (Storage Intelligence) dan inisialisasi **Phase 11 (Mobile and Device Layer)**
+- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-11-MOBILE-AND-DEVICE-LAYER.md` untuk persiapan arsitektur Android Companion & mTLS Device Layer.
 - **Cara Melanjutkan Setelah Sesi Terputus:**
-  1. Jalankan `scripts/test.ps1` untuk memverifikasi 76 test lulus 100%.
-  2. Buka `project-management/OWNER-DECISIONS-NEEDED.md` untuk memeriksa status OD-01 atau OD-02.
-  3. Buat branch `phase/10-storage-intelligence` dari `phase/09-intelligence-core` dan mulai implementasi Phase 10.
+  1. Jalankan `powershell -File scripts/test.ps1` untuk memverifikasi seluruh 89 test lulus 100%.
+  2. Buat branch `phase/11-mobile-device-layer` dari commit Phase 10 dan lanjutkan eksekusi Fase 11.
 
 ---
 
@@ -30,8 +29,8 @@
 | **Phase 07** | Hime Desktop Experience | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-07-COMPLETION-REPORT.md` | React 18 UI, Dynamic Island 3 state, Omnibox, Activity Stream, 37 tests. |
 | **Phase 08** | AI Runtime Integration | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-08-COMPLETION-REPORT.md` | Hermes Adapter, 9Router Adapter, DPAPI Vault Provider (:20129), SEC-09 CoT Redaction, 47 tests. |
 | **Phase 09** | Hime Intelligence Core | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-09-COMPLETION-REPORT.md` | Policy L0–L4, Tool Gateway, Task Engine, Event Buffer, Memory Token Budget, Island Translation, 76 tests. |
-| **Phase 10** | Storage Intelligence | `READY TO START` | — | Virtual Filesystem, SQLite FTS5 index, file safety journal, atomic writes. |
-| **Phase 11** | Hime Mobile & Device Layer | `PLANNED` | — | Android native Kotlin, Foreground Service, mutual TLS. |
+| **Phase 10** | Storage Intelligence | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-10-COMPLETION-REPORT.md` | Indexer, Storage Analyzer, Duplicates/Versions, Smart Organizer, Download Intelligence, Safe Ops (Staging, Hime Recycle, 1-Click Restore), 89 tests. |
+| **Phase 11** | Hime Mobile & Device Layer | `READY TO START` | — | Android native Kotlin, Foreground Service, mutual TLS, device pairing. |
 | **Phase 12** | Productivity & Documents | `PLANNED` | — | Kanban accountability, pengingat HP/desktop, DOCX/XLSX/PDF. |
 | **Phase 13** | Browser & Developer Workspace | `PLANNED` | — | Playwright browser profile Hime, GitHub/Drive integration. |
 | **Phase 14** | Specialist Agents & Skills | `PLANNED` | — | Registri specialist agent, quality bar, anti-loop. |
@@ -52,14 +51,15 @@
 
 | ID | Deskripsi Kewajiban | Asal Fase | Target Penutupan | Status Terkini |
 |:---:|:---|:---:|:---|:---|
-| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime` & `phase/09-intelligence-core`)** |
+| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime`, `phase/09-intelligence-core`, `phase/10-storage-intelligence`)** |
 | **G2** | Verifikasi GUI interaktif penuh (pointer clicks, drag, animations, screenshot, DPI) | Fase 07 | Fase 15 (penuh) | `NOT TESTED` (Memerlukan sesi desktop pengguna aktif) |
 | **G3** | IB-01 RESOLVED tuntas | Fase 03/04 | Fase 08 | **RESOLVED via Provider Adapter :20129 + DPAPI Vault** |
 | **G4** | IB-02 RESOLVED atau tetap diblokir | Fase 03/04 | Fase 08 | **OPEN — Jalur Kredensial Sensitif Diblokir (OD-01)** |
 | **G5** | Uji Win32 Job Object (breakaway, assignment failure, fail-closed) | Fase 04/06 | Fase 08 | **RESOLVED (`hime-pal::supervisor`)** |
 | **G6** | Idempotency & Crash Recovery pada Task Engine | Fase 04 | Fase 09 | **RESOLVED (`hime-core::ai::task_engine`)** |
-| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 08 | Fase 09 | **RESOLVED (76/76 test unit & integration pass)** |
-| **G13** | Audit trail tak-dapat-diubah-diam-diam (hash chaining) | Fase 08 | Fase 09 | **RESOLVED (`hime-storage::database` SHA-256 chain)** |
+| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 08 | Fase 09 | **RESOLVED (89/89 test unit & integration pass)** |
+| **G9** | Kebijakan Trash / Pemulihan Reversibel (Hime Recycle) | Fase 08 | Fase 10 | **RESOLVED (`SafeFileOperationsEngine`, `.hime/recycle`, 1-Click Restore)** |
+| **G13** | Audit trail tak-dapat-diubah-diam-diam & ekspansi `hime-storage` | Fase 08 | Fase 10 | **RESOLVED (Hash-chained audit events + File operations journal SQLite WAL)** |
 
 ---
 
@@ -73,7 +73,8 @@ Lihat `project-management/OWNER-DECISIONS-NEEDED.md`:
 
 ## 6. METRIK TERAKHIR
 
-- **Test Suite Workspace:** 76 passed, 0 failed, 0 ignored (100% pass)
-- **Frontend Build (Vite):** 1.66 detik (49 modul ditransformasikan, dist bersih)
+- **Test Suite Workspace:** 89 passed, 0 failed, 0 ignored (100% pass)
+- **Frontend Build (Vite):** 1.08 detik (50 modul ditransformasikan, dist bersih)
+- **Rust Dev Build:** 6.41 detik (Workspace crates kompilasi bersih)
 - **Hime Core Runtime RAM:** ~18.4 MB (di bawah batas 60 MB)
-- **Commit Baseline:** Local branch `phase/09-intelligence-core`, zero push.
+- **Commit Baseline:** Local branch `phase/10-storage-intelligence`, zero push.

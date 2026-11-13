@@ -8,7 +8,10 @@ use hime_desktop::{
     execute_tool_logic, get_activity_events_logic, get_ai_models_logic, get_ai_status_logic,
     get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
     list_conversations_logic, list_credentials_logic, ping_core_logic, resolve_approval_logic,
-    send_conversation_message_logic, store_credential_logic, PingResult,
+    send_conversation_message_logic, storage_get_analysis_logic, storage_get_duplicates_logic,
+    storage_get_operations_logic, storage_get_rules_logic, storage_restore_operation_logic,
+    storage_scan_logic, storage_search_logic, storage_toggle_rule_logic, store_credential_logic,
+    PingResult,
 };
 #[cfg(windows)]
 use hime_ipc::transport::windows_pipe::DEFAULT_HIME_PIPE;
@@ -290,6 +293,108 @@ async fn conversation_cancel() -> Result<serde_json::Value, String> {
     }
 }
 
+#[command]
+async fn storage_get_analysis(top_n: Option<usize>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        storage_get_analysis_logic(DEFAULT_HIME_PIPE, top_n).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = top_n;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_get_duplicates() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        storage_get_duplicates_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_get_operations(limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        storage_get_operations_logic(DEFAULT_HIME_PIPE, limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_restore_operation(original_op_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        storage_restore_operation_logic(DEFAULT_HIME_PIPE, &original_op_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = original_op_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_get_rules() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        storage_get_rules_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_toggle_rule(id: String, is_active: bool) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        storage_toggle_rule_logic(DEFAULT_HIME_PIPE, &id, is_active).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (id, is_active);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_search(query: String, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        storage_search_logic(DEFAULT_HIME_PIPE, &query, limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (query, limit);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn storage_scan(root_path: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        storage_scan_logic(DEFAULT_HIME_PIPE, &root_path).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = root_path;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -310,6 +415,14 @@ fn main() {
             conversation_get_messages,
             conversation_send_message,
             conversation_cancel,
+            storage_get_analysis,
+            storage_get_duplicates,
+            storage_get_operations,
+            storage_restore_operation,
+            storage_get_rules,
+            storage_toggle_rule,
+            storage_search,
+            storage_scan,
             window_set_always_on_top,
             window_set_size_mode,
             window_minimize,

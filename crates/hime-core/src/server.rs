@@ -28,6 +28,7 @@ pub struct CoreServer {
     pub tasks: Arc<tokio::sync::Mutex<Vec<TaskRecord>>>,
     pub approvals: Arc<tokio::sync::Mutex<HashMap<String, ApprovalRecord>>>,
     pub ai: Arc<AiOrchestrator>,
+    pub storage_engine: Arc<crate::storage::StorageEngine>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -72,6 +73,13 @@ impl CoreServer {
             20129,
         ));
 
+        let base_dir = hime_pal::PlatformPaths::app_data_dir();
+        let storage_engine = Arc::new(crate::storage::StorageEngine::new(storage.clone(), &base_dir).unwrap_or_else(|_| {
+            let tmp = std::env::temp_dir().join(format!("hime_se_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let _ = std::fs::create_dir_all(&tmp);
+            crate::storage::StorageEngine::new(storage.clone(), &tmp).expect("Failed to init storage engine")
+        }));
+
         Self {
             version: "0.1.0".to_string(),
             event_bus,
@@ -83,6 +91,7 @@ impl CoreServer {
             tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             approvals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ai,
+            storage_engine,
         }
     }
 
@@ -1078,6 +1087,178 @@ impl CoreServer {
                         format!("Audit trail verification failed: {}", e),
                         None,
                     ),
+                }
+            }
+
+            "storage.scan" => {
+                let params = req.params.unwrap_or_default();
+                let root_path = params.get("root_path").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage_engine.indexer.scan_directory(std::path::Path::new(root_path)) {
+                    Ok(count) => JsonRpcResponse::success(req_id, serde_json::json!({ "indexed_count": count })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.search" => {
+                let params = req.params.unwrap_or_default();
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                match self.storage.search_indexed_files(query, limit) {
+                    Ok(files) => JsonRpcResponse::success(req_id, serde_json::to_value(files).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.analysis" => {
+                let params = req.params.unwrap_or_default();
+                let top_n = params.get("top_n").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                match self.storage_engine.analyzer.generate_report(top_n) {
+                    Ok(report) => JsonRpcResponse::success(req_id, serde_json::to_value(report).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.duplicates" => {
+                match self.storage_engine.duplicate_detector.find_exact_duplicates() {
+                    Ok(dups) => JsonRpcResponse::success(req_id, serde_json::to_value(dups).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.versions" => {
+                match self.storage_engine.duplicate_detector.find_version_candidates() {
+                    Ok(vers) => JsonRpcResponse::success(req_id, serde_json::to_value(vers).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.proposals.list" => {
+                let params = req.params.unwrap_or_default();
+                let dir = params.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage_engine.organizer.evaluate_proposals(dir) {
+                    Ok(props) => JsonRpcResponse::success(req_id, serde_json::to_value(props).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.proposals.execute" => {
+                let params = req.params.unwrap_or_default();
+                let prop_val = params.get("proposal").cloned().unwrap_or_default();
+                match serde_json::from_value::<crate::storage::OrganizationProposal>(prop_val) {
+                    Ok(prop) => {
+                        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("desktop");
+                        match self.storage_engine.organizer.execute_proposal(&prop, actor, None) {
+                            Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                            Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                        }
+                    }
+                    Err(e) => JsonRpcResponse::error(req_id, INVALID_REQUEST, format!("Invalid proposal: {}", e), None),
+                }
+            }
+
+            "storage.operations.list" => {
+                let params = req.params.unwrap_or_default();
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                match self.storage.list_file_operations(limit) {
+                    Ok(ops) => JsonRpcResponse::success(req_id, serde_json::to_value(ops).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.operations.restore" => {
+                let params = req.params.unwrap_or_default();
+                let original_op_id = params.get("original_op_id").and_then(|v| v.as_str()).unwrap_or("");
+                let restore_op_id = format!("res-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+                let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("desktop");
+
+                match self.storage_engine.ops_engine.restore_file(&restore_op_id, original_op_id, actor) {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.rules.list" => {
+                match self.storage.list_file_rules() {
+                    Ok(rules) => JsonRpcResponse::success(req_id, serde_json::to_value(rules).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.rules.create" => {
+                let params = req.params.unwrap_or_default();
+                let rule_val = params.get("rule").cloned().unwrap_or_default();
+                match serde_json::from_value::<hime_storage::FileRuleRecord>(rule_val) {
+                    Ok(rule) => match self.storage.create_file_rule(&rule) {
+                        Ok(_) => JsonRpcResponse::success(req_id, serde_json::json!({ "created": true, "id": rule.id })),
+                        Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                    },
+                    Err(e) => JsonRpcResponse::error(req_id, INVALID_REQUEST, format!("Invalid file rule: {}", e), None),
+                }
+            }
+
+            "storage.rules.delete" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage.delete_file_rule(id) {
+                    Ok(deleted) => JsonRpcResponse::success(req_id, serde_json::json!({ "deleted": deleted })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.rules.toggle" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let is_active = params.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+                match self.storage.update_file_rule_active(id, is_active) {
+                    Ok(updated) => JsonRpcResponse::success(req_id, serde_json::json!({ "updated": updated })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.backups.create" => {
+                let params = req.params.unwrap_or_default();
+                let backup_id = params.get("backup_id").and_then(|v| v.as_str()).unwrap_or("");
+                let src = params.get("source_root").and_then(|v| v.as_str()).unwrap_or("");
+                let dst = params.get("backup_destination").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage_engine.backup.create_backup(backup_id, std::path::Path::new(src), std::path::Path::new(dst)) {
+                    Ok(rec) => JsonRpcResponse::success(req_id, serde_json::to_value(rec).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.backups.list" => {
+                match self.storage.list_backup_records() {
+                    Ok(recs) => JsonRpcResponse::success(req_id, serde_json::to_value(recs).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.backups.verify" => {
+                let params = req.params.unwrap_or_default();
+                let backup_id = params.get("backup_id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage_engine.backup.verify_backup(backup_id) {
+                    Ok(verified) => JsonRpcResponse::success(req_id, serde_json::json!({ "verified": verified })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.download.inspect" => {
+                let params = req.params.unwrap_or_default();
+                let download_path = params.get("download_path").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage_engine.download_intel.inspect_download(std::path::Path::new(download_path)) {
+                    Ok(report) => JsonRpcResponse::success(req_id, serde_json::to_value(report).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "storage.download.replace_and_archive" => {
+                let params = req.params.unwrap_or_default();
+                let new_dl = params.get("new_download").and_then(|v| v.as_str()).unwrap_or("");
+                let existing = params.get("existing_file").and_then(|v| v.as_str()).unwrap_or("");
+                let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("desktop");
+                match self.storage_engine.download_intel.replace_and_archive_old(std::path::Path::new(new_dl), std::path::Path::new(existing), actor) {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
                 }
             }
 

@@ -257,3 +257,182 @@ export const cancelConversation = async (): Promise<{ cancelled: boolean; status
   return await invoke<{ cancelled: boolean; status: string }>('conversation_cancel');
 };
 
+// -----------------------------------------------------------------------------
+// Phase 10: Storage Intelligence IPC APIs
+// -----------------------------------------------------------------------------
+
+import {
+  StorageAnalysisReport,
+  DuplicateGroup,
+  FileOperation,
+  FileRule,
+  IndexedFile,
+} from '../types/storage';
+
+export const getStorageAnalysis = async (topN: number = 10): Promise<StorageAnalysisReport> => {
+  if (!isTauriEnvironment()) {
+    return {
+      base_report: {
+        total_files: 42,
+        total_bytes: 52428800,
+        by_extension: [
+          { extension: 'pdf', count: 18, total_bytes: 25000000 },
+          { extension: 'docx', count: 12, total_bytes: 15000000 },
+          { extension: 'rs', count: 8, total_bytes: 4000000 },
+          { extension: 'png', count: 4, total_bytes: 8428800 },
+        ],
+        largest_files: [
+          {
+            path: 'C:\\Users\\Satoshi\\Documents\\Annual_Report_2026.pdf',
+            parent_dir: 'C:\\Users\\Satoshi\\Documents',
+            file_name: 'Annual_Report_2026.pdf',
+            extension: 'pdf',
+            size_bytes: 14200000,
+            modified_at: Math.floor(Date.now() / 1000) - 86400,
+            created_at: Math.floor(Date.now() / 1000) - 172800,
+            is_dir: false,
+            content_hash: 'a1b2c3d4e5f6',
+            mime_type: 'application/pdf',
+            indexed_at: Math.floor(Date.now() / 1000),
+          },
+        ],
+        old_downloads: [
+          {
+            path: 'C:\\Users\\Satoshi\\Downloads\\installer_setup.exe',
+            parent_dir: 'C:\\Users\\Satoshi\\Downloads',
+            file_name: 'installer_setup.exe',
+            extension: 'exe',
+            size_bytes: 85000000,
+            modified_at: Math.floor(Date.now() / 1000) - 35 * 86400,
+            created_at: Math.floor(Date.now() / 1000) - 40 * 86400,
+            is_dir: false,
+            content_hash: 'deadbeef1234',
+            mime_type: 'application/octet-stream',
+            indexed_at: Math.floor(Date.now() / 1000),
+          },
+        ],
+      },
+      cleanable_suggestions: [
+        {
+          category: 'Old Download Installer/Archive',
+          path: 'C:\\Users\\Satoshi\\Downloads\\installer_setup.exe',
+          size_bytes: 85000000,
+          reason: 'Installer (.exe) in Downloads older than 30 days',
+        },
+      ],
+      cleanable_bytes: 85000000,
+    };
+  }
+  return await invoke<StorageAnalysisReport>('storage_get_analysis', { topN });
+};
+
+export const getStorageDuplicates = async (): Promise<DuplicateGroup[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        content_hash: 'sha256-abc123dup',
+        size_bytes: 2048576,
+        files: [
+          {
+            path: 'C:\\Users\\Satoshi\\Documents\\Draft_Proposal.pdf',
+            parent_dir: 'C:\\Users\\Satoshi\\Documents',
+            file_name: 'Draft_Proposal.pdf',
+            extension: 'pdf',
+            size_bytes: 2048576,
+            modified_at: Math.floor(Date.now() / 1000) - 7200,
+            created_at: Math.floor(Date.now() / 1000) - 14400,
+            is_dir: false,
+            content_hash: 'sha256-abc123dup',
+            mime_type: 'application/pdf',
+            indexed_at: Math.floor(Date.now() / 1000),
+          },
+          {
+            path: 'C:\\Users\\Satoshi\\Downloads\\Draft_Proposal (1).pdf',
+            parent_dir: 'C:\\Users\\Satoshi\\Downloads',
+            file_name: 'Draft_Proposal (1).pdf',
+            extension: 'pdf',
+            size_bytes: 2048576,
+            modified_at: Math.floor(Date.now() / 1000) - 3600,
+            created_at: Math.floor(Date.now() / 1000) - 3600,
+            is_dir: false,
+            content_hash: 'sha256-abc123dup',
+            mime_type: 'application/pdf',
+            indexed_at: Math.floor(Date.now() / 1000),
+          },
+        ],
+      },
+    ];
+  }
+  return await invoke<DuplicateGroup[]>('storage_get_duplicates');
+};
+
+export const getStorageOperations = async (limit: number = 50): Promise<FileOperation[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'op-preview-01',
+        op_type: 'move',
+        source_path: 'C:\\Users\\Satoshi\\Downloads\\paper.pdf',
+        destination_path: 'C:\\Users\\Satoshi\\Documents\\Research\\paper.pdf',
+        backup_path: 'C:\\Users\\Satoshi\\AppData\\Local\\Hime\\recycle\\paper.pdf',
+        source_hash: 'hash-preview',
+        dest_hash: 'hash-preview',
+        actor: 'smart_organizer',
+        approval_id: null,
+        status: 'committed',
+        started_at: Math.floor(Date.now() / 1000) - 600,
+        completed_at: Math.floor(Date.now() / 1000) - 598,
+        error_message: null,
+      },
+    ];
+  }
+  return await invoke<FileOperation[]>('storage_get_operations', { limit });
+};
+
+export const restoreStorageOperation = async (originalOpId: string): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { status: 'committed', restored: true, original_op_id: originalOpId };
+  }
+  return await invoke('storage_restore_operation', { originalOpId });
+};
+
+export const getStorageRules = async (): Promise<FileRule[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'rule-pdf-archive',
+        name: 'Auto-Organize PDF Reports',
+        pattern: '*.pdf',
+        target_dir: 'C:\\Users\\Satoshi\\Documents\\PDFs',
+        naming_template: '{name}_{date}.{ext}',
+        action: 'propose',
+        is_active: true,
+        created_at: Math.floor(Date.now() / 1000) - 86400,
+        updated_at: Math.floor(Date.now() / 1000) - 86400,
+      },
+    ];
+  }
+  return await invoke<FileRule[]>('storage_get_rules');
+};
+
+export const toggleStorageRule = async (id: string, isActive: boolean): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { updated: true, id, isActive };
+  }
+  return await invoke('storage_toggle_rule', { id, isActive });
+};
+
+export const searchStorageFiles = async (query: string, limit: number = 20): Promise<IndexedFile[]> => {
+  if (!isTauriEnvironment()) {
+    return [];
+  }
+  return await invoke<IndexedFile[]>('storage_search', { query, limit });
+};
+
+export const scanStorageDirectory = async (rootPath: string): Promise<{ indexed_count: number }> => {
+  if (!isTauriEnvironment()) {
+    return { indexed_count: 42 };
+  }
+  return await invoke<{ indexed_count: number }>('storage_scan', { rootPath });
+};
+
