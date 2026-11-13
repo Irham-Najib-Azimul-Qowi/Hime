@@ -1,0 +1,19 @@
+[package]
+name = "hime-security"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["sync"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+

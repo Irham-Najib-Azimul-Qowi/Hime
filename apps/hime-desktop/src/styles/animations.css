@@ -1,0 +1,91 @@
+/* ==========================================================================
+   Hime Assistant — Purposeful Motion & Micro-interactions
+   ========================================================================== */
+
+@keyframes pulse-subtle {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.65;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes modal-enter {
+  0% {
+    opacity: 0;
+    transform: scale(0.96) translateY(-8px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-down {
+  0% {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Base utility animation classes */
+.animate-pulse-subtle {
+  animation: pulse-subtle 2.4s ease-in-out infinite;
+}
+
+.animate-modal-enter {
+  animation: modal-enter var(--duration-expand) var(--ease-spring) forwards;
+}
+
+.animate-fade-in {
+  animation: fade-in var(--duration-normal) var(--ease-out-quad) forwards;
+}
+
+.animate-slide-down {
+  animation: slide-down var(--duration-expand) var(--ease-spring) forwards;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Button & Interactive micro-interactions */
+.btn-pressable {
+  transition: transform var(--duration-micro) var(--ease-spring),
+              background-color var(--duration-micro) ease-out,
+              border-color var(--duration-micro) ease-out;
+}
+
+.btn-pressable:hover {
+  transform: translateY(-1px);
+}
+
+.btn-pressable:active {
+  transform: scale(0.97) translateY(0);
+}
+

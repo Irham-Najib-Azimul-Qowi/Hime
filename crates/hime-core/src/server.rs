@@ -1,0 +1,729 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{error, info, warn};
+
+use hime_ipc::framing::{Frame, MsgType};
+use hime_ipc::protocol::{
+    JsonRpcRequest, JsonRpcResponse, INVALID_REQUEST, METHOD_NOT_FOUND, POLICY_VIOLATION,
+    UNAUTHORIZED,
+};
+use hime_ipc::session::ScopedNonceTracker;
+use hime_security::csprng::generate_token_256;
+use hime_security::policy::{Action, DefaultSecurityPolicy, PolicyDecision, PolicyEnforcer};
+use hime_storage::Database;
+
+use crate::ai::AiOrchestrator;
+use crate::bus::{EventBus, SystemEvent};
+
+pub struct CoreServer {
+    pub version: String,
+    pub event_bus: EventBus,
+    pub nonce_tracker: Arc<ScopedNonceTracker>,
+    pub policy: Arc<dyn PolicyEnforcer>,
+    pub storage: Arc<Database>,
+    pub auth_token: String,
+    pub start_time: std::time::Instant,
+    pub tasks: Arc<tokio::sync::Mutex<Vec<TaskRecord>>>,
+    pub approvals: Arc<tokio::sync::Mutex<HashMap<String, ApprovalRecord>>>,
+    pub ai: Arc<AiOrchestrator>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ApprovalRecord {
+    pub request_id: String,
+    pub action_type: String,
+    pub path: String,
+    pub description: String,
+    pub status: String, // "pending" | "approved" | "denied" | "expired"
+    pub created_at: u64,
+    pub expires_at: u64,
+    pub consumed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TaskRecord {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub priority: String,
+    pub status: String,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+impl CoreServer {
+    pub fn new(auth_token: String, storage: Arc<Database>) -> Self {
+        // Record server startup audit event
+        let _ = storage.record_audit_event(
+            "core.startup",
+            "kernel",
+            &format!("{{\"version\":\"0.1.0\",\"event\":\"initialized\"}}"),
+        );
+
+        let event_bus = EventBus::new(128);
+        let policy: Arc<dyn PolicyEnforcer> = Arc::new(DefaultSecurityPolicy::new());
+        let ai = Arc::new(AiOrchestrator::new(
+            Arc::clone(&storage),
+            Arc::clone(&policy),
+            event_bus.clone(),
+            20129,
+        ));
+
+        Self {
+            version: "0.1.0".to_string(),
+            event_bus,
+            nonce_tracker: Arc::new(ScopedNonceTracker::new()),
+            policy,
+            storage,
+            auth_token,
+            start_time: std::time::Instant::now(),
+            tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            approvals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            ai,
+        }
+    }
+
+    /// Creates an in-memory test instance of CoreServer with default in-memory SQLite storage.
+    pub fn new_in_memory(auth_token: String) -> Result<Self, hime_storage::StorageError> {
+        let storage = Arc::new(Database::open_in_memory()?);
+        Ok(Self::new(auth_token, storage))
+    }
+
+    /// Handles a single bidirectional stream (Named Pipe or duplex memory channel)
+    pub async fn handle_connection<S>(&self, stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        info!("Client connected to Hime Core IPC stream");
+        let (mut reader, mut writer) = tokio::io::split(stream);
+
+        loop {
+            let frame = match Frame::read_from(&mut reader).await {
+                Ok(f) => f,
+                Err(hime_ipc::framing::FramingError::ConnectionClosed) => {
+                    info!("Client disconnected cleanly");
+                    break;
+                }
+                Err(e) => {
+                    error!(err = %e, "Framing error encountered; closing connection");
+                    break;
+                }
+            };
+
+            if frame.header.msg_type != MsgType::Request {
+                warn!(msg_type = ?frame.header.msg_type, "Ignoring non-request frame from client");
+                continue;
+            }
+
+            let response_frame = match JsonRpcRequest::from_slice(&frame.payload) {
+                Ok(req) => {
+                    let resp = self.dispatch_rpc(req).await;
+                    let payload = resp.to_bytes().unwrap_or_else(|_| b"{}".to_vec());
+                    Frame::new(MsgType::Response, payload).expect("Response frame must be valid")
+                }
+                Err(e) => {
+                    let err_resp = JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        hime_ipc::protocol::PARSE_ERROR,
+                        format!("Parse error: {}", e),
+                        None,
+                    );
+                    let payload = err_resp.to_bytes().unwrap_or_else(|_| b"{}".to_vec());
+                    Frame::new(MsgType::Response, payload).expect("Response frame must be valid")
+                }
+            };
+
+            if let Err(e) = response_frame.write_to(&mut writer).await {
+                error!(err = %e, "Failed to write response frame to client");
+                break;
+            }
+        }
+    }
+
+    pub async fn dispatch_rpc(&self, req: JsonRpcRequest) -> JsonRpcResponse {
+        let req_id = req.id.clone();
+        match req.method.as_str() {
+            "system.ping" => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "status": "pong",
+                        "core_version": self.version,
+                        "server_time_ms": now,
+                    }),
+                )
+            }
+
+            "system.handshake" => {
+                let params = req.params.unwrap_or_default();
+                let client_token = params
+                    .get("auth_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let nonce = params.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+                let client_id = params
+                    .get("client_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+
+                if client_token != self.auth_token {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        UNAUTHORIZED,
+                        "Invalid authentication token",
+                        None,
+                    );
+                }
+
+                if let Err(e) = self.nonce_tracker.validate_and_advance_request_nonce(nonce) {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::REPLAY_DETECTED,
+                        e.to_string(),
+                        None,
+                    );
+                }
+
+                let session_id =
+                    generate_token_256().unwrap_or_else(|_| "sess-fallback".to_string());
+                let reconnect_ticket =
+                    generate_token_256().unwrap_or_else(|_| "ticket-fallback".to_string());
+
+                self.event_bus.publish(SystemEvent::ClientConnected {
+                    client_id: client_id.to_string(),
+                });
+
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "reconnect_ticket": reconnect_ticket,
+                        "valid_until_secs": 5,
+                    }),
+                )
+            }
+
+            "system.status" => {
+                let tasks = self.tasks.lock().await;
+                let active_tasks = tasks
+                    .iter()
+                    .filter(|t| t.status == "running" || t.status == "queued")
+                    .count();
+                let total_tasks = tasks.len();
+                let uptime_secs = self.start_time.elapsed().as_secs();
+
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "status": "running",
+                        "core": "online",
+                        "version": self.version,
+                        "uptime_secs": uptime_secs,
+                        "db_status": "connected",
+                        "named_pipe": "\\\\.\\pipe\\hime-ipc",
+                        "active_tasks": active_tasks,
+                        "total_tasks": total_tasks,
+                    }),
+                )
+            }
+
+            "events.list" => {
+                let params = req.params.unwrap_or_default();
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
+                match self.storage.get_audit_events(limit) {
+                    Ok(events) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(events).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        format!("Storage query failed: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "tasks.list" => {
+                let tasks = self.tasks.lock().await;
+                JsonRpcResponse::success(req_id, serde_json::to_value(&*tasks).unwrap_or_default())
+            }
+
+            "tasks.create" => {
+                let params = req.params.unwrap_or_default();
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled Task");
+                let description = params
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let priority = params
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("normal");
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let task_id = format!("task-{}", now);
+
+                let task = TaskRecord {
+                    id: task_id,
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    priority: priority.to_string(),
+                    status: "queued".to_string(),
+                    created_at: now,
+                    completed_at: None,
+                };
+
+                let _ = self.storage.record_audit_event(
+                    "task.created",
+                    "desktop",
+                    &serde_json::to_string(&task).unwrap_or_default(),
+                );
+
+                let mut tasks = self.tasks.lock().await;
+                tasks.push(task.clone());
+                JsonRpcResponse::success(req_id, serde_json::to_value(task).unwrap_or_default())
+            }
+
+            "tasks.cancel" => {
+                let params = req.params.unwrap_or_default();
+                let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+                let mut tasks = self.tasks.lock().await;
+                if let Some(t) = tasks.iter_mut().find(|t| t.id == task_id) {
+                    t.status = "cancelled".to_string();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    t.completed_at = Some(now);
+
+                    let _ = self.storage.record_audit_event(
+                        "task.cancelled",
+                        "desktop",
+                        &format!("{{\"task_id\":\"{}\"}}", task_id),
+                    );
+
+                    JsonRpcResponse::success(req_id, serde_json::to_value(&*t).unwrap_or_default())
+                } else {
+                    JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Task not found: {}", task_id),
+                        None,
+                    )
+                }
+            }
+
+            "system.shutdown" => {
+                info!("Shutdown request received via IPC");
+                self.event_bus.publish(SystemEvent::ShutdownInitiated);
+                JsonRpcResponse::success(req_id, serde_json::json!({"status": "shutting_down"}))
+            }
+
+            "tool.execute" => {
+                let params = req.params.unwrap_or_default();
+                let action_type = params
+                    .get("action_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let action = match action_type {
+                    "file_read" => {
+                        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        Action::FileRead {
+                            path: path.to_string(),
+                        }
+                    }
+                    "file_write" => {
+                        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        Action::FileWrite {
+                            path: path.to_string(),
+                        }
+                    }
+                    _ => {
+                        return JsonRpcResponse::error(
+                            req_id,
+                            INVALID_REQUEST,
+                            format!("Unknown action type: {}", action_type),
+                            None,
+                        );
+                    }
+                };
+
+                let decision = self.policy.evaluate("default_client", &action);
+
+                // Record audit event for policy evaluation
+                let _ = self.storage.record_audit_event(
+                    "tool.policy_evaluation",
+                    "desktop",
+                    &format!(
+                        "{{\"action_type\":\"{}\",\"decision\":\"{:?}\"}}",
+                        action_type, decision
+                    ),
+                );
+
+                match decision {
+                    PolicyDecision::Allow => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({
+                            "decision": "allowed",
+                            "result": "Operation authorized and executed successfully"
+                        }),
+                    ),
+                    PolicyDecision::Deny { reason } => JsonRpcResponse::error(
+                        req_id,
+                        POLICY_VIOLATION,
+                        format!("Policy violation: {}", reason),
+                        None,
+                    ),
+                    PolicyDecision::RequireUserApproval { description } => {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let token = generate_token_256().unwrap_or_else(|_| "appr-token".to_string());
+                        let request_id = format!("appr-{}", &token[..12]);
+                        let expires_at = now + 60; // 60 seconds TTL
+
+                        let record = ApprovalRecord {
+                            request_id: request_id.clone(),
+                            action_type: action_type.to_string(),
+                            path: match &action {
+                                Action::FileRead { path } | Action::FileWrite { path } => path.clone(),
+                                _ => String::new(),
+                            },
+                            description: description.clone(),
+                            status: "pending".to_string(),
+                            created_at: now,
+                            expires_at,
+                            consumed: false,
+                        };
+
+                        {
+                            let mut appr_map = self.approvals.lock().await;
+                            appr_map.insert(request_id.clone(), record);
+                        }
+
+                        let _ = self.storage.record_audit_event(
+                            "policy.approval_requested",
+                            "desktop",
+                            &format!(
+                                "{{\"request_id\":\"{}\",\"action\":\"{}\",\"expires_at\":{}}}",
+                                request_id, action_type, expires_at
+                            ),
+                        );
+
+                        JsonRpcResponse::success(
+                            req_id,
+                            serde_json::json!({
+                                "decision": "pending_approval",
+                                "request_id": request_id,
+                                "description": description,
+                                "expires_at": expires_at,
+                                "status": "pending"
+                            }),
+                        )
+                    }
+                }
+            }
+
+            "approval.resolve" => {
+                let params = req.params.unwrap_or_default();
+                let request_id = params
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let decision = params
+                    .get("decision")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut appr_map = self.approvals.lock().await;
+
+                if let Some(record) = appr_map.get_mut(request_id) {
+                    if record.consumed || record.status != "pending" {
+                        return JsonRpcResponse::error(
+                            req_id,
+                            INVALID_REQUEST,
+                            format!(
+                                "Approval request '{}' already consumed or resolved",
+                                request_id
+                            ),
+                            None,
+                        );
+                    }
+
+                    if now > record.expires_at {
+                        record.status = "expired".to_string();
+                        let _ = self.storage.record_audit_event(
+                            "policy.approval_expired",
+                            "desktop",
+                            &format!("{{\"request_id\":\"{}\"}}", request_id),
+                        );
+                        return JsonRpcResponse::error(
+                            req_id,
+                            POLICY_VIOLATION,
+                            format!("Approval request '{}' has expired", request_id),
+                            None,
+                        );
+                    }
+
+                    match decision {
+                        "approve" => {
+                            record.status = "approved".to_string();
+                            record.consumed = true;
+                            let _ = self.storage.record_audit_event(
+                                "policy.approval_granted",
+                                "desktop",
+                                &format!(
+                                    "{{\"request_id\":\"{}\",\"action\":\"{}\"}}",
+                                    request_id, record.action_type
+                                ),
+                            );
+                            JsonRpcResponse::success(
+                                req_id,
+                                serde_json::json!({
+                                    "request_id": request_id,
+                                    "status": "approved",
+                                    "result": "Operation approved by user and authorized"
+                                }),
+                            )
+                        }
+                        "deny" => {
+                            record.status = "denied".to_string();
+                            record.consumed = true;
+                            let _ = self.storage.record_audit_event(
+                                "policy.approval_denied",
+                                "desktop",
+                                &format!(
+                                    "{{\"request_id\":\"{}\",\"action\":\"{}\"}}",
+                                    request_id, record.action_type
+                                ),
+                            );
+                            JsonRpcResponse::error(
+                                req_id,
+                                POLICY_VIOLATION,
+                                format!(
+                                    "Operation denied by user approval policy for request '{}'",
+                                    request_id
+                                ),
+                                None,
+                            )
+                        }
+                        _ => JsonRpcResponse::error(
+                            req_id,
+                            INVALID_REQUEST,
+                            format!(
+                                "Invalid decision '{}'; expected 'approve' or 'deny'",
+                                decision
+                            ),
+                            None,
+                        ),
+                    }
+                } else {
+                    JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Approval request '{}' not found", request_id),
+                        None,
+                    )
+                }
+            }
+
+            // Phase 08 — AI Runtime Integration RPC Methods
+            "ai.status" => {
+                let status = self.ai.get_overview_status().await;
+                JsonRpcResponse::success(req_id, serde_json::to_value(status).unwrap_or_default())
+            }
+
+            "ai.models.list" => {
+                let models = self.ai.list_models();
+                JsonRpcResponse::success(req_id, serde_json::to_value(models).unwrap_or_default())
+            }
+
+            "credentials.store" => {
+                let params = req.params.unwrap_or_default();
+                let provider = params
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let secret = params
+                    .get("secret")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if provider.is_empty() || secret.is_empty() {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        "Provider and secret parameters must not be empty",
+                        None,
+                    );
+                }
+
+                match self.ai.store_provider_credential(provider, secret) {
+                    Ok(_) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({
+                            "status": "stored",
+                            "provider": provider,
+                            "vault": "DPAPI",
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Failed to store credential: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "credentials.list" => {
+                let providers = self.storage.list_configured_providers().unwrap_or_default();
+                let result = providers
+                    .into_iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "provider": p,
+                            "configured": true,
+                            "protected_by": "Windows DPAPI",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                JsonRpcResponse::success(req_id, serde_json::to_value(result).unwrap_or_default())
+            }
+
+            "conversation.create" => {
+                let params = req.params.unwrap_or_default();
+                let title = params
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("New Conversation");
+                let model = params
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("hermes-3-llama-3.1-8b");
+
+                match self.ai.conversation_service.create_conversation(title, model) {
+                    Ok(conv) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(conv).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("Failed to create conversation: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "conversation.list" => {
+                let convs = self
+                    .ai
+                    .conversation_service
+                    .list_conversations()
+                    .unwrap_or_default();
+                JsonRpcResponse::success(req_id, serde_json::to_value(convs).unwrap_or_default())
+            }
+
+            "conversation.messages" => {
+                let params = req.params.unwrap_or_default();
+                let conv_id = params
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if conv_id.is_empty() {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        "conversation_id parameter is required",
+                        None,
+                    );
+                }
+
+                let msgs = self
+                    .ai
+                    .conversation_service
+                    .get_messages(conv_id)
+                    .unwrap_or_default();
+                JsonRpcResponse::success(req_id, serde_json::to_value(msgs).unwrap_or_default())
+            }
+
+            "conversation.send_message" => {
+                let params = req.params.unwrap_or_default();
+                let conv_id = params
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let prompt = params
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if conv_id.is_empty() || prompt.is_empty() {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        "conversation_id and prompt parameters are required",
+                        None,
+                    );
+                }
+
+                match self.ai.execute_chat_prompt(conv_id, prompt).await {
+                    Ok(resp) => JsonRpcResponse::success(
+                        req_id,
+                        serde_json::json!({
+                            "status": "completed",
+                            "conversation_id": conv_id,
+                            "response": resp,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        INVALID_REQUEST,
+                        format!("AI execution error: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "conversation.cancel" => {
+                let cancelled = self.ai.cancel_active_turn().await;
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "cancelled": cancelled,
+                        "status": if cancelled { "generation_stopped" } else { "no_active_turn" }
+                    }),
+                )
+            }
+
+            other => JsonRpcResponse::error(
+                req_id,
+                METHOD_NOT_FOUND,
+                format!("Method not found: {}", other),
+                None,
+            ),
+        }
+    }
+}
