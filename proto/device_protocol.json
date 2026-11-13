@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HimeMobileDeviceProtocol",
+  "description": "Shared JSON-RPC protocol schemas for Hime Desktop Core and Hime Android Companion",
+  "definitions": {
+    "QrPairingPayload": {
+      "type": "object",
+      "required": ["server_address", "server_port", "pairing_token", "confirmation_code", "ca_fingerprint", "expires_at"],
+      "properties": {
+        "server_address": { "type": "string" },
+        "server_port": { "type": "integer" },
+        "pairing_token": { "type": "string" },
+        "confirmation_code": { "type": "string", "pattern": "^[0-9]{6}$" },
+        "ca_fingerprint": { "type": "string" },
+        "expires_at": { "type": "integer" }
+      }
+    },
+    "SecurityPosture": {
+      "type": "object",
+      "required": ["is_device_secure", "security_patch_level", "storage_encrypted", "unknown_sources_enabled", "os_version"],
+      "properties": {
+        "is_device_secure": { "type": "boolean" },
+        "security_patch_level": { "type": "string" },
+        "storage_encrypted": { "type": "boolean" },
+        "unknown_sources_enabled": { "type": "boolean" },
+        "os_version": { "type": "string" }
+      }
+    },
+    "MobileDeviceStatus": {
+      "type": "object",
+      "required": ["device_id", "battery_percent", "is_charging", "storage_free_bytes", "storage_total_bytes", "security_posture", "timestamp"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "battery_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "is_charging": { "type": "boolean" },
+        "storage_free_bytes": { "type": "integer" },
+        "storage_total_bytes": { "type": "integer" },
+        "security_posture": { "$ref": "#/definitions/SecurityPosture" },
+        "timestamp": { "type": "integer" }
+      }
+    },
+    "RemoteApprovalSubmission": {
+      "type": "object",
+      "required": ["ticket_id", "decision", "device_id", "signed_token"],
+      "properties": {
+        "ticket_id": { "type": "string" },
+        "decision": { "type": "string", "enum": ["approve", "deny"] },
+        "device_id": { "type": "string" },
+        "signed_token": { "type": "string" }
+      }
+    },
+    "RemoteChatSubmission": {
+      "type": "object",
+      "required": ["conversation_id", "prompt", "device_id"],
+      "properties": {
+        "conversation_id": { "type": "string" },
+        "prompt": { "type": "string" },
+        "device_id": { "type": "string" }
+      }
+    },
+    "TransferChunkPayload": {
+      "type": "object",
+      "required": ["transfer_id", "chunk_index", "total_chunks", "data_base64", "chunk_sha256"],
+      "properties": {
+        "transfer_id": { "type": "string" },
+        "chunk_index": { "type": "integer" },
+        "total_chunks": { "type": "integer" },
+        "data_base64": { "type": "string" },
+        "chunk_sha256": { "type": "string" }
+      }
+    }
+  }
+}

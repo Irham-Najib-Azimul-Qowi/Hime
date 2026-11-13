@@ -5,8 +5,9 @@ use tracing::info;
 
 use hime_desktop::{
     cancel_conversation_logic, cancel_task_logic, create_conversation_logic, create_task_logic,
-    execute_tool_logic, get_activity_events_logic, get_ai_models_logic, get_ai_status_logic,
-    get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
+    devices_list_logic, devices_pairing_start_logic, devices_revoke_logic, devices_storage_get_logic,
+    devices_transfers_list_logic, execute_tool_logic, get_activity_events_logic, get_ai_models_logic,
+    get_ai_status_logic, get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
     list_conversations_logic, list_credentials_logic, ping_core_logic, resolve_approval_logic,
     send_conversation_message_logic, storage_get_analysis_logic, storage_get_duplicates_logic,
     storage_get_operations_logic, storage_get_rules_logic, storage_restore_operation_logic,
@@ -395,6 +396,70 @@ async fn storage_scan(root_path: String) -> Result<serde_json::Value, String> {
     }
 }
 
+#[command]
+async fn devices_list() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        devices_list_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn devices_pairing_start(ttl_secs: Option<u64>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        devices_pairing_start_logic(DEFAULT_HIME_PIPE, ttl_secs).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ttl_secs;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn devices_revoke(device_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        devices_revoke_logic(DEFAULT_HIME_PIPE, &device_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn devices_storage_get(device_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        devices_storage_get_logic(DEFAULT_HIME_PIPE, &device_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn devices_transfers_list(device_id: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        devices_transfers_list_logic(DEFAULT_HIME_PIPE, device_id.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -423,6 +488,11 @@ fn main() {
             storage_toggle_rule,
             storage_search,
             storage_scan,
+            devices_list,
+            devices_pairing_start,
+            devices_revoke,
+            devices_storage_get,
+            devices_transfers_list,
             window_set_always_on_top,
             window_set_size_mode,
             window_minimize,

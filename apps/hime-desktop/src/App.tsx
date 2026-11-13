@@ -6,6 +6,7 @@ import { ConversationView } from './features/conversation/ConversationView';
 import { ActivityStream } from './features/activity/ActivityStream';
 import { TasksView } from './features/tasks/TasksView';
 import { StorageView } from './features/storage/StorageView';
+import { DevicesView } from './features/devices/DevicesView';
 import { NotificationCenter } from './features/notifications/NotificationCenter';
 import { SettingsView } from './features/settings/SettingsView';
 import { Badge } from './components/ui/Badge';
@@ -302,8 +303,9 @@ export const App: React.FC = () => {
         if (e.key === '3') setCurrentView('activity');
         if (e.key === '4') setCurrentView('tasks');
         if (e.key === '5') setCurrentView('storage');
-        if (e.key === '6') setCurrentView('notifications');
-        if (e.key === '7') setCurrentView('settings');
+        if (e.key === '6') setCurrentView('devices');
+        if (e.key === '7') setCurrentView('notifications');
+        if (e.key === '8') setCurrentView('settings');
       }
     };
 
@@ -453,14 +455,15 @@ export const App: React.FC = () => {
               { id: 'activity', label: 'Activity Stream', icon: '⚡', shortcut: 'Alt+3' },
               { id: 'tasks', label: 'Tasks', icon: '📋', shortcut: 'Alt+4' },
               { id: 'storage', label: 'Storage', icon: '💾', shortcut: 'Alt+5' },
+              { id: 'devices', label: 'Devices', icon: '📱', shortcut: 'Alt+6' },
               {
                 id: 'notifications',
                 label: 'Notifications',
                 icon: '🔔',
-                shortcut: 'Alt+6',
+                shortcut: 'Alt+7',
                 badge: unreadCount > 0 ? unreadCount : undefined,
               },
-              { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: 'Alt+7' },
+              { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: 'Alt+8' },
             ].map((item) => {
               const isActive = currentView === item.id;
               return (
@@ -624,6 +627,10 @@ export const App: React.FC = () => {
 
           {currentView === 'storage' && (
             <StorageView />
+          )}
+
+          {currentView === 'devices' && (
+            <DevicesView />
           )}
 
           {currentView === 'notifications' && (

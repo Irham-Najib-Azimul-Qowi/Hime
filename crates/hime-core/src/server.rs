@@ -29,6 +29,7 @@ pub struct CoreServer {
     pub approvals: Arc<tokio::sync::Mutex<HashMap<String, ApprovalRecord>>>,
     pub ai: Arc<AiOrchestrator>,
     pub storage_engine: Arc<crate::storage::StorageEngine>,
+    pub device_manager: Arc<crate::device::DeviceManager>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -80,6 +81,29 @@ impl CoreServer {
             crate::storage::StorageEngine::new(storage.clone(), &tmp).expect("Failed to init storage engine")
         }));
 
+        let approvals = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let device_manager = Arc::new(crate::device::DeviceManager::new(
+            storage.clone(),
+            storage_engine.ops_engine.clone(),
+            event_bus.clone(),
+            approvals.clone(),
+            &base_dir,
+            "127.0.0.1",
+            20130,
+        ).unwrap_or_else(|_| {
+            let tmp = std::env::temp_dir().join(format!("hime_dm_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let _ = std::fs::create_dir_all(&tmp);
+            crate::device::DeviceManager::new(
+                storage.clone(),
+                storage_engine.ops_engine.clone(),
+                event_bus.clone(),
+                approvals.clone(),
+                &tmp,
+                "127.0.0.1",
+                20130,
+            ).expect("Failed to init device manager")
+        }));
+
         Self {
             version: "0.1.0".to_string(),
             event_bus,
@@ -89,9 +113,10 @@ impl CoreServer {
             auth_token,
             start_time: std::time::Instant::now(),
             tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            approvals: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            approvals,
             ai,
             storage_engine,
+            device_manager,
         }
     }
 
@@ -1258,6 +1283,71 @@ impl CoreServer {
                 let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("desktop");
                 match self.storage_engine.download_intel.replace_and_archive_old(std::path::Path::new(new_dl), std::path::Path::new(existing), actor) {
                     Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "devices.list" => {
+                match self.storage.list_paired_devices() {
+                    Ok(devs) => JsonRpcResponse::success(req_id, serde_json::to_value(devs).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "devices.pairing.start" => {
+                let params = req.params.unwrap_or_default();
+                let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64()).unwrap_or(300);
+                match self.device_manager.pairing.create_pairing_session(ttl_secs) {
+                    Ok(session) => JsonRpcResponse::success(req_id, serde_json::to_value(session).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "devices.pairing.confirm" => {
+                let params = req.params.unwrap_or_default();
+                let token = params.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                let code = params.get("confirmation_code").and_then(|v| v.as_str()).unwrap_or("");
+                let dev_id = params.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                let dev_name = params.get("device_name").and_then(|v| v.as_str()).unwrap_or("Android Companion");
+                let dev_type = params.get("device_type").and_then(|v| v.as_str()).unwrap_or("android");
+                let fingerprint = params.get("client_cert_fingerprint").and_then(|v| v.as_str()).unwrap_or("default-fp");
+
+                match self.device_manager.pairing.complete_pairing(token, code, dev_id, dev_name, dev_type, fingerprint) {
+                    Ok(dev) => JsonRpcResponse::success(req_id, serde_json::to_value(dev).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::UNAUTHORIZED, e.to_string(), None),
+                }
+            }
+
+            "devices.revoke" => {
+                let params = req.params.unwrap_or_default();
+                let device_id = params.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage.revoke_device(device_id) {
+                    Ok(revoked) => {
+                        if revoked {
+                            self.event_bus.publish(SystemEvent::DeviceRevoked {
+                                device_id: device_id.to_string(),
+                            });
+                        }
+                        JsonRpcResponse::success(req_id, serde_json::json!({ "device_id": device_id, "revoked": revoked }))
+                    }
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "devices.storage.get" => {
+                let params = req.params.unwrap_or_default();
+                let device_id = params.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.storage.get_device_storage_summary(device_id) {
+                    Ok(summary) => JsonRpcResponse::success(req_id, serde_json::to_value(summary).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "devices.transfers.list" => {
+                let params = req.params.unwrap_or_default();
+                let device_id = params.get("device_id").and_then(|v| v.as_str());
+                match self.storage.list_file_transfers(device_id) {
+                    Ok(transfers) => JsonRpcResponse::success(req_id, serde_json::to_value(transfers).unwrap_or_default()),
                     Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
                 }
             }

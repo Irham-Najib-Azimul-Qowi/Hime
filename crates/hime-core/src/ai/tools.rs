@@ -352,6 +352,83 @@ impl ToolGateway {
                 idempotent: true,
                 timeout_ms: 5000,
             },
+            ToolDefinition {
+                id: "devices.list".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "List all paired mobile and remote devices with status and fingerprints".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.storage_overview".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Retrieve storage summary of a paired mobile device (free/total/indexed count)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id"],
+                    "properties": {
+                        "device_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.pairing_start".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Initiate a secure mobile device pairing session with 6-digit confirmation code".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ttl_secs": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.revoke".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Immediately revoke access for a paired mobile device (requires approval)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id"],
+                    "properties": {
+                        "device_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L3Destructive,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "devices.transfer".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Schedule or inspect chunked file transfer with a paired mobile device".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id", "file_name"],
+                    "properties": {
+                        "device_id": { "type": "string" },
+                        "file_name": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
         ]
     }
 
@@ -746,6 +823,77 @@ impl ToolGateway {
                 let download_intel = crate::storage::download::DownloadIntelligence::new(self.storage.clone(), self.ops_engine.clone());
                 let report = download_intel.inspect_download(std::path::Path::new(download_path)).map_err(|e| e.to_string())?;
                 serde_json::to_value(&report).map_err(|e| e.to_string())
+            }
+
+            "devices.list" => {
+                let devices = self.storage.list_paired_devices().map_err(|e| e.to_string())?;
+                serde_json::to_value(&devices).map_err(|e| e.to_string())
+            }
+
+            "devices.storage_overview" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let summary = self.storage.get_device_storage_summary(device_id).map_err(|e| e.to_string())?;
+                match summary {
+                    Some(s) => serde_json::to_value(&s).map_err(|e| e.to_string()),
+                    None => Ok(serde_json::json!({
+                        "device_id": device_id,
+                        "status": "no_data_reported",
+                        "message": "Device has not reported storage status yet"
+                    })),
+                }
+            }
+
+            "devices.pairing_start" => {
+                let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64()).unwrap_or(300);
+                let token = format!("pair-{}", uuid_simple());
+                let now_nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+                let confirmation_code = format!("{:06}", (now_nanos % 900_000) + 100_000);
+
+                let record = self.storage.create_pairing_token(&token, &confirmation_code, ttl_secs).map_err(|e| e.to_string())?;
+
+                let qr_payload = serde_json::json!({
+                    "version": "1.0",
+                    "server_address": "127.0.0.1",
+                    "server_port": 20130,
+                    "pairing_token": token,
+                    "ca_fingerprint": "SHA256:HIME-ROOT-CA",
+                    "expires_at": record.expires_at,
+                });
+
+                Ok(serde_json::json!({
+                    "token": token,
+                    "confirmation_code": confirmation_code,
+                    "expires_at": record.expires_at,
+                    "ttl_seconds": ttl_secs,
+                    "qr_payload": qr_payload,
+                }))
+            }
+
+            "devices.revoke" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let revoked = self.storage.revoke_device(device_id).map_err(|e| e.to_string())?;
+                if revoked {
+                    self.event_bus.publish(SystemEvent::DeviceRevoked {
+                        device_id: device_id.to_string(),
+                    });
+                }
+                Ok(serde_json::json!({
+                    "device_id": device_id,
+                    "revoked": revoked,
+                    "status": if revoked { "revoked" } else { "not_found" }
+                }))
+            }
+
+            "devices.transfer" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let file_name = params["file_name"].as_str().ok_or("Missing required field 'file_name'")?;
+                let transfers = self.storage.list_file_transfers(Some(device_id)).map_err(|e| e.to_string())?;
+                let matched = transfers.into_iter().find(|t| t.file_name == file_name);
+                Ok(serde_json::json!({
+                    "device_id": device_id,
+                    "file_name": file_name,
+                    "existing_transfer": matched,
+                }))
             }
 
             _ => Err(format!("Unknown tool handler '{}'", tool_id)),

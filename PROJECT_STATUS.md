@@ -1,17 +1,17 @@
 # PROJECT STATUS — HIME
-**Diperbarui:** 2026-11-13 20:45 WIB
+**Diperbarui:** 2026-11-14 00:55 WIB
 
 ---
 
 ## 1. POSISI SAAT INI
 
-- **Fase Aktif:** **Phase 11 — Mobile and Device Layer** (Android Companion, Cross-Device Sync, Tailscale Mesh & Remote Execution)
-- **Status Phase 10:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
-- **Tugas Berjalan:** Penutupan formal Phase 10 (Storage Intelligence) dan inisialisasi **Phase 11 (Mobile and Device Layer)**
-- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-11-MOBILE-AND-DEVICE-LAYER.md` untuk persiapan arsitektur Android Companion & mTLS Device Layer.
+- **Fase Aktif:** **Phase 12 — Productivity & Documents** (Kanban, Local Workspace Documents, Markdown Parsing & Editor, PDF Ingestion, Agenda Sync)
+- **Status Phase 11:** **`READY FOR OWNER ACCEPTANCE`** *(Rekomendasi: `ACCEPT`)*
+- **Tugas Berjalan:** Penutupan formal Phase 11 (Mobile & Device Layer) dan inisialisasi **Phase 12 (Productivity & Documents)**
+- **Langkah Berikutnya (Tepat):** Buka `docs/agent-pack/roadmap/PHASE-12-PRODUCTIVITY-AND-DOCUMENTS.md` untuk persiapan arsitektur Productivity & Document Workspace.
 - **Cara Melanjutkan Setelah Sesi Terputus:**
-  1. Jalankan `powershell -File scripts/test.ps1` untuk memverifikasi seluruh 89 test lulus 100%.
-  2. Buat branch `phase/11-mobile-device-layer` dari commit Phase 10 dan lanjutkan eksekusi Fase 11.
+  1. Jalankan `powershell -File scripts/test.ps1` untuk memverifikasi seluruh 97 test lulus 100%.
+  2. Buat branch `phase/12-productivity-documents` dari commit Phase 11 dan lanjutkan eksekusi Fase 12.
 
 ---
 
@@ -30,8 +30,8 @@
 | **Phase 08** | AI Runtime Integration | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-08-COMPLETION-REPORT.md` | Hermes Adapter, 9Router Adapter, DPAPI Vault Provider (:20129), SEC-09 CoT Redaction, 47 tests. |
 | **Phase 09** | Hime Intelligence Core | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-09-COMPLETION-REPORT.md` | Policy L0–L4, Tool Gateway, Task Engine, Event Buffer, Memory Token Budget, Island Translation, 76 tests. |
 | **Phase 10** | Storage Intelligence | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-10-COMPLETION-REPORT.md` | Indexer, Storage Analyzer, Duplicates/Versions, Smart Organizer, Download Intelligence, Safe Ops (Staging, Hime Recycle, 1-Click Restore), 89 tests. |
-| **Phase 11** | Hime Mobile & Device Layer | `READY TO START` | — | Android native Kotlin, Foreground Service, mutual TLS, device pairing. |
-| **Phase 12** | Productivity & Documents | `PLANNED` | — | Kanban accountability, pengingat HP/desktop, DOCX/XLSX/PDF. |
+| **Phase 11** | Hime Mobile & Device Layer | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-11-COMPLETION-REPORT.md` | Android Kotlin Compose (`apps/mobile/`), mTLS Local CA, QR anti-replay pairing, remote approvals (UR-02/04), posture audit (UR-12), chunked SHA-256 transfer, 97 tests. |
+| **Phase 12** | Productivity & Documents | `READY TO START` | — | Kanban accountability, pengingat HP/desktop, DOCX/XLSX/PDF. |
 | **Phase 13** | Browser & Developer Workspace | `PLANNED` | — | Playwright browser profile Hime, GitHub/Drive integration. |
 | **Phase 14** | Specialist Agents & Skills | `PLANNED` | — | Registri specialist agent, quality bar, anti-loop. |
 | **Phase 15** | Hardening, Release & Linux | `PLANNED` | — | MSIX installer, benchmark resource, Linux beta. |
@@ -51,13 +51,14 @@
 
 | ID | Deskripsi Kewajiban | Asal Fase | Target Penutupan | Status Terkini |
 |:---:|:---|:---:|:---|:---|
-| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime`, `phase/09-intelligence-core`, `phase/10-storage-intelligence`)** |
+| **G1** | Tetapkan baseline Git lokal pada branch terstruktur (setelah secret scan) | Fase 07 | Fase 08 | **SELESAI (Branch `phase/08-ai-runtime`, `phase/09-intelligence-core`, `phase/10-storage-intelligence`, `phase/11-mobile-device-layer`)** |
 | **G2** | Verifikasi GUI interaktif penuh (pointer clicks, drag, animations, screenshot, DPI) | Fase 07 | Fase 15 (penuh) | `NOT TESTED` (Memerlukan sesi desktop pengguna aktif) |
 | **G3** | IB-01 RESOLVED tuntas | Fase 03/04 | Fase 08 | **RESOLVED via Provider Adapter :20129 + DPAPI Vault** |
 | **G4** | IB-02 RESOLVED atau tetap diblokir | Fase 03/04 | Fase 08 | **OPEN — Jalur Kredensial Sensitif Diblokir (OD-01)** |
 | **G5** | Uji Win32 Job Object (breakaway, assignment failure, fail-closed) | Fase 04/06 | Fase 08 | **RESOLVED (`hime-pal::supervisor`)** |
 | **G6** | Idempotency & Crash Recovery pada Task Engine | Fase 04 | Fase 09 | **RESOLVED (`hime-core::ai::task_engine`)** |
-| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 08 | Fase 09 | **RESOLVED (89/89 test unit & integration pass)** |
+| **G7** | Owner Gate #6 Uji Fisik Perangkat Android | Fase 11 | Gate #6 | **Runbook siap (`docs/mobile/REAL-DEVICE-TEST-GUIDE.md`)** |
+| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 08 | Fase 09 | **RESOLVED (97/97 test unit & integration pass)** |
 | **G9** | Kebijakan Trash / Pemulihan Reversibel (Hime Recycle) | Fase 08 | Fase 10 | **RESOLVED (`SafeFileOperationsEngine`, `.hime/recycle`, 1-Click Restore)** |
 | **G13** | Audit trail tak-dapat-diubah-diam-diam & ekspansi `hime-storage` | Fase 08 | Fase 10 | **RESOLVED (Hash-chained audit events + File operations journal SQLite WAL)** |
 
@@ -73,8 +74,8 @@ Lihat `project-management/OWNER-DECISIONS-NEEDED.md`:
 
 ## 6. METRIK TERAKHIR
 
-- **Test Suite Workspace:** 89 passed, 0 failed, 0 ignored (100% pass)
-- **Frontend Build (Vite):** 1.08 detik (50 modul ditransformasikan, dist bersih)
-- **Rust Dev Build:** 6.41 detik (Workspace crates kompilasi bersih)
-- **Hime Core Runtime RAM:** ~18.4 MB (di bawah batas 60 MB)
-- **Commit Baseline:** Local branch `phase/10-storage-intelligence`, zero push.
+- **Test Suite Workspace:** 97 passed, 0 failed, 0 ignored (100% pass)
+- **Frontend Build (Vite):** 1.00 detik (51 modul ditransformasikan, dist bersih)
+- **Rust Dev Build:** 6.99 detik (Workspace crates kompilasi bersih)
+- **Hime Core Runtime RAM:** ~20.1 MB (di bawah batas 60 MB)
+- **Commit Baseline:** Local branch `phase/11-mobile-device-layer`, zero push.

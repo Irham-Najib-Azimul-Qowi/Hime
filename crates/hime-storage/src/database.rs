@@ -193,7 +193,48 @@ impl Database {
                 manifest_hash TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 verified_at INTEGER
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS paired_devices (
+                id TEXT PRIMARY KEY,
+                device_name TEXT NOT NULL,
+                device_type TEXT NOT NULL,
+                cert_fingerprint TEXT NOT NULL,
+                paired_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                status TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_devices_status ON paired_devices(status);
+
+            CREATE TABLE IF NOT EXISTS device_pairing_tokens (
+                token TEXT PRIMARY KEY,
+                confirmation_code TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS device_storage_summaries (
+                device_id TEXT PRIMARY KEY,
+                total_bytes INTEGER NOT NULL,
+                free_bytes INTEGER NOT NULL,
+                indexed_items_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS file_transfers (
+                transfer_id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                bytes_transferred INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfers_device ON file_transfers(device_id);",
         )?;
 
         // Ensure backward compatibility if audit_events already existed without hash columns
@@ -1318,6 +1359,280 @@ impl Database {
         )?;
         Ok(rows > 0)
     }
+
+    // =========================================================================
+    // Phase 11: Mobile & Device Layer
+    // =========================================================================
+
+    pub fn add_paired_device(&self, dev: &PairedDeviceRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO paired_devices (id, device_name, device_type, cert_fingerprint, paired_at, last_seen_at, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                device_name = ?2,
+                device_type = ?3,
+                cert_fingerprint = ?4,
+                last_seen_at = ?6,
+                status = ?7",
+            rusqlite::params![
+                dev.id,
+                dev.device_name,
+                dev.device_type,
+                dev.cert_fingerprint,
+                dev.paired_at,
+                dev.last_seen_at,
+                dev.status,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_paired_devices(&self) -> Result<Vec<PairedDeviceRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, device_name, device_type, cert_fingerprint, paired_at, last_seen_at, status
+             FROM paired_devices ORDER BY paired_at ASC",
+        )?;
+        let rows = stmt.query_map([], map_paired_device)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_paired_device(&self, id: &str) -> Result<Option<PairedDeviceRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, device_name, device_type, cert_fingerprint, paired_at, last_seen_at, status
+             FROM paired_devices WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_paired_device(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn revoke_device(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE paired_devices SET status = 'revoked' WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn update_device_last_seen(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let rows = conn.execute(
+            "UPDATE paired_devices SET last_seen_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn create_pairing_token(
+        &self,
+        token: &str,
+        confirmation_code: &str,
+        ttl_secs: u64,
+    ) -> Result<PairingTokenRecord, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expires_at = now + (ttl_secs as i64);
+
+        let rec = PairingTokenRecord {
+            token: token.to_string(),
+            confirmation_code: confirmation_code.to_string(),
+            expires_at,
+            status: "pending".to_string(),
+            created_at: now,
+        };
+
+        conn.execute(
+            "INSERT INTO device_pairing_tokens (token, confirmation_code, expires_at, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                rec.token,
+                rec.confirmation_code,
+                rec.expires_at,
+                rec.status,
+                rec.created_at,
+            ],
+        )?;
+        Ok(rec)
+    }
+
+    pub fn validate_and_consume_pairing_token(
+        &self,
+        token: &str,
+        confirmation_code: &str,
+    ) -> Result<TokenValidationResult, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut stmt = conn.prepare(
+            "SELECT confirmation_code, expires_at, status
+             FROM device_pairing_tokens WHERE token = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![token])?;
+
+        if let Some(row) = rows.next()? {
+            let code: String = row.get(0)?;
+            let expires_at: i64 = row.get(1)?;
+            let status: String = row.get(2)?;
+
+            if status != "pending" || now > expires_at {
+                Ok(TokenValidationResult::InvalidOrExpired)
+            } else if code != confirmation_code {
+                Ok(TokenValidationResult::CodeMismatch)
+            } else {
+                conn.execute(
+                    "UPDATE device_pairing_tokens SET status = 'consumed' WHERE token = ?1",
+                    rusqlite::params![token],
+                )?;
+                Ok(TokenValidationResult::Valid)
+            }
+        } else {
+            Ok(TokenValidationResult::InvalidOrExpired)
+        }
+    }
+
+    pub fn set_device_storage_summary(
+        &self,
+        summary: &DeviceStorageSummaryRecord,
+    ) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO device_storage_summaries (device_id, total_bytes, free_bytes, indexed_items_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_id) DO UPDATE SET
+                total_bytes = ?2,
+                free_bytes = ?3,
+                indexed_items_count = ?4,
+                updated_at = ?5",
+            rusqlite::params![
+                summary.device_id,
+                summary.total_bytes,
+                summary.free_bytes,
+                summary.indexed_items_count,
+                summary.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_device_storage_summary(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<DeviceStorageSummaryRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT device_id, total_bytes, free_bytes, indexed_items_count, updated_at
+             FROM device_storage_summaries WHERE device_id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![device_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_device_storage_summary(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_file_transfer(&self, transfer: &FileTransferRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO file_transfers (transfer_id, device_id, file_name, file_size, bytes_transferred, direction, status, sha256, started_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(transfer_id) DO UPDATE SET
+                bytes_transferred = ?5,
+                status = ?7,
+                completed_at = ?10",
+            rusqlite::params![
+                transfer.transfer_id,
+                transfer.device_id,
+                transfer.file_name,
+                transfer.file_size,
+                transfer.bytes_transferred,
+                transfer.direction,
+                transfer.status,
+                transfer.sha256,
+                transfer.started_at,
+                transfer.completed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_transfer_progress(
+        &self,
+        transfer_id: &str,
+        bytes: i64,
+        status: &str,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = if status == "completed" || status == "failed" || status == "cancelled" {
+            Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            )
+        } else {
+            None
+        };
+
+        let rows = conn.execute(
+            "UPDATE file_transfers
+             SET bytes_transferred = ?2, status = ?3, completed_at = COALESCE(?4, completed_at)
+             WHERE transfer_id = ?1",
+            rusqlite::params![transfer_id, bytes, status, now],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn list_file_transfers(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<Vec<FileTransferRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut items = Vec::new();
+
+        if let Some(dev) = device_id {
+            let mut stmt = conn.prepare(
+                "SELECT transfer_id, device_id, file_name, file_size, bytes_transferred, direction, status, sha256, started_at, completed_at
+                 FROM file_transfers WHERE device_id = ?1 ORDER BY started_at DESC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![dev], map_file_transfer)?;
+            for item in rows {
+                items.push(item?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT transfer_id, device_id, file_name, file_size, bytes_transferred, direction, status, sha256, started_at, completed_at
+                 FROM file_transfers ORDER BY started_at DESC LIMIT 50",
+            )?;
+            let rows = stmt.query_map([], map_file_transfer)?;
+            for item in rows {
+                items.push(item?);
+            }
+        }
+
+        Ok(items)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1555,6 +1870,93 @@ pub struct DuplicateGroup {
     pub content_hash: String,
     pub size_bytes: i64,
     pub files: Vec<IndexedFileRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PairedDeviceRecord {
+    pub id: String,
+    pub device_name: String,
+    pub device_type: String,
+    pub cert_fingerprint: String,
+    pub paired_at: i64,
+    pub last_seen_at: i64,
+    pub status: String,
+}
+
+fn map_paired_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<PairedDeviceRecord> {
+    Ok(PairedDeviceRecord {
+        id: row.get(0)?,
+        device_name: row.get(1)?,
+        device_type: row.get(2)?,
+        cert_fingerprint: row.get(3)?,
+        paired_at: row.get(4)?,
+        last_seen_at: row.get(5)?,
+        status: row.get(6)?,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TokenValidationResult {
+    Valid,
+    CodeMismatch,
+    InvalidOrExpired,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PairingTokenRecord {
+    pub token: String,
+    pub confirmation_code: String,
+    pub expires_at: i64,
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DeviceStorageSummaryRecord {
+    pub device_id: String,
+    pub total_bytes: i64,
+    pub free_bytes: i64,
+    pub indexed_items_count: i64,
+    pub updated_at: i64,
+}
+
+fn map_device_storage_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceStorageSummaryRecord> {
+    Ok(DeviceStorageSummaryRecord {
+        device_id: row.get(0)?,
+        total_bytes: row.get(1)?,
+        free_bytes: row.get(2)?,
+        indexed_items_count: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct FileTransferRecord {
+    pub transfer_id: String,
+    pub device_id: String,
+    pub file_name: String,
+    pub file_size: i64,
+    pub bytes_transferred: i64,
+    pub direction: String,
+    pub status: String,
+    pub sha256: String,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+fn map_file_transfer(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileTransferRecord> {
+    Ok(FileTransferRecord {
+        transfer_id: row.get(0)?,
+        device_id: row.get(1)?,
+        file_name: row.get(2)?,
+        file_size: row.get(3)?,
+        bytes_transferred: row.get(4)?,
+        direction: row.get(5)?,
+        status: row.get(6)?,
+        sha256: row.get(7)?,
+        started_at: row.get(8)?,
+        completed_at: row.get(9)?,
+    })
 }
 
 #[cfg(test)]
@@ -1939,5 +2341,82 @@ mod tests {
         assert!(db.verify_backup_record("bak-01").unwrap());
         let verified = db.list_backup_records().unwrap();
         assert!(verified[0].verified_at.is_some());
+    }
+
+    #[test]
+    fn test_phase11_mobile_device_pairing_storage_and_transfers() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Pairing token lifecycle
+        let token = db.create_pairing_token("tok-12345", "654321", 300).unwrap();
+        assert_eq!(token.confirmation_code, "654321");
+
+        // Invalid code rejection
+        assert_eq!(db.validate_and_consume_pairing_token("tok-12345", "000000").unwrap(), TokenValidationResult::CodeMismatch);
+
+        // Valid consumption
+        assert_eq!(db.validate_and_consume_pairing_token("tok-12345", "654321").unwrap(), TokenValidationResult::Valid);
+        // Second consumption must fail (single-use anti-replay)
+        assert_eq!(db.validate_and_consume_pairing_token("tok-12345", "654321").unwrap(), TokenValidationResult::InvalidOrExpired);
+
+        // 2. Paired devices
+        let dev = PairedDeviceRecord {
+            id: "dev-pixel-8".to_string(),
+            device_name: "Pixel 8 Pro (Satoshi)".to_string(),
+            device_type: "android".to_string(),
+            cert_fingerprint: "SHA256:FINGERPRINT123".to_string(),
+            paired_at: 1000,
+            last_seen_at: 1000,
+            status: "active".to_string(),
+        };
+        db.add_paired_device(&dev).unwrap();
+
+        let devices = db.list_paired_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device_name, "Pixel 8 Pro (Satoshi)");
+
+        // Update last seen
+        assert!(db.update_device_last_seen("dev-pixel-8").unwrap());
+
+        // Revoke
+        assert!(db.revoke_device("dev-pixel-8").unwrap());
+        let fetched = db.get_paired_device("dev-pixel-8").unwrap().unwrap();
+        assert_eq!(fetched.status, "revoked");
+
+        // 3. Device Storage Summary
+        let summary = DeviceStorageSummaryRecord {
+            device_id: "dev-pixel-8".to_string(),
+            total_bytes: 256000000000,
+            free_bytes: 128000000000,
+            indexed_items_count: 1420,
+            updated_at: 2000,
+        };
+        db.set_device_storage_summary(&summary).unwrap();
+        let fetched_summary = db.get_device_storage_summary("dev-pixel-8").unwrap().unwrap();
+        assert_eq!(fetched_summary.free_bytes, 128000000000);
+
+        // 4. File Transfers
+        let transfer = FileTransferRecord {
+            transfer_id: "xfer-001".to_string(),
+            device_id: "dev-pixel-8".to_string(),
+            file_name: "DCIM_20261113.jpg".to_string(),
+            file_size: 4096000,
+            bytes_transferred: 2048000,
+            direction: "upload".to_string(),
+            status: "in_progress".to_string(),
+            sha256: "sha256-transfer-mock".to_string(),
+            started_at: 3000,
+            completed_at: None,
+        };
+        db.record_file_transfer(&transfer).unwrap();
+
+        let transfers = db.list_file_transfers(Some("dev-pixel-8")).unwrap();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].status, "in_progress");
+
+        db.update_transfer_progress("xfer-001", 4096000, "completed").unwrap();
+        let updated = db.list_file_transfers(Some("dev-pixel-8")).unwrap();
+        assert_eq!(updated[0].status, "completed");
+        assert!(updated[0].completed_at.is_some());
     }
 }

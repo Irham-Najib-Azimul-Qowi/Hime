@@ -31,6 +31,25 @@ pub enum SystemEvent {
         task_id: String,
         status: String,
     },
+    ApprovalResolved {
+        request_id: String,
+        decision: String,
+    },
+    DeviceConnected {
+        device_id: String,
+        device_name: String,
+    },
+    DeviceDisconnected {
+        device_id: String,
+    },
+    DeviceRevoked {
+        device_id: String,
+    },
+    FileTransferProgress {
+        transfer_id: String,
+        bytes_transferred: i64,
+        total_bytes: i64,
+    },
     ShutdownInitiated,
 }
 

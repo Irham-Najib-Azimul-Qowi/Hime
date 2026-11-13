@@ -436,3 +436,78 @@ export const scanStorageDirectory = async (rootPath: string): Promise<{ indexed_
   return await invoke<{ indexed_count: number }>('storage_scan', { rootPath });
 };
 
+// -----------------------------------------------------------------------------
+// Phase 11: Mobile & Devices Service Endpoints
+// -----------------------------------------------------------------------------
+
+export const getDevicesList = async (): Promise<any[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'dev-pixel-preview',
+        device_name: 'Pixel 8 Pro (Simulated)',
+        device_type: 'android',
+        cert_fingerprint: 'SHA256:PREVIEW-DEVICE-CERT-FINGERPRINT',
+        paired_at: Math.floor(Date.now() / 1000) - 3600,
+        last_seen_at: Math.floor(Date.now() / 1000) - 60,
+        status: 'active',
+      },
+    ];
+  }
+  return await invoke<any[]>('devices_list');
+};
+
+export const startDevicePairing = async (ttlSecs: number = 300): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return {
+      server_address: '127.0.0.1',
+      server_port: 20130,
+      pairing_token: 'tok-preview-12345',
+      confirmation_code: '849201',
+      ca_fingerprint: 'SHA256:PREVIEW-CA-FINGERPRINT',
+      expires_at: Math.floor(Date.now() / 1000) + ttlSecs,
+    };
+  }
+  return await invoke<any>('devices_pairing_start', { ttlSecs });
+};
+
+export const revokeDevice = async (deviceId: string): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { device_id: deviceId, revoked: true };
+  }
+  return await invoke<any>('devices_revoke', { deviceId });
+};
+
+export const getDeviceStorage = async (deviceId: string): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return {
+      device_id: deviceId,
+      total_bytes: 128_000_000_000,
+      free_bytes: 45_000_000_000,
+      indexed_items_count: 1420,
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<any>('devices_storage_get', { deviceId });
+};
+
+export const getDeviceTransfers = async (deviceId?: string): Promise<any[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'xfer-001',
+        device_id: deviceId || 'dev-pixel-preview',
+        file_name: 'quarterly_report.pdf',
+        file_size: 4_500_000,
+        bytes_transferred: 4_500_000,
+        direction: 'incoming',
+        status: 'completed',
+        sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        started_at: Math.floor(Date.now() / 1000) - 120,
+        completed_at: Math.floor(Date.now() / 1000) - 90,
+      },
+    ];
+  }
+  return await invoke<any[]>('devices_transfers_list', { deviceId });
+};
+

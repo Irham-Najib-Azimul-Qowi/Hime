@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Hime Mobile</string>
+    <string name="pairing_title">Pair with Hime Desktop</string>
+    <string name="security_posture_title">Device Security Posture</string>
+    <string name="storage_title">Phone Storage Intelligence</string>
+    <string name="chat_title">Conversation</string>
+    <string name="tasks_title">Task Board &amp; Approvals</string>
+</resources>

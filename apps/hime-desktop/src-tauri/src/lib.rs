@@ -943,3 +943,45 @@ pub async fn storage_scan_logic(pipe_name: &str, root_path: &str) -> Result<serd
     )
     .await
 }
+
+pub async fn devices_list_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "devices.list", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn devices_pairing_start_logic(pipe_name: &str, ttl_secs: Option<u64>) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "devices.pairing.start",
+        Some(serde_json::json!({ "ttl_secs": ttl_secs.unwrap_or(300) })),
+    )
+    .await
+}
+
+pub async fn devices_revoke_logic(pipe_name: &str, device_id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "devices.revoke",
+        Some(serde_json::json!({ "device_id": device_id })),
+    )
+    .await
+}
+
+pub async fn devices_storage_get_logic(pipe_name: &str, device_id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "devices.storage.get",
+        Some(serde_json::json!({ "device_id": device_id })),
+    )
+    .await
+}
+
+pub async fn devices_transfers_list_logic(pipe_name: &str, device_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "devices.transfers.list",
+        Some(serde_json::json!({ "device_id": device_id })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}

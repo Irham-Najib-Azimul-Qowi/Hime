@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod bus;
+pub mod device;
 pub mod logging;
 pub mod ports;
 pub mod server;
@@ -12,6 +13,7 @@ pub use ai::{
     RouterGatewayAdapter, RouterHealthStatus,
 };
 pub use bus::{EventBus, SystemEvent};
+pub use device::DeviceManager;
 pub use logging::init_logging;
 pub use server::{ApprovalRecord, CoreServer, TaskRecord};
 pub use storage::StorageEngine;

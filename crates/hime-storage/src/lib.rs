@@ -1,7 +1,8 @@
 pub mod database;
 
 pub use database::{
-    AuditEventRecord, ConversationRecord, Database, DuplicateGroup, ExtensionBreakdown,
-    FileOperationRecord, FileRuleRecord, IndexedFileRecord, MemoryRecord, MessageRecord,
-    StorageAnalysisReport, StorageBackupRecord, StorageError, TaskRecord, ToolExecutionRecord,
+    AuditEventRecord, ConversationRecord, Database, DeviceStorageSummaryRecord, DuplicateGroup,
+    ExtensionBreakdown, FileOperationRecord, FileRuleRecord, FileTransferRecord, IndexedFileRecord,
+    MemoryRecord, MessageRecord, PairedDeviceRecord, PairingTokenRecord, StorageAnalysisReport,
+    StorageBackupRecord, StorageError, TaskRecord, TokenValidationResult, ToolExecutionRecord,
 };
