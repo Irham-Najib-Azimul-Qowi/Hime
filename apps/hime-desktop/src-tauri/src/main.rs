@@ -162,16 +162,25 @@ async fn window_set_always_on_top(
 async fn window_set_size_mode(window: tauri::Window, mode: String) -> Result<(), String> {
     match mode.as_str() {
         "compact" => {
-            // Dynamic Island Floating HUD compact pill mode (460x88)
+            // Dynamic Island Floating HUD compact pill mode (520x72)
             window
                 .set_size(Size::Logical(LogicalSize {
-                    width: 460.0,
-                    height: 88.0,
+                    width: 520.0,
+                    height: 72.0,
+                }))
+                .map_err(|e| e.to_string())?;
+        }
+        "island_chat" => {
+            // Dynamic Island Expanded Chat card mode (540x480)
+            window
+                .set_size(Size::Logical(LogicalSize {
+                    width: 540.0,
+                    height: 480.0,
                 }))
                 .map_err(|e| e.to_string())?;
         }
         "expanded" => {
-            // Main application desktop window (980x700)
+            // Main application desktop workstation window (980x700)
             window
                 .set_size(Size::Logical(LogicalSize {
                     width: 980.0,

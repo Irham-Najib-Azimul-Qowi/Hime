@@ -38,22 +38,23 @@ import { NotificationItem } from './types/notifications';
 import { DesktopView, ThemeMode, IslandPresentationMode } from './types/theme';
 
 export const App: React.FC = () => {
-  // Navigation & Theme State
-  const [currentView, setCurrentView] = useState<DesktopView>('overview');
+  // Navigation & Theme State - Default to Island-First AI Assistant
+  const [currentView, setCurrentView] = useState<DesktopView>('assistant');
   const [theme, setTheme] = useState<ThemeMode>(() => {
     return (localStorage.getItem('hime_theme') as ThemeMode) || 'dark';
   });
   const [islandMode, setIslandMode] = useState<IslandPresentationMode>(() => {
-    return (localStorage.getItem('hime_island_mode') as IslandPresentationMode) || 'integrated';
+    return (localStorage.getItem('hime_island_mode') as IslandPresentationMode) || 'floating';
   });
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(true);
   const [isOmniboxOpen, setIsOmniboxOpen] = useState(false);
-  const [windowSizeMode, setWindowSizeMode] = useState<'compact' | 'expanded'>('expanded');
+  const [windowSizeMode, setWindowSizeMode] = useState<'compact' | 'expanded'>('compact');
 
   // Core & Data State
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [isCoreOnline, setIsCoreOnline] = useState(false);
   const [activeActivity, setActiveActivity] = useState<string | null>(null);
+  const [translationResult, setTranslationResult] = useState<{ original: string; translated: string } | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [isEventsLoading, setIsEventsLoading] = useState(false);
   const [tasks, setTasks] = useState<HimeTask[]>([]);
@@ -153,7 +154,6 @@ export const App: React.FC = () => {
   const handlePolicyTest = async (): Promise<ToolExecutionResult> => {
     setActiveActivity('Evaluating PEP/PDP policy...');
     try {
-      // Testing writing to a non-system file triggers RequireUserApproval
       const res = await executeTool('file_write', 'workspace/build-output.log');
       await refreshEvents();
 
@@ -178,33 +178,18 @@ export const App: React.FC = () => {
         ]);
       }
       return res;
-    } catch (err) {
-      await refreshEvents();
-      // Add notification for policy denial
-      setNotifications((prev) => [
-        {
-          id: `notif-pol-${Date.now()}`,
-          title: 'Security Policy Denial (PEP/PDP)',
-          message: `Denied write access: ${String(err)}`,
-          category: 'permission',
-          priority: 'high',
-          timestamp: Date.now(),
-          read: false,
-        },
-        ...prev,
-      ]);
-      throw err;
     } finally {
       setActiveActivity(null);
     }
   };
 
-  // Resolve Policy Approval handlers (Approve / Deny)
+  // Interactive Action Approval handler
   const handleApproveAction = async (requestId: string) => {
     setActiveActivity(`Submitting approval for ${requestId}...`);
     try {
       await resolveApproval(requestId, 'approve');
       await refreshEvents();
+      await refreshCoreStatus();
       setNotifications((prev) =>
         prev.map((n) =>
           n.contextData?.requestId === requestId
@@ -219,11 +204,13 @@ export const App: React.FC = () => {
     }
   };
 
+  // Interactive Action Denial handler
   const handleDenyAction = async (requestId: string) => {
     setActiveActivity(`Submitting denial for ${requestId}...`);
     try {
       await resolveApproval(requestId, 'deny');
       await refreshEvents();
+      await refreshCoreStatus();
       setNotifications((prev) =>
         prev.map((n) =>
           n.contextData?.requestId === requestId
@@ -300,29 +287,36 @@ export const App: React.FC = () => {
         setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm') {
         e.preventDefault();
-        const nextMode = windowSizeMode === 'compact' ? 'expanded' : 'compact';
-        handleToggleWindowSize(nextMode);
+        const nextIslandMode = islandMode === 'floating' ? 'integrated' : 'floating';
+        setIslandMode(nextIslandMode);
+        handleToggleWindowSize(nextIslandMode === 'floating' ? 'compact' : 'expanded');
       } else if (e.altKey) {
-        if (e.key === '1') setCurrentView('overview');
-        if (e.key === '2') setCurrentView('assistant');
-        if (e.key === '3') setCurrentView('activity');
-        if (e.key === '4') setCurrentView('tasks');
-        if (e.key === '5') setCurrentView('productivity');
-        if (e.key === '6') setCurrentView('documents');
-        if (e.key === '7') setCurrentView('developer');
-        if (e.key === '8') setCurrentView('browser');
-        if (e.key === '9') setCurrentView('specialists');
+        if (e.key === '1') setCurrentView('assistant');
+        if (e.key === '2') setCurrentView('tasks');
+        if (e.key === '3') setCurrentView('productivity');
+        if (e.key === '4') setCurrentView('storage');
+        if (e.key === '5') setCurrentView('documents');
+        if (e.key === '6') setCurrentView('developer');
+        if (e.key === '7') setCurrentView('browser');
+        if (e.key === '8') setCurrentView('specialists');
+        if (e.key === '9') setCurrentView('activity');
         if (e.key === '0') setCurrentView('settings');
       }
     };
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [windowSizeMode]);
+  }, [windowSizeMode, islandMode]);
 
   // Command Registry Context
   const commandRegistry = createCommandRegistry({
-    navigate: (v) => setCurrentView(v),
+    navigate: (v) => {
+      setCurrentView(v);
+      if (islandMode === 'floating') {
+        setIslandMode('integrated');
+        handleToggleWindowSize('expanded');
+      }
+    },
     toggleTheme: () => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark')),
     triggerPing: async () => {
       await handlePing();
@@ -339,6 +333,75 @@ export const App: React.FC = () => {
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
+  // =========================================================================
+  // PRESENTATION MODE 1: FLOATING DYNAMIC ISLAND (DEFAULT HERO VIEW)
+  // =========================================================================
+  if (islandMode === 'floating') {
+    return (
+      <div
+        style={{
+          width: '100vw',
+          height: '100vh',
+          backgroundColor: 'transparent',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'flex-start',
+          padding: '6px 12px',
+          overflow: 'hidden',
+        }}
+      >
+        <DynamicIsland
+          status={status}
+          isCoreOnline={isCoreOnline}
+          activeActivity={activeActivity}
+          translationResult={translationResult}
+          onClearTranslation={() => setTranslationResult(null)}
+          onOpenOmnibox={() => setIsOmniboxOpen(true)}
+          onOpenAssistant={() => {
+            setIslandMode('integrated');
+            setCurrentView('assistant');
+            handleToggleWindowSize('expanded');
+          }}
+          onOpenWorkstation={() => {
+            setIslandMode('integrated');
+            handleToggleWindowSize('expanded');
+          }}
+          onMinimizeWindow={() => windowMinimize()}
+          onCloseWindow={() => windowClose()}
+          unreadCount={unreadCount}
+          isFloatingMode={true}
+        />
+
+        {/* Omnibox Modal in Island Mode */}
+        <OmniboxModal
+          isOpen={isOmniboxOpen}
+          onClose={() => setIsOmniboxOpen(false)}
+          commands={commandRegistry}
+        />
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // PRESENTATION MODE 2: FULL WORKSTATION ENVIRONMENT (ACCESSED ON DEMAND)
+  // =========================================================================
+  const navItems = [
+    { id: 'assistant', label: 'AI Assistant', icon: '💬', shortcut: 'Alt+1' },
+    { id: 'tasks', label: 'Papan Tugas', icon: '📋', shortcut: 'Alt+2' },
+    { id: 'productivity', label: 'Produktivitas', icon: '🎯', shortcut: 'Alt+3' },
+    { id: 'storage', label: 'Penyimpanan', icon: '💾', shortcut: 'Alt+4' },
+    { id: 'documents', label: 'Dokumen & Akademik', icon: '📄', shortcut: 'Alt+5' },
+    { id: 'developer', label: 'Developer Workspace', icon: '💻', shortcut: 'Alt+6' },
+    { id: 'browser', label: 'Browser & Web', icon: '🌐', shortcut: 'Alt+7' },
+    { id: 'specialists', label: 'Spesialis Data & AI', icon: '🤖', shortcut: 'Alt+8' },
+    { id: 'activity', label: 'Log Aktivitas', icon: '⚡', shortcut: 'Alt+9' },
+    { id: 'devices', label: 'Perangkat (Mobile)', icon: '📱' },
+    { id: 'notifications', label: 'Notifikasi', icon: '🔔', badge: unreadCount > 0 ? unreadCount : undefined },
+    { id: 'settings', label: 'Pengaturan', icon: '⚙️', shortcut: 'Alt+0' },
+    { id: 'overview', label: 'Diagnostik Sistem', icon: '📊' },
+  ];
+
   return (
     <div
       style={{
@@ -351,44 +414,56 @@ export const App: React.FC = () => {
         overflow: 'hidden',
       }}
     >
-      {/* Titlebar & Native Window Controls */}
+      {/* Titlebar & Window Header with Return to Island Button */}
       <div
         className="app-drag-region"
         style={{
-          height: '42px',
+          height: '48px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: '0 12px',
+          padding: '0 16px',
           borderBottom: '1px solid var(--border-subtle)',
           backgroundColor: 'var(--bg-surface-1)',
           zIndex: 100,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, letterSpacing: '0.05em' }}>
-            HIME DESKTOP
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, letterSpacing: '0.04em', color: '#f8fafc' }}>
+            ✨ HIME WORKSTATION
           </span>
           <Badge variant={isCoreOnline ? 'success' : 'danger'} size="xs" dot>
-            {isCoreOnline ? 'Core Linked' : 'Offline'}
+            {isCoreOnline ? 'Core Online' : 'Core Offline'}
           </Badge>
-        </div>
 
-        {/* Dynamic Island in Top Bar */}
-        <div className="app-no-drag">
-          <DynamicIsland
-            status={status}
-            isCoreOnline={isCoreOnline}
-            activeActivity={activeActivity}
-            onOpenOmnibox={() => setIsOmniboxOpen(true)}
-            onTriggerPing={handlePing}
-            onTriggerPolicyTest={handlePolicyTest}
-            unreadCount={unreadCount}
-          />
+          {/* Button to return to Floating Dynamic Island */}
+          <button
+            onClick={() => {
+              setIslandMode('floating');
+              handleToggleWindowSize('compact');
+            }}
+            className="app-no-drag btn-pressable"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: 'rgba(139, 92, 246, 0.15)',
+              border: '1px solid rgba(139, 92, 246, 0.35)',
+              borderRadius: 'var(--radius-pill)',
+              padding: '4px 12px',
+              color: '#c4b5fd',
+              fontSize: '11px',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Kembali ke Mode Dynamic Island Mengambang di Atas Layar"
+          >
+            ✨ Mode Island Mengambang
+          </button>
         </div>
 
         {/* Window action buttons */}
-        <div className="app-no-drag" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <div className="app-no-drag" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button
             onClick={() => windowMinimize()}
             className="btn-pressable"
@@ -445,37 +520,19 @@ export const App: React.FC = () => {
         {/* Navigation Sidebar */}
         <div
           style={{
-            width: '210px',
+            width: '220px',
             backgroundColor: 'var(--bg-surface-1)',
             borderRight: '1px solid var(--border-subtle)',
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'space-between',
-            padding: '16px 8px',
+            padding: '14px 10px',
+            overflowY: 'auto',
           }}
         >
           {/* Navigation Items */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {[
-              { id: 'overview', label: 'Overview', icon: '📊', shortcut: 'Alt+1' },
-              { id: 'assistant', label: 'Assistant', icon: '💬', shortcut: 'Alt+2' },
-              { id: 'activity', label: 'Activity Stream', icon: '⚡', shortcut: 'Alt+3' },
-              { id: 'tasks', label: 'Tasks', icon: '📋', shortcut: 'Alt+4' },
-              { id: 'productivity', label: 'Productivity', icon: '🎯', shortcut: 'Alt+5' },
-              { id: 'documents', label: 'Documents', icon: '📄', shortcut: 'Alt+6' },
-              { id: 'developer', label: 'Developer', icon: '💻', shortcut: 'Alt+7' },
-              { id: 'browser', label: 'Browser & Web', icon: '🌐', shortcut: 'Alt+8' },
-              { id: 'specialists', label: 'Specialists & AI', icon: '🤖', shortcut: 'Alt+9' },
-              { id: 'storage', label: 'Storage', icon: '💾' },
-              { id: 'devices', label: 'Devices', icon: '📱' },
-              {
-                id: 'notifications',
-                label: 'Notifications',
-                icon: '🔔',
-                badge: unreadCount > 0 ? unreadCount : undefined,
-              },
-              { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: 'Alt+0' },
-            ].map((item) => {
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+            {navItems.map((item) => {
               const isActive = currentView === item.id;
               return (
                 <button
@@ -489,17 +546,17 @@ export const App: React.FC = () => {
                     padding: '8px 12px',
                     borderRadius: 'var(--radius-sm)',
                     backgroundColor: isActive ? 'var(--bg-surface-3)' : 'transparent',
-                    color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    color: isActive ? '#f8fafc' : 'var(--text-secondary)',
                     border: 'none',
                     fontWeight: isActive ? 600 : 500,
-                    fontSize: 'var(--text-sm)',
+                    fontSize: '12px',
                     cursor: 'pointer',
                     textAlign: 'left',
-                    transition: 'background-color var(--duration-micro) ease-out',
+                    transition: 'background-color 150ms ease-out',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span>{item.icon}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '14px' }}>{item.icon}</span>
                     <span>{item.label}</span>
                   </div>
                   {item.badge !== undefined && (
@@ -515,22 +572,23 @@ export const App: React.FC = () => {
           {/* Quick status in sidebar footer */}
           <div
             style={{
-              padding: '12px',
+              padding: '10px 12px',
               backgroundColor: 'var(--bg-surface-2)',
               borderRadius: 'var(--radius-sm)',
               border: '1px solid var(--border-subtle)',
-              fontSize: 'var(--text-2xs)',
+              fontSize: '11px',
               display: 'flex',
               flexDirection: 'column',
               gap: '4px',
+              marginTop: '12px',
             }}
           >
-            <div style={{ color: 'var(--text-muted)' }}>Runtime Status</div>
+            <div style={{ color: 'var(--text-muted)' }}>Status Sistem</div>
             <div style={{ fontWeight: 600, color: isCoreOnline ? 'var(--accent-success)' : 'var(--accent-danger)' }}>
-              {isCoreOnline ? '● Hime Core Active' : '○ Core Disconnected'}
+              {isCoreOnline ? '● Hime Core Aktif' : '○ Core Terputus'}
             </div>
-            <div style={{ color: 'var(--text-dim)', marginTop: '2px' }}>
-              Press Ctrl+K for commands
+            <div style={{ color: 'var(--text-dim)', fontSize: '10px' }}>
+              Tekan Ctrl+K untuk perintah
             </div>
           </div>
         </div>
@@ -563,10 +621,10 @@ export const App: React.FC = () => {
                 <span style={{ fontSize: 'var(--text-lg)' }}>⚠️</span>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 'var(--text-xs)', color: 'var(--accent-danger)' }}>
-                    HIME CORE IS CURRENTLY OFFLINE OR UNREACHABLE
+                    HIME CORE SEDANG OFFLINE ATAU TIDAK DAPAT DIHUBUNGI
                   </div>
                   <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-                    Windows Named Pipe `\\.\pipe\hime-ipc` is not responding. Start `hime-core.exe` daemon to enable background operations.
+                    Windows Named Pipe `\\.\pipe\hime-ipc` tidak merespon. Pastikan daemon `hime-core.exe` berjalan.
                   </div>
                 </div>
               </div>
@@ -583,21 +641,12 @@ export const App: React.FC = () => {
                   cursor: 'pointer',
                 }}
               >
-                Retry Connection
+                Coba Hubungkan Ulang
               </button>
             </div>
           )}
 
-          {/* View Dispatcher */}
-          {currentView === 'overview' && (
-            <OverviewView
-              status={status}
-              isCoreOnline={isCoreOnline}
-              onPing={handlePing}
-              onTestPolicy={handlePolicyTest}
-            />
-          )}
-
+          {/* View Dispatcher - Assistant is the Hero View */}
           {currentView === 'assistant' && (
             <ConversationView
               isCoreOnline={isCoreOnline}
@@ -612,17 +661,9 @@ export const App: React.FC = () => {
                   const res = await handlePolicyTest();
                   return `Policy test result: ${JSON.stringify(res)}`;
                 } else {
-                  return `Command '${cmd}' received and acknowledged by Hime Core. (Hermes Agent reasoning loop scheduled for Phase 08).`;
+                  return `Perintah '${cmd}' diterima dan diakui oleh Hime Core.`;
                 }
               }}
-            />
-          )}
-
-          {currentView === 'activity' && (
-            <ActivityStream
-              events={events}
-              isLoading={isEventsLoading}
-              onRefresh={refreshEvents}
             />
           )}
 
@@ -638,6 +679,10 @@ export const App: React.FC = () => {
 
           {currentView === 'productivity' && (
             <ProductivityView />
+          )}
+
+          {currentView === 'storage' && (
+            <StorageView />
           )}
 
           {currentView === 'documents' && (
@@ -656,8 +701,12 @@ export const App: React.FC = () => {
             <SpecialistsView />
           )}
 
-          {currentView === 'storage' && (
-            <StorageView />
+          {currentView === 'activity' && (
+            <ActivityStream
+              events={events}
+              isLoading={isEventsLoading}
+              onRefresh={refreshEvents}
+            />
           )}
 
           {currentView === 'devices' && (
@@ -679,17 +728,30 @@ export const App: React.FC = () => {
               theme={theme}
               onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
               islandMode={islandMode}
-              onToggleIslandMode={(m) => setIslandMode(m)}
+              onToggleIslandMode={(m) => {
+                setIslandMode(m);
+                handleToggleWindowSize(m === 'floating' ? 'compact' : 'expanded');
+              }}
               alwaysOnTop={alwaysOnTop}
               onToggleAlwaysOnTop={handleToggleAlwaysOnTop}
               onToggleWindowSize={handleToggleWindowSize}
               onOpenOmnibox={() => setIsOmniboxOpen(true)}
             />
           )}
+
+          {/* System Diagnostics - Moved away from the front page */}
+          {currentView === 'overview' && (
+            <OverviewView
+              status={status}
+              isCoreOnline={isCoreOnline}
+              onPing={handlePing}
+              onTestPolicy={handlePolicyTest}
+            />
+          )}
         </div>
       </div>
 
-      {/* Omnibox Command Modal (Ctrl+K) */}
+      {/* Omnibox Modal */}
       <OmniboxModal
         isOpen={isOmniboxOpen}
         onClose={() => setIsOmniboxOpen(false)}
@@ -698,4 +760,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
 export default App;

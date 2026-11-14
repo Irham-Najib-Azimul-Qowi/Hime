@@ -121,7 +121,15 @@ try {
     # If Core is available and requested
     if ($canRunCore -and -not $DesktopOnly) {
         Write-Host "Launching Hime Core (daemon)..." -ForegroundColor Cyan
-        $coreProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-core" -PassThru -NoNewWindow
+        $releaseCore = Join-Path $workspaceRoot "target\release\hime-core.exe"
+        $debugCore = Join-Path $workspaceRoot "target\debug\hime-core.exe"
+        if (Test-Path $releaseCore) {
+            $coreProc = Start-Process -FilePath $releaseCore -PassThru -NoNewWindow
+        } elseif (Test-Path $debugCore) {
+            $coreProc = Start-Process -FilePath $debugCore -PassThru -NoNewWindow
+        } else {
+            $coreProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-core" -PassThru -NoNewWindow
+        }
         $spawnedProcesses.Add($coreProc)
         Start-Sleep -Milliseconds 1000
     }
@@ -135,8 +143,16 @@ try {
             cmd.exe /c "pnpm --dir apps/hime-desktop build"
         }
 
-        Write-Host "Launching Hime Desktop (GUI shell)..." -ForegroundColor Cyan
-        $desktopProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-desktop" -PassThru
+        Write-Host "Launching Hime Desktop (Floating Dynamic Island)..." -ForegroundColor Cyan
+        $releaseDesktop = Join-Path $workspaceRoot "target\release\hime-desktop.exe"
+        $debugDesktop = Join-Path $workspaceRoot "target\debug\hime-desktop.exe"
+        if (Test-Path $releaseDesktop) {
+            $desktopProc = Start-Process -FilePath $releaseDesktop -PassThru
+        } elseif (Test-Path $debugDesktop) {
+            $desktopProc = Start-Process -FilePath $debugDesktop -PassThru
+        } else {
+            $desktopProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-desktop" -PassThru
+        }
         $spawnedProcesses.Add($desktopProc)
     }
 

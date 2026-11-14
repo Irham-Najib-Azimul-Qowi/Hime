@@ -10,15 +10,16 @@
     "windows": [
       {
         "title": "Hime Assistant",
-        "width": 980,
-        "height": 700,
-        "minWidth": 440,
-        "minHeight": 88,
+        "width": 520,
+        "height": 72,
+        "minWidth": 420,
+        "minHeight": 64,
         "center": true,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
-        "transparent": false
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
