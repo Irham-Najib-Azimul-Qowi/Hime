@@ -84,3 +84,4 @@ Hime for Linux is packaged through standard Linux formats:
 ## 6. CONCLUSION
 
 Hime achieves genuine cross-platform readiness. Linux support is classified as **Beta** for v1.0 RC with documented compositor differences and zero broken architectural abstractions.
+

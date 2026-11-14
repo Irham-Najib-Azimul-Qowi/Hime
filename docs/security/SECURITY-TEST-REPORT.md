@@ -77,3 +77,4 @@ The binary IPC framing layer (`hime-ipc`) was subjected to boundary and fuzzing 
 ## 6. CONCLUSION & RECOMMENDATIONS
 
 The Hime ecosystem demonstrates robust, defense-in-depth security. The architecture enforces fail-closed policies across all boundaries. No critical or high security issues remain open. Hime v1.0 is approved from a security perspective for release candidate distribution.
+

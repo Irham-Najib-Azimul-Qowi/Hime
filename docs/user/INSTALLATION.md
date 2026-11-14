@@ -84,3 +84,4 @@ Upon launching Hime for the first time:
 
 - To uninstall on Windows: Open **Windows Settings > Installed apps**, locate **Hime Assistant**, and click **Uninstall**.
 - To remove all stored local data, delete `%APPDATA%\Hime` and `%LOCALAPPDATA%\Hime`.
+

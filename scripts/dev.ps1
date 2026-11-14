@@ -120,18 +120,24 @@ function Stop-DevProcesses {
 try {
     # If Core is available and requested
     if ($canRunCore -and -not $DesktopOnly) {
-        Write-Host "Launching Hime Core (debug build)..." -ForegroundColor Cyan
+        Write-Host "Launching Hime Core (daemon)..." -ForegroundColor Cyan
         $coreProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-core" -PassThru -NoNewWindow
         $spawnedProcesses.Add($coreProc)
+        Start-Sleep -Milliseconds 1000
     }
 
     # If Desktop is available and requested
     if ($canRunDesktop -and -not $CoreOnly) {
-        Write-Host "Launching Hime Desktop (Tauri dev server)..." -ForegroundColor Cyan
-        Push-Location (Join-Path $workspaceRoot "apps/hime-desktop")
-        $desktopProc = Start-Process -FilePath "pnpm" -ArgumentList "tauri dev" -PassThru -NoNewWindow
+        # Ensure frontend bundle exists
+        $distIndex = Join-Path $workspaceRoot "apps\hime-desktop\dist\index.html"
+        if (-not (Test-Path $distIndex)) {
+            Write-Host "Building frontend bundle..." -ForegroundColor Yellow
+            cmd.exe /c "pnpm --dir apps/hime-desktop build"
+        }
+
+        Write-Host "Launching Hime Desktop (GUI shell)..." -ForegroundColor Cyan
+        $desktopProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-desktop" -PassThru
         $spawnedProcesses.Add($desktopProc)
-        Pop-Location
     }
 
     Write-Host "All development services running. Press Ctrl+C to terminate." -ForegroundColor Green

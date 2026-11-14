@@ -107,3 +107,4 @@ Hime operates on a strict **Fail-Closed, Least-Privilege Policy**:
 | `Alt+8` | Jump to Browser & Cloud Integrations |
 | `Alt+9` | Jump to Specialist Agents & Data/AI Studio |
 | `Enter` | Submit prompt / Execute selected item |
+

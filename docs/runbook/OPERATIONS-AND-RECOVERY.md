@@ -111,3 +111,4 @@ If local configuration is corrupted beyond recovery:
    Rename-Item "$env:APPDATA\Hime\hime.db" "$env:APPDATA\Hime\hime_corrupt.db"
    ```
 3. Restart `Hime.exe`. Hime Core will automatically generate a fresh, pristine SQLite database with all tables, triggers, and indices intact.
+
