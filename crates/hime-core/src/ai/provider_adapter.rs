@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 use zeroize::Zeroize;
 
-use hime_security::dpapi::{SecretVault, WindowsDpapiVault};
+use hime_security::dpapi::{create_default_vault, SecretVault};
 use hime_storage::Database;
 
 /// Represents an available AI model exposed by the Hime-Owned Provider Adapter.
@@ -40,7 +40,7 @@ impl ProviderCredentialAdapter {
         Self {
             port,
             storage,
-            vault: Arc::new(WindowsDpapiVault::new()),
+            vault: create_default_vault(),
             running: Arc::new(AtomicBool::new(false)),
         }
     }

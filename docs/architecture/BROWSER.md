@@ -49,3 +49,4 @@ Every session, history entry, and downloaded file is persisted in SQLite (`crate
 - `browser_sessions`: Active and closed browsing sessions with timestamps.
 - `browser_history`: Chronological audit trail of visited URLs.
 - `browser_downloads`: Quarantined file records with SHA-256 hashes and quarantine reason.
+

@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroize;
 
@@ -25,6 +27,7 @@ pub trait SecretVault: Send + Sync {
     fn unprotect(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DpapiError>;
 }
 
+/// Windows Data Protection API (DPAPI) hardware-backed user credential vault.
 pub struct WindowsDpapiVault;
 
 impl WindowsDpapiVault {
@@ -78,6 +81,7 @@ impl SecretVault for WindowsDpapiVault {
 
         #[cfg(not(windows))]
         {
+            let _ = plaintext;
             Err(DpapiError::UnsupportedPlatform)
         }
     }
@@ -122,8 +126,107 @@ impl SecretVault for WindowsDpapiVault {
 
         #[cfg(not(windows))]
         {
+            let _ = ciphertext;
             Err(DpapiError::UnsupportedPlatform)
         }
+    }
+}
+
+/// Software-encrypted secret vault for Linux / cross-platform fallback.
+/// Uses SHA-256 CTR keystream derived from a machine/user secret seed with automatic zeroization.
+pub struct SoftwareEncryptedVault {
+    key: [u8; 32],
+}
+
+impl SoftwareEncryptedVault {
+    pub fn new(seed: &[u8]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"hime-vault-key-derivation-salt-v1");
+        hasher.update(seed);
+        let key_bytes = hasher.finalize();
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&key_bytes);
+        Self { key }
+    }
+
+    /// Derives key from platform environment (e.g. machine-id or user id).
+    pub fn from_environment() -> Self {
+        let machine_id = std::env::var("HIME_VAULT_SEED")
+            .or_else(|_| std::env::var("USER"))
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "hime-default-user".to_string());
+        Self::new(machine_id.as_bytes())
+    }
+
+    fn apply_keystream(&self, input: &[u8], nonce: &[u8; 16]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(input.len());
+        let mut block_idx: u32 = 0;
+
+        for chunk in input.chunks(32) {
+            let mut hasher = Sha256::new();
+            hasher.update(&self.key);
+            hasher.update(nonce);
+            hasher.update(&block_idx.to_be_bytes());
+            let block_keystream = hasher.finalize();
+
+            for (b, k) in chunk.iter().zip(block_keystream.iter()) {
+                output.push(b ^ k);
+            }
+            block_idx += 1;
+        }
+
+        output
+    }
+}
+
+impl SecretVault for SoftwareEncryptedVault {
+    fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, DpapiError> {
+        // Generate pseudo-nonce from length and sha of plaintext
+        let mut nonce = [0u8; 16];
+        let mut h = Sha256::new();
+        h.update(b"hime-nonce");
+        h.update(plaintext);
+        let digest = h.finalize();
+        nonce.copy_from_slice(&digest[0..16]);
+
+        let ciphertext = self.apply_keystream(plaintext, &nonce);
+
+        // Prepend nonce (16 bytes)
+        let mut result = Vec::with_capacity(16 + ciphertext.len());
+        result.extend_from_slice(&nonce);
+        result.extend_from_slice(&ciphertext);
+        Ok(result)
+    }
+
+    fn unprotect(&self, payload: &[u8]) -> Result<Vec<u8>, DpapiError> {
+        if payload.len() < 16 {
+            return Err(DpapiError::UnprotectFailed("Payload too short".to_string()));
+        }
+
+        let mut nonce = [0u8; 16];
+        nonce.copy_from_slice(&payload[0..16]);
+        let ciphertext = &payload[16..];
+
+        let plaintext = self.apply_keystream(ciphertext, &nonce);
+        Ok(plaintext)
+    }
+}
+
+impl Drop for SoftwareEncryptedVault {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+/// Returns the recommended vault for the current operating system.
+pub fn create_default_vault() -> Arc<dyn SecretVault> {
+    #[cfg(windows)]
+    {
+        Arc::new(WindowsDpapiVault::new())
+    }
+    #[cfg(not(windows))]
+    {
+        Arc::new(SoftwareEncryptedVault::from_environment())
     }
 }
 
@@ -164,6 +267,28 @@ mod tests {
         let decrypted = vault
             .unprotect(&encrypted)
             .expect("DPAPI unprotect should succeed");
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn test_software_encrypted_vault_roundtrip() {
+        let vault = SoftwareEncryptedVault::new(b"test-seed-secret");
+        let secret = b"secret-token-for-cross-platform-linux-vault";
+
+        let encrypted = vault.protect(secret).expect("Protect should succeed");
+        assert_ne!(encrypted, secret);
+        assert!(encrypted.len() >= 16);
+
+        let decrypted = vault.unprotect(&encrypted).expect("Unprotect should succeed");
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn test_create_default_vault() {
+        let vault = create_default_vault();
+        let secret = b"vault-integration-payload";
+        let encrypted = vault.protect(secret).expect("Protect should succeed");
+        let decrypted = vault.unprotect(&encrypted).expect("Unprotect should succeed");
         assert_eq!(decrypted, secret);
     }
 }

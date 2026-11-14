@@ -27,3 +27,4 @@ Because enterprise and academic workspaces often contain sensitive intellectual 
 | `integrations.drive.files.list` | List remote Google Drive files | No |
 | `integrations.drive.files.upload` | Upload local file to Google Drive | Yes |
 | `integrations.drive.files.share` | Share file or folder with email | Yes |
+

@@ -1273,7 +1273,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hime-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "hime-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hime-core",
  "hime-ipc",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "hime-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "hime-pal"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "thiserror 1.0.69",
  "tracing",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "hime-security"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "regex",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "hime-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "serde",

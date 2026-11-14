@@ -63,3 +63,4 @@ To prevent annoying or intrusive notifications:
 2. **Rate Limiting**: Configurable cooldown (default 30 minutes) prevents notification spam.
 3. **Mute Modes**: Quick mute options (1 hr, 4 hrs, 24 hrs) for deep focus periods.
 4. **Usefulness Metric Tracking**: Tracks `accepted`, `dismissed`, and `muted` responses to optimize recommendations over time.
+

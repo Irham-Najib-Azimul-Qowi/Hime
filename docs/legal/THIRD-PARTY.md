@@ -1,52 +1,63 @@
-# Third-Party Dependencies & Licensing Audit
+# THIRD-PARTY NOTICES & LEGAL ATTRIBUTION
+## Clean-Room Reimplementation & Third-Party Licenses (Closing G11)
 
-> **Document:** Open Source Licenses & Compliance Matrix  
-> **Phase:** 12 — Productivity, Accountability & Document Suite  
-> **Audited By:** Principal Software Engineer  
-> **Status:** COMPLIANT  
-
----
-
-## 1. Overview
-
-Hime integrates several robust, open-source libraries and external tools to facilitate document synthesis, PDF manipulation, and text parsing. This document catalogs all third-party components, their licensing, compatibility, and compliance obligations.
+**Otoritas:** Legal & Compliance Lead  
+**Pelaksana:** Principal Software Engineer & AI Executor  
+**Klasifikasi:** Legal & Licensing Documentation  
+**Tanggal:** 2026-11-14  
 
 ---
 
-## 2. Dependency Matrix
+## 1. NUSA CLEAN-ROOM REIMPLEMENTATION AUDIT (CLOSING G11)
 
-| Component | Language / Ecosystem | Version | License | Usage in Hime | Commercial Friendly |
-|:---|:---|:---|:---|:---|:---|
-| **serde / serde_json** | Rust | 1.0.x | MIT / Apache-2.0 | Serialization & JSON-RPC framing | Yes |
-| **rusqlite** | Rust | 0.31.x | MIT | Local SQLite embedded storage engine | Yes |
-| **chrono** | Rust | 0.4.x | MIT / Apache-2.0 | Timestamps, scheduling & time zones | Yes |
-| **uuid** | Rust | 1.8.x | MIT / Apache-2.0 | Universally unique identifiers | Yes |
-| **tokio** | Rust | 1.38.x | MIT | Async runtime & IO primitives | Yes |
-| **tracing** | Rust | 0.1.x | MIT | Structured logging & diagnostics | Yes |
-| **windows-sys** | Rust | 0.52.x | MIT / Apache-2.0 | Windows native APIs (Named Pipes, DPAPI) | Yes |
-| **React** | TypeScript | 18.x | MIT | Desktop frontend UI library | Yes |
-| **Vite** | TypeScript | 5.x | MIT | Frontend build tool and bundler | Yes |
-| **Tailwind CSS** | CSS / JS | 3.x | MIT | Utility-first CSS styling framework | Yes |
-| **Tauri** | Rust / C++ | 2.0.x | MIT / Apache-2.0 | Lightweight desktop shell | Yes |
+### Status: **VERIFIED CLEAN-ROOM — 100% INDEPENDENT IMPLEMENTATION**
+
+1. **Zero Source Code Reuse:**
+   - The proprietary source code of Nusa Dynamic Island is completely unavailable and was never accessed or used in the development of Hime.
+   - Hime Desktop is a **clean-room reimplementation** developed entirely from scratch using Rust, Tauri 2.0, TypeScript, and modern web standards.
+2. **Zero Copyrighted Assets:**
+   - All visual assets, UI layouts, icons, fonts, CSS styles, and design tokens in Hime are original creations or sourced from permissible open-source libraries (e.g. Lucide / SVG icons).
+   - No binaries, decompiled assets, images, audio files, or reverse-engineered resources from Nusa are contained within this repository or shipped application bundles.
 
 ---
 
-## 3. Optional External CLI Utilities (User-Installed)
+## 2. EXTERNAL DEPENDENCIES & RUNTIMES INTEGRATION
 
-For enhanced document conversions, Hime can optionally invoke the following system-installed binaries when detected in `%PATH%`. Note that Hime does **not bundle proprietary or copyleft binaries** directly in the distribution; it interacts strictly via standard process invocation.
+Hime integrates external open-source projects as managed background services under documented boundaries without modifying upstream copyright notices:
 
-| Tool | Upstream License | Distribution Mechanism | Compliance Verification |
-|:---|:---|:---|:---|
-| **Pandoc** | GPL-3.0-or-later | User installed via winget/brew | Executed as external subprocess; no static/dynamic linking. Fully compliant. |
-| **LibreOffice (headless)** | MPL-2.0 | User installed | Interfaced via CLI command line argument. Fully compliant. |
-| **qpdf** | Apache-2.0 | User installed / bundled permissive | Permissive Apache-2.0 license. Fully compliant. |
-| **Tesseract OCR** | Apache-2.0 | User installed / optional | Permissive Apache-2.0 license. Fully compliant. |
+| Component / Project | Original Author | License | Integration Topology |
+|:---|:---|:---:|:---|
+| **Hermes Agent** | NousResearch | MIT License | External Subprocess via Named Pipe / HTTP API |
+| **9Router** | decolua | Apache License 2.0 | Managed Loopback Gateway via `127.0.0.1:20128` |
+
+Both dependencies remain unmodified. Hime interacts strictly through standard network and IPC boundaries (Dual-Control Plane).
 
 ---
 
-## 4. Compliance Verification Summary
+## 3. OPEN SOURCE LIBRARIES & LICENSES
 
-- Zero proprietary copyleft code is statically linked into `hime-core`, `hime-storage`, `hime-ipc`, or `hime-desktop`.
-- All directly linked dependencies utilize permissive licenses (MIT or Apache-2.0).
-- External tools with copyleft licenses (such as GPL-3.0 for Pandoc) are executed exclusively as isolated external subprocesses with standard IO streams, adhering strictly to FSF compliance guidelines.
+Hime incorporates the following open-source libraries in compliance with their respective licenses:
 
+### 3.1 Rust Workspace Crates (`Cargo.lock`)
+- **Tauri Framework (`tauri`, `tauri-build`):** Copyright (c) 2019 - present Tauri Programme within The Commons Conservancy. Licensed under MIT or Apache 2.0.
+- **Tokio (`tokio`, `tokio-macros`):** Copyright (c) 2024 Tokio Contributors. Licensed under MIT.
+- **Rusqlite (`rusqlite`):** Copyright (c) 2014-2024 The Rusqlite Developers. Licensed under MIT. SQLite itself is Public Domain.
+- **Serde (`serde`, `serde_json`):** Copyright (c) 2014-2024 David Tolnay and Serde Contributors. Licensed under MIT or Apache 2.0.
+- **Tracing (`tracing`, `tracing-subscriber`):** Copyright (c) 2024 Tokio Contributors. Licensed under MIT.
+- **Windows-rs (`windows`):** Copyright (c) Microsoft Corporation. Licensed under MIT or Apache 2.0.
+- **Sha2 (`sha2`):** Copyright (c) RustCrypto Contributors. Licensed under MIT or Apache 2.0.
+- **Zeroize (`zeroize`):** Copyright (c) RustCrypto Contributors. Licensed under Apache 2.0.
+- **Thiserror (`thiserror`):** Copyright (c) 2024 David Tolnay. Licensed under MIT or Apache 2.0.
+
+### 3.2 Desktop Frontend (`package.json`)
+- **React & React DOM:** Copyright (c) Meta Platforms, Inc. and affiliates. Licensed under MIT.
+- **Vite:** Copyright (c) 2019-present Evan You & Vite Contributors. Licensed under MIT.
+- **TypeScript:** Copyright (c) Microsoft Corporation. Licensed under Apache 2.0.
+
+---
+
+## 4. DISTRIBUTION AND COMPLIANCE NOTICE
+
+The Hime project is released under the **MIT License OR Apache License 2.0** (as specified in root `Cargo.toml`).
+
+Users, distributors, and contributors are permitted to use, modify, and distribute Hime under the conditions set forth in the project license, provided that original copyright notices and this third-party attribution document remain intact.

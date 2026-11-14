@@ -29,3 +29,4 @@ GitHub Personal Access Tokens (PATs) and OAuth tokens are stored exclusively in 
 ## 4. Prompt & Output Sanitization
 
 All issue bodies, descriptions, and comments retrieved from GitHub are sanitized before delivery to Hermes Agent. High-entropy strings matching GitHub PAT patterns (`ghp_`, `github_pat_`) are automatically scrubbed via `hime_security::redaction::redact_sensitive_text`.
+

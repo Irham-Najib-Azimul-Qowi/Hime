@@ -41,3 +41,4 @@ These capabilities introduce substantial security challenges:
 - Web automation is strictly confined to external public pages; local network probes are blocked.
 - LLM reasoning cannot be hijacked by web page DOM content.
 - Developers have a unified, secure workspace toolchain with automatic secret defense.
+

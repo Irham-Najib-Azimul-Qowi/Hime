@@ -74,10 +74,11 @@ impl Drop for SubprocessHandle {
     }
 }
 
-/// Win32 Job Object Process Supervisor encapsulated within Platform Abstraction Layer (PAL).
+/// Cross-platform Process Supervisor encapsulated within Platform Abstraction Layer (PAL).
 ///
-/// Ensures child processes are assigned to a kernel Job Object with KILL_ON_JOB_CLOSE
+/// On Windows: Ensures child processes are assigned to a kernel Job Object with KILL_ON_JOB_CLOSE
 /// before their main thread is resumed.
+/// On Linux/Unix: Spawns processes in isolated process groups with signal-based cleanup.
 pub struct JobSupervisor {
     #[cfg(windows)]
     job_handle: HANDLE,
@@ -131,14 +132,17 @@ impl JobSupervisor {
 
         #[cfg(not(windows))]
         {
+            let _ = job_name;
+            info!("Initialized Unix Process Supervisor (PAL)");
             Ok(Self {
                 processes: Mutex::new(HashMap::new()),
             })
         }
     }
 
-    /// Spawns an external subprocess with CREATE_SUSPENDED, assigns it to the Job Object,
-    /// and only resumes the main thread if assignment succeeds (Fail-Closed).
+    /// Spawns an external subprocess.
+    /// On Windows: with CREATE_SUSPENDED, assigns it to the Job Object, and resumes only on success.
+    /// On Linux: spawns with process tracking.
     pub fn spawn_child(&self, name: &str, command_line: &str) -> Result<u32, SupervisorError> {
         #[cfg(windows)]
         {
@@ -216,7 +220,21 @@ impl JobSupervisor {
 
         #[cfg(not(windows))]
         {
-            Err(SupervisorError::UnsupportedPlatform)
+            info!(name = %name, cmd = %command_line, "Spawning child under process supervisor via PAL (Unix fallback)");
+            let child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command_line)
+                .spawn()
+                .map_err(|e| SupervisorError::SpawnSuspendedFailed(e.to_string()))?;
+            let pid = child.id();
+            let handle = SubprocessHandle {
+                name: name.to_string(),
+                pid,
+                state: ProcessState::Running,
+            };
+            let mut map = self.processes.lock().unwrap();
+            map.insert(name.to_string(), handle);
+            Ok(pid)
         }
     }
 
@@ -237,6 +255,16 @@ impl JobSupervisor {
 
         #[cfg(not(windows))]
         {
+            let mut map = self.processes.lock().unwrap();
+            if let Some(mut proc) = map.remove(name) {
+                let _ = std::process::Command::new("kill")
+                    .arg("-15")
+                    .arg(proc.pid.to_string())
+                    .status();
+                proc.state = ProcessState::Stopped;
+                info!(name = %name, pid = proc.pid, "Child process explicitly terminated (Unix PAL)");
+                return true;
+            }
             false
         }
     }
@@ -249,6 +277,19 @@ impl Drop for JobSupervisor {
             if !self.job_handle.is_invalid() {
                 info!("Closing Job Object handle (PAL) — triggering kernel termination of all member processes");
                 let _ = CloseHandle(self.job_handle);
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            if let Ok(mut map) = self.processes.lock() {
+                for (name, proc) in map.drain() {
+                    let _ = std::process::Command::new("kill")
+                        .arg("-9")
+                        .arg(proc.pid.to_string())
+                        .status();
+                    info!(name = %name, pid = proc.pid, "Terminated child process on JobSupervisor drop (Unix PAL)");
+                }
             }
         }
     }

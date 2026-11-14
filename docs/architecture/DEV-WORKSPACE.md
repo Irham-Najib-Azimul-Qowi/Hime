@@ -45,3 +45,4 @@ Hime provides built-in templates compliant with international software engineeri
 - **DPPL (IEEE 1016)**: Software Architecture and Design Description in Bahasa Indonesia.
 - **Master Test Plan (IEEE 829)**: Test Strategy, Scope, and Traceability Matrix.
 - **Rigorous Code Review Checklist**: Security boundaries, memory safety, secret hygiene, and PEP compliance.
+

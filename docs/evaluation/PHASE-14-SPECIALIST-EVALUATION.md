@@ -24,3 +24,4 @@ The objective of the Phase 14 Evaluation Harness (`hime-core::ai::evaluation`) i
 | **Storage Architect** | storage | 1 | 100% | 340 | 11 ms | **95.5 / 100** | `PASS` |
 
 All specialists achieved a composite score > 90.0/100, meeting the strict quality bar defined in `docs/agent-pack/roadmap/PHASE-14-SPECIALIST-AGENTS-AND-SKILLS.md`.
+

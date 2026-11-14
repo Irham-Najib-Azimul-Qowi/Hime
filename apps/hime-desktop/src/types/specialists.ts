@@ -86,3 +86,4 @@ export interface EvaluationReport {
   overall_score: number;
   evaluation_summary: string;
 }
+
