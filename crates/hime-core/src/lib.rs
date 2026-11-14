@@ -1,7 +1,10 @@
 pub mod ai;
+pub mod browser;
 pub mod bus;
+pub mod developer;
 pub mod device;
 pub mod documents;
+pub mod integrations;
 pub mod logging;
 pub mod ports;
 pub mod productivity;
@@ -14,9 +17,12 @@ pub use ai::{
     HermesRuntimeAdapter, HermesRuntimeStatus, ModelInfo, ProviderCredentialAdapter,
     RouterGatewayAdapter, RouterHealthStatus,
 };
+pub use browser::BrowserService;
 pub use bus::{EventBus, SystemEvent};
+pub use developer::DeveloperEngine;
 pub use device::DeviceManager;
 pub use documents::DocumentEngine;
+pub use integrations::{GitHubAdapter, GoogleDriveAdapter};
 pub use logging::init_logging;
 pub use productivity::ProductivityEngine;
 pub use server::{ApprovalRecord, CoreServer, TaskRecord};

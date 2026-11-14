@@ -83,3 +83,4 @@ Instead, Hime employs the **Open Interchange Format Model**:
 - **Path Traversal Protection**: All user-provided output paths are resolved and validated by `hime-security::PolicyEngine`. If a requested path lies outside safe directories (e.g. system directories), the operation fails closed.
 - **Quota & Resource Protection**: Maximum document size is bounded at 100 MB. Mutex locks prevent multiple heavy PDF compression/merge tasks from starving system memory.
 - **Sandboxed Staging**: Intermediate compilation files reside strictly within `.hime/documents_sandbox` and are cleaned up upon job completion.
+

@@ -30,3 +30,4 @@ export interface DocumentVerificationReport {
   visual_fidelity_score: number;
   verified_at: number;
 }
+

@@ -72,3 +72,4 @@ export interface StartupCheckinSummary {
   today_schedules: StudySchedule[];
   snooze_available: boolean;
 }
+

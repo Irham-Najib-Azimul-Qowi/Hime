@@ -62,11 +62,27 @@ export const createCommandRegistry = (ctx: CommandContext): CommandItem[] => {
       action: () => ctx.navigate('documents'),
     },
     {
+      id: 'nav-developer',
+      title: 'Go to Developer Workspace',
+      description: 'Sandboxed command execution, safe Git pre-commit scanner, and SE templates',
+      category: 'navigation',
+      shortcut: 'Alt+7',
+      action: () => ctx.navigate('developer'),
+    },
+    {
+      id: 'nav-browser',
+      title: 'Go to Browser & Integrations',
+      description: 'SSRF-protected web research, GitHub repository inspector, and Google Drive adapter',
+      category: 'navigation',
+      shortcut: 'Alt+8',
+      action: () => ctx.navigate('browser'),
+    },
+    {
       id: 'nav-storage',
       title: 'Go to Storage',
       description: 'Safe storage operations, recycle bin, duplicate finder, and rules',
       category: 'navigation',
-      shortcut: 'Alt+7',
+      shortcut: 'Alt+9',
       action: () => ctx.navigate('storage'),
     },
     {
@@ -74,7 +90,6 @@ export const createCommandRegistry = (ctx: CommandContext): CommandItem[] => {
       title: 'Go to Devices',
       description: 'Paired Android devices, mTLS certificates, and remote approvals',
       category: 'navigation',
-      shortcut: 'Alt+8',
       action: () => ctx.navigate('devices'),
     },
     {

@@ -11,6 +11,9 @@ import {
 } from '../types/ipc';
 import { AuditEvent } from '../types/events';
 import { HimeTask } from '../types/tasks';
+import { BrowserSession, BrowserHistoryItem, BrowserDownload, BrowserExtractionResult } from '../types/browser';
+import { DeveloperWorkspace, DeveloperCommandOutput, GitStatusResult, SeTemplateItem } from '../types/developer';
+import { IntegrationAccount, GitHubRepoSummary, GitHubIssue, GoogleDriveFile } from '../types/integrations';
 
 export const isTauriEnvironment = (): boolean => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -816,6 +819,350 @@ export const discoverArtcraft = async (): Promise<any> => {
     };
   }
   return await invoke<any>('documents_artcraft_discover');
+};
+
+// ---------------------------------------------------------------------------
+// Phase 13: Browser, Integrations & Developer Workspace Service Calls
+// ---------------------------------------------------------------------------
+
+// Browser API
+export const browserOpen = async (url: string): Promise<BrowserSession> => {
+  if (!isTauriEnvironment()) {
+    return {
+      id: `session-prev-${Date.now()}`,
+      url,
+      title: 'Preview Web Page',
+      status: 'active',
+      started_at: Math.floor(Date.now() / 1000),
+      last_active_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<BrowserSession>('browser_open', { url });
+};
+
+export const browserExtract = async (sessionId: string): Promise<BrowserExtractionResult> => {
+  if (!isTauriEnvironment()) {
+    return {
+      session_id: sessionId,
+      url: 'https://example.com/research',
+      title: 'Preview Page Title',
+      extracted_markdown: '<untrusted_web_content source="https://example.com/research">\n# Research Content\nThis is preview extracted content from web DOM.\n</untrusted_web_content>',
+      links: ['https://example.com/about', 'https://example.com/docs'],
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<BrowserExtractionResult>('browser_extract', { sessionId });
+};
+
+export const browserDownload = async (url: string, targetPath: string): Promise<BrowserDownload> => {
+  if (!isTauriEnvironment()) {
+    return {
+      id: `dl-prev-${Date.now()}`,
+      source_url: url,
+      target_path: targetPath,
+      file_size_bytes: 1048576,
+      sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      quarantined: true,
+      quarantine_reason: 'quarantined for security scan',
+      downloaded_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<BrowserDownload>('browser_download', { url, targetPath });
+};
+
+export const browserClose = async (sessionId: string): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { success: true };
+  }
+  return await invoke<any>('browser_close', { sessionId });
+};
+
+export const listBrowserHistory = async (limit: number = 50): Promise<BrowserHistoryItem[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'hist-prev-1',
+        url: 'https://docs.rs/tauri/2.0',
+        title: 'Tauri 2.0 Docs',
+        visited_at: Math.floor(Date.now() / 1000) - 1800,
+        metadata: '{}',
+      },
+      {
+        id: 'hist-prev-2',
+        url: 'https://github.com/rust-lang/rust',
+        title: 'Rust Repository',
+        visited_at: Math.floor(Date.now() / 1000) - 3600,
+        metadata: '{}',
+      },
+    ];
+  }
+  return await invoke<BrowserHistoryItem[]>('browser_history_list', { limit });
+};
+
+export const listBrowserDownloads = async (limit: number = 50): Promise<BrowserDownload[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'dl-prev-1',
+        source_url: 'https://example.com/dataset.csv',
+        target_path: '.hime/quarantine/dataset.csv',
+        file_size_bytes: 450200,
+        sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+        quarantined: true,
+        quarantine_reason: 'Automated download quarantine defense',
+        downloaded_at: Math.floor(Date.now() / 1000) - 7200,
+      },
+    ];
+  }
+  return await invoke<BrowserDownload[]>('browser_downloads_list', { limit });
+};
+
+// Integrations API
+export const githubInspect = async (owner: string, repo: string): Promise<GitHubRepoSummary> => {
+  if (!isTauriEnvironment()) {
+    return {
+      owner,
+      repo,
+      default_branch: 'main',
+      open_issues_count: 5,
+      open_pr_count: 2,
+      is_private: false,
+      description: 'Mock GitHub repository summary in preview mode',
+    };
+  }
+  return await invoke<GitHubRepoSummary>('integrations_github_inspect', { owner, repo });
+};
+
+export const githubListIssues = async (owner: string, repo: string, state: string = 'open'): Promise<GitHubIssue[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 101,
+        title: 'Fix path boundary check in UNC Windows paths',
+        state: 'open',
+        created_at: new Date(Date.now() - 86400000).toISOString(),
+        html_url: `https://github.com/${owner}/${repo}/issues/101`,
+      },
+      {
+        id: 102,
+        title: 'Support opt-in screen time tracking',
+        state: 'open',
+        created_at: new Date(Date.now() - 172800000).toISOString(),
+        html_url: `https://github.com/${owner}/${repo}/issues/102`,
+      },
+    ];
+  }
+  return await invoke<GitHubIssue[]>('integrations_github_issues_list', { owner, repo, state });
+};
+
+export const githubCreateIssue = async (owner: string, repo: string, title: string, body: string): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { id: 103, number: 103, title, state: 'open' };
+  }
+  return await invoke<any>('integrations_github_issues_create', { owner, repo, title, body });
+};
+
+export const githubCreatePr = async (
+  owner: string,
+  repo: string,
+  title: string,
+  head: string,
+  base: string,
+  body: string
+): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { id: 201, number: 201, title, state: 'open', head, base };
+  }
+  return await invoke<any>('integrations_github_pr_create', { owner, repo, title, head, base, body });
+};
+
+export const driveListFiles = async (parentId?: string): Promise<GoogleDriveFile[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'file-drv-1',
+        name: 'Research_Notes_2026.gdoc',
+        mime_type: 'application/vnd.google-apps.document',
+        size_bytes: 0,
+        modified_at: new Date().toISOString(),
+      },
+      {
+        id: 'file-drv-2',
+        name: 'Architecture_Diagrams.pdf',
+        mime_type: 'application/pdf',
+        size_bytes: 2400000,
+        modified_at: new Date(Date.now() - 86400000).toISOString(),
+      },
+    ];
+  }
+  return await invoke<GoogleDriveFile[]>('integrations_drive_files_list', { parentId });
+};
+
+export const driveShareFile = async (fileId: string, email: string, role: string = 'reader'): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { file_id: fileId, email, role, shared_at: Math.floor(Date.now() / 1000) };
+  }
+  return await invoke<any>('integrations_drive_files_share', { fileId, email, role });
+};
+
+export const listIntegrationAccounts = async (): Promise<IntegrationAccount[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        provider: 'github',
+        account_id: 'satoshidk',
+        display_name: 'Satoshi (GitHub)',
+        scopes: 'repo,read:user',
+        connected_at: Math.floor(Date.now() / 1000) - 86400 * 7,
+        last_used_at: Math.floor(Date.now() / 1000) - 3600,
+      },
+      {
+        provider: 'google_drive',
+        account_id: 'satoshi.work@gmail.com',
+        display_name: 'Satoshi Drive Workspace',
+        scopes: 'drive.readonly,drive.file',
+        connected_at: Math.floor(Date.now() / 1000) - 86400 * 5,
+        last_used_at: Math.floor(Date.now() / 1000) - 1800,
+      },
+    ];
+  }
+  return await invoke<IntegrationAccount[]>('integrations_accounts_list');
+};
+
+// Developer Workspace API
+export const registerDeveloperWorkspace = async (name: string, rootPath: string): Promise<DeveloperWorkspace> => {
+  if (!isTauriEnvironment()) {
+    return {
+      id: `ws-prev-${Date.now()}`,
+      name,
+      root_path: rootPath,
+      is_active: true,
+      registered_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<DeveloperWorkspace>('developer_workspaces_register', { name, rootPath });
+};
+
+export const listDeveloperWorkspaces = async (): Promise<DeveloperWorkspace[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'ws-hime-default',
+        name: 'Hime Project Root',
+        root_path: 'X:\\folder_ai\\Hime',
+        is_active: true,
+        registered_at: Math.floor(Date.now() / 1000) - 86400 * 10,
+      },
+    ];
+  }
+  return await invoke<DeveloperWorkspace[]>('developer_workspaces_list');
+};
+
+export const runDeveloperCommand = async (
+  workspaceId: string,
+  command: string,
+  args: string[]
+): Promise<DeveloperCommandOutput> => {
+  if (!isTauriEnvironment()) {
+    return {
+      command_id: `cmd-prev-${Date.now()}`,
+      exit_code: 0,
+      stdout: `[preview] ${command} ${args.join(' ')}\nDone in 0.42s`,
+      stderr: '',
+      duration_ms: 420,
+      truncated: false,
+    };
+  }
+  return await invoke<DeveloperCommandOutput>('developer_command_run', { workspaceId, command, args });
+};
+
+export const getGitStatus = async (workspaceId: string): Promise<GitStatusResult> => {
+  if (!isTauriEnvironment()) {
+    return {
+      branch: 'phase/13-browser-dev-workspace',
+      staged: [],
+      modified: ['crates/hime-core/src/lib.rs', 'crates/hime-storage/src/database.rs'],
+      untracked: ['crates/hime-core/src/browser/', 'crates/hime-core/src/developer/'],
+      is_clean: false,
+    };
+  }
+  return await invoke<GitStatusResult>('developer_git_status', { workspaceId });
+};
+
+export const getGitDiff = async (workspaceId: string, stagedOnly: boolean = false): Promise<{ diff: string }> => {
+  if (!isTauriEnvironment()) {
+    return {
+      diff: 'diff --git a/crates/hime-core/src/lib.rs b/crates/hime-core/src/lib.rs\n+ pub mod browser;\n+ pub mod integrations;\n+ pub mod developer;',
+    };
+  }
+  return await invoke<{ diff: string }>('developer_git_diff', { workspaceId, stagedOnly });
+};
+
+export const commitGitChanges = async (
+  workspaceId: string,
+  message: string
+): Promise<{ success: boolean; commit_hash: string }> => {
+  if (!isTauriEnvironment()) {
+    return {
+      success: true,
+      commit_hash: 'a1b2c3d4e5f6',
+    };
+  }
+  return await invoke<{ success: boolean; commit_hash: string }>('developer_git_commit', { workspaceId, message });
+};
+
+export const listSeTemplates = async (): Promise<SeTemplateItem[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'skpl-ieee830',
+        title: 'Spesifikasi Kebutuhan Perangkat Lunak (SKPL / SRS)',
+        description: 'Standar rekayasa perangkat lunak IEEE 830 / ISO 29148 berbahasa Indonesia.',
+        standard: 'IEEE 830',
+        category: 'requirements',
+      },
+      {
+        id: 'dppl-sad',
+        title: 'Deskripsi Perancangan Perangkat Lunak (DPPL / SAD)',
+        description: 'Standar perancangan arsitektur, modul, ERD, dan antarmuka perangkat lunak.',
+        standard: 'IEEE 1016',
+        category: 'architecture',
+      },
+      {
+        id: 'test-plan-ieee829',
+        title: 'Master Test Plan & Verification Matrix',
+        description: 'Standar perencanaan pengujian IEEE 829.',
+        standard: 'IEEE 829',
+        category: 'testing',
+      },
+      {
+        id: 'code-review-checklist',
+        title: 'Rigorous Code Review & Pre-Commit Audit Checklist',
+        description: 'Daftar periksa keamanan, batas memori, rahasia, dan sanitasi input.',
+        standard: 'Hime Standard',
+        category: 'quality',
+      },
+    ];
+  }
+  return await invoke<SeTemplateItem[]>('developer_templates_list');
+};
+
+export const renderSeTemplate = async (
+  templateId: string,
+  projectName: string,
+  author: string
+): Promise<{ template_id: string; rendered_markdown: string }> => {
+  if (!isTauriEnvironment()) {
+    return {
+      template_id: templateId,
+      rendered_markdown: `# SPESIFIKASI KEBUTUHAN PERANGKAT LUNAK (SKPL)\n## ${projectName}\nOleh: ${author}\n\n### 1. Pendahuluan\nDokumen ini mendefinisikan kebutuhan perangkat lunak...`,
+    };
+  }
+  return await invoke<{ template_id: string; rendered_markdown: string }>('developer_templates_render', {
+    templateId,
+    projectName,
+    author,
+  });
 };
 
 

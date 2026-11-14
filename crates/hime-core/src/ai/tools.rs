@@ -525,6 +525,125 @@ impl ToolGateway {
                 idempotent: true,
                 timeout_ms: 3000,
             },
+            ToolDefinition {
+                id: "browser.open_page".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Open a web page in isolated profile, verifying SSRF policies and domain allowlist".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "browser.extract".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Extract readable text and citation metadata, wrapped in untrusted content markers".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": { "type": "string" },
+                        "mock_body": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "browser.download".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Download a file into quarantined storage with SHA-256 hash and zero auto-execution".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url", "filename"],
+                    "properties": {
+                        "url": { "type": "string" },
+                        "filename": { "type": "string" },
+                        "content": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "github.inspect_repo".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "integrations".to_string(),
+                description: "Inspect GitHub repository metadata using credentials from secure DPAPI vault".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["owner", "repo"],
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "account_label": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "drive.list_files".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "integrations".to_string(),
+                description: "List Google Drive files within permitted drive.file application scope".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder_id": { "type": "string" },
+                        "account_label": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "dev.run_command".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "developer".to_string(),
+                description: "Execute a structured allowlisted command in a registered workspace with redacted output".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["workspace_id", "command"],
+                    "properties": {
+                        "workspace_id": { "type": "string" },
+                        "command": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "dev.git_status".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "developer".to_string(),
+                description: "Inspect git repository status and detect untracked or modified files".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["workspace_path"],
+                    "properties": {
+                        "workspace_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
         ]
     }
 
@@ -1062,6 +1181,66 @@ impl ToolGateway {
             "documents.artcraft_discover" => {
                 let disc = crate::documents::ArtcraftAdapter::discover();
                 serde_json::to_value(&disc).map_err(|e| e.to_string())
+            }
+
+            "browser.open_page" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let sess = svc.open_page(url).map_err(|e| e.to_string())?;
+                serde_json::to_value(&sess).map_err(|e| e.to_string())
+            }
+
+            "browser.extract" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let mock_body = params["mock_body"].as_str();
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let ext = svc.extract_content(url, mock_body).map_err(|e| e.to_string())?;
+                serde_json::to_value(&ext).map_err(|e| e.to_string())
+            }
+
+            "browser.download" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let filename = params["filename"].as_str().ok_or("Missing required field 'filename'")?;
+                let content = params["content"].as_str().unwrap_or("Hime quarantined download sample content");
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let dl = svc.download_to_quarantine(url, content.as_bytes(), filename).map_err(|e| e.to_string())?;
+                serde_json::to_value(&dl).map_err(|e| e.to_string())
+            }
+
+            "github.inspect_repo" => {
+                let owner = params["owner"].as_str().ok_or("Missing required field 'owner'")?;
+                let repo = params["repo"].as_str().ok_or("Missing required field 'repo'")?;
+                let acc = params["account_label"].as_str().unwrap_or("test-account");
+                let adapter = crate::integrations::GitHubAdapter::new(self.storage.clone());
+                let info = adapter.inspect_repository(owner, repo, acc).map_err(|e| e.to_string())?;
+                serde_json::to_value(&info).map_err(|e| e.to_string())
+            }
+
+            "drive.list_files" => {
+                let folder = params["folder_id"].as_str();
+                let acc = params["account_label"].as_str().unwrap_or("test-account");
+                let adapter = crate::integrations::GoogleDriveAdapter::new(self.storage.clone());
+                let files = adapter.list_files(folder, acc).map_err(|e| e.to_string())?;
+                serde_json::to_value(&files).map_err(|e| e.to_string())
+            }
+
+            "dev.run_command" => {
+                let ws_id = params["workspace_id"].as_str().ok_or("Missing required field 'workspace_id'")?;
+                let cmd = params["command"].as_str().ok_or("Missing required field 'command'")?;
+                let args: Vec<String> = params["args"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+                let runner = crate::developer::DeveloperCommandRunner::new(self.storage.clone());
+                let ws_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let res = runner.run_command(ws_id, &ws_path, cmd, &args, false).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "dev.git_status" => {
+                let path_str = params["workspace_path"].as_str().unwrap_or(".");
+                let res = crate::developer::GitOperations::status(std::path::Path::new(path_str)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
             }
 
             _ => Err(format!("Unknown tool handler '{}'", tool_id)),

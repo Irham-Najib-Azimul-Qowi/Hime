@@ -86,3 +86,4 @@ Three distinct operating modes:
 1. **Zero Secret Leakage**: No personal study notes or window titles leave localhost.
 2. **Explicit Opt-in for Screen Time Monitoring**: Window title recording is **disabled by default (`opt_in = 0`)** to ensure compliance with SEC-09 and least-privilege principles.
 3. **Audit Trail**: Every task creation, status advancement, and mode switch is immutably recorded to SQLite with SHA-256 hash chaining.
+

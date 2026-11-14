@@ -43,3 +43,4 @@ Pada mode **Strict**, jika Anda merasa belum siap memulai sesi belajar atau tuga
 1. Klik tombol **Snooze 15m**.
 2. Masukkan alasan penundaan (contoh: *"Istirahat makan siang"* atau *"Riset referensi tambahan dulu"*).
 3. Hime akan menjadwalkan ulang sesi secara otomatis dan mencatat catatan refleksi ke jurnal pribadi Anda.
+

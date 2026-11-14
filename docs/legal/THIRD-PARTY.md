@@ -49,3 +49,4 @@ For enhanced document conversions, Hime can optionally invoke the following syst
 - Zero proprietary copyleft code is statically linked into `hime-core`, `hime-storage`, `hime-ipc`, or `hime-desktop`.
 - All directly linked dependencies utilize permissive licenses (MIT or Apache-2.0).
 - External tools with copyleft licenses (such as GPL-3.0 for Pandoc) are executed exclusively as isolated external subprocesses with standard IO streams, adhering strictly to FSF compliance guidelines.
+

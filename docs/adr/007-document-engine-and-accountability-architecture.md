@@ -36,3 +36,4 @@ Key architectural challenges:
 ### Negative / Trade-offs
 - Users who desire hard OS locks (like Cold Turkey or Freedom) will find Hime non-coercive by design. This is an intentional product design decision.
 - WordCraft/FigCraft interaction is asynchronous via file interchange rather than live bidirectional socket streaming until Artcraft publishes a formalized RPC plugin API.
+

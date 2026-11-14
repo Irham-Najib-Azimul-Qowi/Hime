@@ -32,6 +32,10 @@ pub struct CoreServer {
     pub device_manager: Arc<crate::device::DeviceManager>,
     pub productivity_engine: Arc<crate::productivity::ProductivityEngine>,
     pub document_engine: Arc<crate::documents::DocumentEngine>,
+    pub browser_service: Arc<crate::browser::BrowserService>,
+    pub github_adapter: Arc<crate::integrations::GitHubAdapter>,
+    pub drive_adapter: Arc<crate::integrations::GoogleDriveAdapter>,
+    pub developer_engine: Arc<crate::developer::DeveloperEngine>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -113,6 +117,11 @@ impl CoreServer {
             crate::documents::DocumentEngine::new(storage.clone(), &tmp).expect("Failed to init document engine")
         }));
 
+        let browser_service = Arc::new(crate::browser::BrowserService::new(storage.clone(), Some(base_dir.clone())));
+        let github_adapter = Arc::new(crate::integrations::GitHubAdapter::new(storage.clone()));
+        let drive_adapter = Arc::new(crate::integrations::GoogleDriveAdapter::new(storage.clone()));
+        let developer_engine = Arc::new(crate::developer::DeveloperEngine::new(storage.clone()));
+
         Self {
             version: "0.1.0".to_string(),
             event_bus,
@@ -128,6 +137,10 @@ impl CoreServer {
             device_manager,
             productivity_engine,
             document_engine,
+            browser_service,
+            github_adapter,
+            drive_adapter,
+            developer_engine,
         }
     }
 
@@ -1628,6 +1641,223 @@ impl CoreServer {
             "documents.artcraft.discover" => {
                 let disc = crate::documents::ArtcraftAdapter::discover();
                 JsonRpcResponse::success(req_id, serde_json::to_value(disc).unwrap_or_default())
+            }
+
+            // =========================================================================
+            // Phase 13: Browser, Integrations & Developer Workspace RPC Endpoints
+            // =========================================================================
+
+            "browser.open" => {
+                let params = req.params.unwrap_or_default();
+                let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                match self.browser_service.open_page(url) {
+                    Ok(sess) => JsonRpcResponse::success(req_id, serde_json::to_value(sess).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "browser.extract" => {
+                let params = req.params.unwrap_or_default();
+                let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let mock_body = params.get("mock_body").and_then(|v| v.as_str());
+                match self.browser_service.extract_content(url, mock_body) {
+                    Ok(ext) => JsonRpcResponse::success(req_id, serde_json::to_value(ext).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "browser.download" => {
+                let params = req.params.unwrap_or_default();
+                let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let filename = params.get("filename").and_then(|v| v.as_str()).unwrap_or("download.bin");
+                match self.browser_service.download_to_quarantine(url, content.as_bytes(), filename) {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "browser.close" => {
+                let closed = self.browser_service.close_session();
+                JsonRpcResponse::success(req_id, serde_json::json!({ "closed": closed }))
+            }
+
+            "browser.history.list" => {
+                let params = req.params.unwrap_or_default();
+                let sid = params.get("session_id").and_then(|v| v.as_str());
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                match self.storage.list_browser_history(sid, limit) {
+                    Ok(hist) => JsonRpcResponse::success(req_id, serde_json::to_value(hist).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "browser.downloads.list" => {
+                let params = req.params.unwrap_or_default();
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                match self.storage.list_browser_downloads(limit) {
+                    Ok(dls) => JsonRpcResponse::success(req_id, serde_json::to_value(dls).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.github.inspect" => {
+                let params = req.params.unwrap_or_default();
+                let owner = params.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                let repo = params.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+                let account = params.get("account_label").and_then(|v| v.as_str()).unwrap_or("");
+                match self.github_adapter.inspect_repository(owner, repo, account) {
+                    Ok(info) => JsonRpcResponse::success(req_id, serde_json::to_value(info).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.github.issues.list" => {
+                let params = req.params.unwrap_or_default();
+                let owner = params.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                let repo = params.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+                let account = params.get("account_label").and_then(|v| v.as_str()).unwrap_or("");
+                match self.github_adapter.list_issues(owner, repo, account) {
+                    Ok(issues) => JsonRpcResponse::success(req_id, serde_json::to_value(issues).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.github.issues.create" => {
+                let params = req.params.unwrap_or_default();
+                let owner = params.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                let repo = params.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                let account = params.get("account_label").and_then(|v| v.as_str()).unwrap_or("");
+                match self.github_adapter.create_issue(owner, repo, title, body, account) {
+                    Ok(issue) => JsonRpcResponse::success(req_id, serde_json::to_value(issue).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.github.pr.create" => {
+                let params = req.params.unwrap_or_default();
+                let owner = params.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+                let repo = params.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let head = params.get("head_branch").and_then(|v| v.as_str()).unwrap_or("");
+                let base = params.get("base_branch").and_then(|v| v.as_str()).unwrap_or("main");
+                let account = params.get("account_label").and_then(|v| v.as_str()).unwrap_or("");
+                match self.github_adapter.open_pr(owner, repo, title, head, base, account) {
+                    Ok(pr) => JsonRpcResponse::success(req_id, serde_json::to_value(pr).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.drive.files.list" => {
+                let params = req.params.unwrap_or_default();
+                let folder_id = params.get("folder_id").and_then(|v| v.as_str());
+                let account = params.get("account_label").and_then(|v| v.as_str()).unwrap_or("");
+                match self.drive_adapter.list_files(folder_id, account) {
+                    Ok(files) => JsonRpcResponse::success(req_id, serde_json::to_value(files).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "integrations.drive.files.share" => {
+                let params = req.params.unwrap_or_default();
+                let file_id = params.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+                let email = params.get("target_email").and_then(|v| v.as_str()).unwrap_or("");
+                let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("reader");
+                let approved = params.get("is_approved").and_then(|v| v.as_bool()).unwrap_or(false);
+                match self.drive_adapter.share_file(file_id, email, role, approved) {
+                    Ok(msg) => JsonRpcResponse::success(req_id, serde_json::json!({ "message": msg })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "integrations.accounts.list" => {
+                match self.storage.list_integration_accounts() {
+                    Ok(accs) => JsonRpcResponse::success(req_id, serde_json::to_value(accs).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "developer.workspaces.register" => {
+                let params = req.params.unwrap_or_default();
+                let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Workspace");
+                let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let allowed = params.get("allowed_commands").and_then(|v| v.as_str());
+                match self.developer_engine.workspace_manager.register_workspace(name, std::path::Path::new(path_str), allowed) {
+                    Ok(ws) => JsonRpcResponse::success(req_id, serde_json::to_value(ws).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "developer.workspaces.list" => {
+                match self.developer_engine.workspace_manager.list_workspaces() {
+                    Ok(wss) => JsonRpcResponse::success(req_id, serde_json::to_value(wss).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "developer.command.run" => {
+                let params = req.params.unwrap_or_default();
+                let ws_id = params.get("workspace_id").and_then(|v| v.as_str()).unwrap_or("");
+                let ws_path = params.get("workspace_path").and_then(|v| v.as_str()).unwrap_or("");
+                let cmd = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let args = params.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str()).map(String::from).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let approved = params.get("is_approved").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                match self.developer_engine.command_runner.run_command(ws_id, std::path::Path::new(ws_path), cmd, &args, approved) {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "developer.git.status" => {
+                let params = req.params.unwrap_or_default();
+                let path_str = params.get("workspace_path").and_then(|v| v.as_str()).unwrap_or("");
+                match crate::developer::GitOperations::status(std::path::Path::new(path_str)) {
+                    Ok(st) => JsonRpcResponse::success(req_id, serde_json::to_value(st).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "developer.git.diff" => {
+                let params = req.params.unwrap_or_default();
+                let path_str = params.get("workspace_path").and_then(|v| v.as_str()).unwrap_or("");
+                let cached = params.get("cached").and_then(|v| v.as_bool()).unwrap_or(false);
+                match crate::developer::GitOperations::diff(std::path::Path::new(path_str), cached) {
+                    Ok(diff) => JsonRpcResponse::success(req_id, serde_json::json!({ "diff": diff })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
+                }
+            }
+
+            "developer.git.commit" => {
+                let params = req.params.unwrap_or_default();
+                let path_str = params.get("workspace_path").and_then(|v| v.as_str()).unwrap_or("");
+                let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let scan = params.get("scan_secrets").and_then(|v| v.as_bool()).unwrap_or(true);
+                match crate::developer::GitOperations::commit(std::path::Path::new(path_str), msg, scan) {
+                    Ok(out) => JsonRpcResponse::success(req_id, serde_json::json!({ "output": out })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::POLICY_VIOLATION, e.to_string(), None),
+                }
+            }
+
+            "developer.templates.list" => {
+                let list = crate::developer::SoftwareEngineeringTemplates::list_available();
+                JsonRpcResponse::success(req_id, serde_json::to_value(list).unwrap_or_default())
+            }
+
+            "developer.templates.render" => {
+                let params = req.params.unwrap_or_default();
+                let tmpl_id = params.get("template_id").and_then(|v| v.as_str()).unwrap_or("");
+                let title = params.get("project_title").and_then(|v| v.as_str()).unwrap_or("Untitled Project");
+                let author = params.get("author").and_then(|v| v.as_str()).unwrap_or("Developer");
+                match crate::developer::SoftwareEngineeringTemplates::render_template(tmpl_id, title, author) {
+                    Some(doc) => JsonRpcResponse::success(req_id, serde_json::json!({ "rendered_content": doc })),
+                    None => JsonRpcResponse::error(req_id, hime_ipc::protocol::INVALID_REQUEST, "Unknown template ID".to_string(), None),
+                }
             }
 
             other => JsonRpcResponse::error(

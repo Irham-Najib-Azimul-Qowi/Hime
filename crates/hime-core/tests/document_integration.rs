@@ -135,3 +135,4 @@ async fn test_document_core_server_rpc_endpoints() {
     assert!(resp_jobs.error.is_none());
     assert!(resp_jobs.result.unwrap().as_array().is_some());
 }
+

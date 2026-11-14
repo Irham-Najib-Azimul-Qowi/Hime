@@ -1193,3 +1193,278 @@ pub async fn documents_jobs_list_logic(
 pub async fn documents_artcraft_discover_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
     send_rpc_request(pipe_name, "documents.artcraft.discover", None).await
 }
+
+// ---------------------------------------------------------------------------
+// Phase 13: Browser, Integrations & Developer Workspace Logic Functions
+// ---------------------------------------------------------------------------
+
+pub async fn browser_open_logic(pipe_name: &str, url: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "browser.open", Some(serde_json::json!({ "url": url }))).await
+}
+
+pub async fn browser_extract_logic(pipe_name: &str, session_id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "browser.extract", Some(serde_json::json!({ "session_id": session_id }))).await
+}
+
+pub async fn browser_download_logic(pipe_name: &str, url: &str, target_path: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "browser.download",
+        Some(serde_json::json!({ "url": url, "target_path": target_path })),
+    )
+    .await
+}
+
+pub async fn browser_close_logic(pipe_name: &str, session_id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "browser.close", Some(serde_json::json!({ "session_id": session_id }))).await
+}
+
+pub async fn browser_history_list_logic(
+    pipe_name: &str,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "browser.history.list",
+        Some(serde_json::json!({ "limit": limit.unwrap_or(50) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn browser_downloads_list_logic(
+    pipe_name: &str,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "browser.downloads.list",
+        Some(serde_json::json!({ "limit": limit.unwrap_or(50) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn integrations_github_inspect_logic(
+    pipe_name: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "integrations.github.inspect",
+        Some(serde_json::json!({ "owner": owner, "repo": repo })),
+    )
+    .await
+}
+
+pub async fn integrations_github_issues_list_logic(
+    pipe_name: &str,
+    owner: &str,
+    repo: &str,
+    state: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "integrations.github.issues.list",
+        Some(serde_json::json!({ "owner": owner, "repo": repo, "state": state.unwrap_or("open") })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn integrations_github_issues_create_logic(
+    pipe_name: &str,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "integrations.github.issues.create",
+        Some(serde_json::json!({ "owner": owner, "repo": repo, "title": title, "body": body })),
+    )
+    .await
+}
+
+pub async fn integrations_github_pr_create_logic(
+    pipe_name: &str,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    head: &str,
+    base: &str,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "integrations.github.pr.create",
+        Some(serde_json::json!({
+            "owner": owner,
+            "repo": repo,
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": body,
+        })),
+    )
+    .await
+}
+
+pub async fn integrations_drive_files_list_logic(
+    pipe_name: &str,
+    parent_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "integrations.drive.files.list",
+        Some(serde_json::json!({ "parent_id": parent_id })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn integrations_drive_files_upload_logic(
+    pipe_name: &str,
+    name: &str,
+    local_path: &str,
+    mime_type: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "integrations.drive.files.upload",
+        Some(serde_json::json!({
+            "name": name,
+            "local_path": local_path,
+            "mime_type": mime_type.unwrap_or("application/octet-stream"),
+        })),
+    )
+    .await
+}
+
+pub async fn integrations_drive_files_share_logic(
+    pipe_name: &str,
+    file_id: &str,
+    email: &str,
+    role: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "integrations.drive.files.share",
+        Some(serde_json::json!({
+            "file_id": file_id,
+            "email": email,
+            "role": role.unwrap_or("reader"),
+        })),
+    )
+    .await
+}
+
+pub async fn integrations_accounts_list_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "integrations.accounts.list", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn developer_workspaces_register_logic(
+    pipe_name: &str,
+    name: &str,
+    root_path: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.workspaces.register",
+        Some(serde_json::json!({ "name": name, "root_path": root_path })),
+    )
+    .await
+}
+
+pub async fn developer_workspaces_list_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "developer.workspaces.list", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn developer_command_run_logic(
+    pipe_name: &str,
+    workspace_id: &str,
+    command: &str,
+    args: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.command.run",
+        Some(serde_json::json!({
+            "workspace_id": workspace_id,
+            "command": command,
+            "args": args,
+        })),
+    )
+    .await
+}
+
+pub async fn developer_git_status_logic(
+    pipe_name: &str,
+    workspace_id: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.git.status",
+        Some(serde_json::json!({ "workspace_id": workspace_id })),
+    )
+    .await
+}
+
+pub async fn developer_git_diff_logic(
+    pipe_name: &str,
+    workspace_id: &str,
+    staged_only: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.git.diff",
+        Some(serde_json::json!({
+            "workspace_id": workspace_id,
+            "staged_only": staged_only.unwrap_or(false),
+        })),
+    )
+    .await
+}
+
+pub async fn developer_git_commit_logic(
+    pipe_name: &str,
+    workspace_id: &str,
+    message: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.git.commit",
+        Some(serde_json::json!({
+            "workspace_id": workspace_id,
+            "message": message,
+        })),
+    )
+    .await
+}
+
+pub async fn developer_templates_list_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "developer.templates.list", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn developer_templates_render_logic(
+    pipe_name: &str,
+    template_id: &str,
+    project_name: &str,
+    author: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "developer.templates.render",
+        Some(serde_json::json!({
+            "template_id": template_id,
+            "project_name": project_name,
+            "author": author,
+        })),
+    )
+    .await
+}

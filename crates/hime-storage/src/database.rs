@@ -316,7 +316,73 @@ impl Database {
                 metadata TEXT,
                 created_at INTEGER NOT NULL,
                 completed_at INTEGER
-            );",
+            );
+
+            -- Phase 13: Browser, Integrations & Developer Workspace
+            CREATE TABLE IF NOT EXISTS browser_sessions (
+                id TEXT PRIMARY KEY,
+                profile_path TEXT NOT NULL,
+                current_url TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                closed_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS browser_history (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT,
+                visited_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_browser_hist_session ON browser_history(session_id);
+
+            CREATE TABLE IF NOT EXISTS browser_downloads (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                quarantine_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                status TEXT NOT NULL,
+                downloaded_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_browser_dl_session ON browser_downloads(session_id);
+
+            CREATE TABLE IF NOT EXISTS developer_workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                allowed_commands TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS developer_command_runs (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                command TEXT NOT NULL,
+                args TEXT NOT NULL,
+                exit_code INTEGER,
+                duration_ms INTEGER NOT NULL,
+                is_allowed INTEGER NOT NULL,
+                output_snippet TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_runs_ws ON developer_command_runs(workspace_id);
+
+            CREATE TABLE IF NOT EXISTS integration_accounts (
+                id TEXT PRIMARY KEY,
+                service_name TEXT NOT NULL,
+                account_label TEXT NOT NULL,
+                auth_type TEXT NOT NULL,
+                token_vault_id TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_integ_svc ON integration_accounts(service_name);",
         )?;
 
         // Ensure backward compatibility if audit_events already existed without hash columns
@@ -1920,6 +1986,298 @@ impl Database {
         }
         Ok(jobs)
     }
+
+    // =========================================================================
+    // Phase 13: Browser, Integrations & Developer Workspace Methods
+    // =========================================================================
+
+    pub fn create_browser_session(&self, record: &BrowserSessionRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browser_sessions (id, profile_path, current_url, is_active, created_at, closed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                record.id,
+                record.profile_path,
+                record.current_url,
+                if record.is_active { 1 } else { 0 },
+                record.created_at,
+                record.closed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_active_browser_session(&self) -> Result<Option<BrowserSessionRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, profile_path, current_url, is_active, created_at, closed_at
+             FROM browser_sessions WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], map_browser_session)?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn update_browser_session_url(&self, session_id: &str, url: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE browser_sessions SET current_url = ?1 WHERE id = ?2",
+            rusqlite::params![url, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_browser_session(&self, session_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "UPDATE browser_sessions SET is_active = 0, closed_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_browser_history(&self, record: &BrowserHistoryRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browser_history (id, session_id, url, title, visited_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                record.id,
+                record.session_id,
+                record.url,
+                record.title,
+                record.visited_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_browser_history(&self, session_id: Option<&str>, limit: usize) -> Result<Vec<BrowserHistoryRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut history = Vec::new();
+        if let Some(sid) = session_id {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, url, title, visited_at
+                 FROM browser_history WHERE session_id = ?1 ORDER BY visited_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![sid, limit as i64], map_browser_history)?;
+            for r in rows {
+                history.push(r?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, url, title, visited_at
+                 FROM browser_history ORDER BY visited_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], map_browser_history)?;
+            for r in rows {
+                history.push(r?);
+            }
+        }
+        Ok(history)
+    }
+
+    pub fn record_browser_download(&self, record: &BrowserDownloadRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browser_downloads (id, session_id, source_url, quarantine_path, file_size, sha256, status, downloaded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                record.id,
+                record.session_id,
+                record.source_url,
+                record.quarantine_path,
+                record.file_size,
+                record.sha256,
+                record.status,
+                record.downloaded_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_browser_downloads(&self, limit: usize) -> Result<Vec<BrowserDownloadRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, source_url, quarantine_path, file_size, sha256, status, downloaded_at
+             FROM browser_downloads ORDER BY downloaded_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_browser_download)?;
+        let mut downloads = Vec::new();
+        for r in rows {
+            downloads.push(r?);
+        }
+        Ok(downloads)
+    }
+
+    pub fn register_developer_workspace(&self, record: &DeveloperWorkspaceRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO developer_workspaces (id, name, path, allowed_commands, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path) DO UPDATE SET name = ?2, allowed_commands = ?4, updated_at = ?6",
+            rusqlite::params![
+                record.id,
+                record.name,
+                record.path,
+                record.allowed_commands,
+                record.created_at,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_developer_workspace(&self, id: &str) -> Result<Option<DeveloperWorkspaceRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, allowed_commands, created_at, updated_at
+             FROM developer_workspaces WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], map_developer_workspace)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_developer_workspace_by_path(&self, path: &str) -> Result<Option<DeveloperWorkspaceRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, allowed_commands, created_at, updated_at
+             FROM developer_workspaces WHERE path = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![path], map_developer_workspace)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_developer_workspaces(&self) -> Result<Vec<DeveloperWorkspaceRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, allowed_commands, created_at, updated_at
+             FROM developer_workspaces ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], map_developer_workspace)?;
+        let mut workspaces = Vec::new();
+        for r in rows {
+            workspaces.push(r?);
+        }
+        Ok(workspaces)
+    }
+
+    pub fn delete_developer_workspace(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM developer_workspaces WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn record_developer_command_run(&self, record: &DeveloperCommandRunRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO developer_command_runs (id, workspace_id, command, args, exit_code, duration_ms, is_allowed, output_snippet, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                record.id,
+                record.workspace_id,
+                record.command,
+                record.args,
+                record.exit_code,
+                record.duration_ms,
+                if record.is_allowed { 1 } else { 0 },
+                record.output_snippet,
+                record.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_developer_command_runs(&self, workspace_id: &str, limit: usize) -> Result<Vec<DeveloperCommandRunRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, command, args, exit_code, duration_ms, is_allowed, output_snippet, created_at
+             FROM developer_command_runs WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![workspace_id, limit as i64], map_developer_command_run)?;
+        let mut runs = Vec::new();
+        for r in rows {
+            runs.push(r?);
+        }
+        Ok(runs)
+    }
+
+    pub fn save_integration_account(&self, record: &IntegrationAccountRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO integration_accounts (id, service_name, account_label, auth_type, token_vault_id, scopes, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET account_label = ?3, auth_type = ?4, token_vault_id = ?5, scopes = ?6, status = ?7, updated_at = ?9",
+            rusqlite::params![
+                record.id,
+                record.service_name,
+                record.account_label,
+                record.auth_type,
+                record.token_vault_id,
+                record.scopes,
+                record.status,
+                record.created_at,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_integration_account(&self, service_name: &str) -> Result<Option<IntegrationAccountRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, service_name, account_label, auth_type, token_vault_id, scopes, status, created_at, updated_at
+             FROM integration_accounts WHERE service_name = ?1 ORDER BY updated_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![service_name], map_integration_account)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_integration_accounts(&self) -> Result<Vec<IntegrationAccountRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, service_name, account_label, auth_type, token_vault_id, scopes, status, created_at, updated_at
+             FROM integration_accounts ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], map_integration_account)?;
+        let mut accounts = Vec::new();
+        for r in rows {
+            accounts.push(r?);
+        }
+        Ok(accounts)
+    }
+
+    pub fn delete_integration_account(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM integration_accounts WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(count > 0)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -2415,6 +2773,150 @@ fn map_document_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentJobReco
         metadata: row.get(6)?,
         created_at: row.get(7)?,
         completed_at: row.get(8)?,
+    })
+}
+
+// --- Phase 13: Browser, Integrations & Developer Workspace Records ---
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BrowserSessionRecord {
+    pub id: String,
+    pub profile_path: String,
+    pub current_url: Option<String>,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub closed_at: Option<i64>,
+}
+
+fn map_browser_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserSessionRecord> {
+    let active_int: i32 = row.get(3)?;
+    Ok(BrowserSessionRecord {
+        id: row.get(0)?,
+        profile_path: row.get(1)?,
+        current_url: row.get(2)?,
+        is_active: active_int != 0,
+        created_at: row.get(4)?,
+        closed_at: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BrowserHistoryRecord {
+    pub id: String,
+    pub session_id: String,
+    pub url: String,
+    pub title: Option<String>,
+    pub visited_at: i64,
+}
+
+fn map_browser_history(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserHistoryRecord> {
+    Ok(BrowserHistoryRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        url: row.get(2)?,
+        title: row.get(3)?,
+        visited_at: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BrowserDownloadRecord {
+    pub id: String,
+    pub session_id: String,
+    pub source_url: String,
+    pub quarantine_path: String,
+    pub file_size: i64,
+    pub sha256: String,
+    pub status: String,
+    pub downloaded_at: i64,
+}
+
+fn map_browser_download(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowserDownloadRecord> {
+    Ok(BrowserDownloadRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        source_url: row.get(2)?,
+        quarantine_path: row.get(3)?,
+        file_size: row.get(4)?,
+        sha256: row.get(5)?,
+        status: row.get(6)?,
+        downloaded_at: row.get(7)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DeveloperWorkspaceRecord {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub allowed_commands: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_developer_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeveloperWorkspaceRecord> {
+    Ok(DeveloperWorkspaceRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        path: row.get(2)?,
+        allowed_commands: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DeveloperCommandRunRecord {
+    pub id: String,
+    pub workspace_id: String,
+    pub command: String,
+    pub args: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: i64,
+    pub is_allowed: bool,
+    pub output_snippet: Option<String>,
+    pub created_at: i64,
+}
+
+fn map_developer_command_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeveloperCommandRunRecord> {
+    let allowed_int: i32 = row.get(6)?;
+    Ok(DeveloperCommandRunRecord {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        command: row.get(2)?,
+        args: row.get(3)?,
+        exit_code: row.get(4)?,
+        duration_ms: row.get(5)?,
+        is_allowed: allowed_int != 0,
+        output_snippet: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct IntegrationAccountRecord {
+    pub id: String,
+    pub service_name: String,
+    pub account_label: String,
+    pub auth_type: String,
+    pub token_vault_id: String,
+    pub scopes: String,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_integration_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<IntegrationAccountRecord> {
+    Ok(IntegrationAccountRecord {
+        id: row.get(0)?,
+        service_name: row.get(1)?,
+        account_label: row.get(2)?,
+        auth_type: row.get(3)?,
+        token_vault_id: row.get(4)?,
+        scopes: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -3022,5 +3524,115 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].operation, "convert");
         assert_eq!(jobs[0].format, "docx");
+    }
+
+    #[test]
+    fn test_phase13_browser_and_developer_workspace_storage() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Browser session lifecycle
+        let session = BrowserSessionRecord {
+            id: "sess-01".to_string(),
+            profile_path: "C:\\Hime\\profiles\\default".to_string(),
+            current_url: Some("https://example.com".to_string()),
+            is_active: true,
+            created_at: 1000,
+            closed_at: None,
+        };
+        db.create_browser_session(&session).unwrap();
+
+        let active = db.get_active_browser_session().unwrap().unwrap();
+        assert_eq!(active.id, "sess-01");
+        assert_eq!(active.current_url.as_deref(), Some("https://example.com"));
+
+        db.update_browser_session_url("sess-01", "https://example.com/docs").unwrap();
+        let updated = db.get_active_browser_session().unwrap().unwrap();
+        assert_eq!(updated.current_url.as_deref(), Some("https://example.com/docs"));
+
+        // History
+        let hist = BrowserHistoryRecord {
+            id: "hist-01".to_string(),
+            session_id: "sess-01".to_string(),
+            url: "https://example.com/docs".to_string(),
+            title: Some("Example Documentation".to_string()),
+            visited_at: 1010,
+        };
+        db.record_browser_history(&hist).unwrap();
+        let history = db.list_browser_history(Some("sess-01"), 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].title.as_deref(), Some("Example Documentation"));
+
+        // Download
+        let dl = BrowserDownloadRecord {
+            id: "dl-01".to_string(),
+            session_id: "sess-01".to_string(),
+            source_url: "https://example.com/report.pdf".to_string(),
+            quarantine_path: ".hime/quarantine/dl-01.pdf".to_string(),
+            file_size: 20480,
+            sha256: "sha256-mock-hash".to_string(),
+            status: "quarantined".to_string(),
+            downloaded_at: 1020,
+        };
+        db.record_browser_download(&dl).unwrap();
+        let downloads = db.list_browser_downloads(10).unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].status, "quarantined");
+
+        db.close_browser_session("sess-01").unwrap();
+        assert!(db.get_active_browser_session().unwrap().is_none());
+
+        // 2. Developer Workspace
+        let ws = DeveloperWorkspaceRecord {
+            id: "ws-01".to_string(),
+            name: "Hime Workspace".to_string(),
+            path: "X:\\folder_ai\\Hime".to_string(),
+            allowed_commands: Some("git,cargo,pnpm,npm,python".to_string()),
+            created_at: 2000,
+            updated_at: 2000,
+        };
+        db.register_developer_workspace(&ws).unwrap();
+
+        let fetched_ws = db.get_developer_workspace_by_path("X:\\folder_ai\\Hime").unwrap().unwrap();
+        assert_eq!(fetched_ws.id, "ws-01");
+        assert_eq!(fetched_ws.name, "Hime Workspace");
+
+        let run = DeveloperCommandRunRecord {
+            id: "run-01".to_string(),
+            workspace_id: "ws-01".to_string(),
+            command: "cargo".to_string(),
+            args: "test".to_string(),
+            exit_code: Some(0),
+            duration_ms: 1500,
+            is_allowed: true,
+            output_snippet: Some("test result: ok".to_string()),
+            created_at: 2010,
+        };
+        db.record_developer_command_run(&run).unwrap();
+
+        let runs = db.list_developer_command_runs("ws-01", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].command, "cargo");
+        assert!(runs[0].is_allowed);
+
+        // 3. Integration Accounts
+        let account = IntegrationAccountRecord {
+            id: "acc-gh-01".to_string(),
+            service_name: "github".to_string(),
+            account_label: "personal-dev".to_string(),
+            auth_type: "oauth_device".to_string(),
+            token_vault_id: "vault-gh-tok-01".to_string(),
+            scopes: "repo,read:user".to_string(),
+            status: "active".to_string(),
+            created_at: 3000,
+            updated_at: 3000,
+        };
+        db.save_integration_account(&account).unwrap();
+
+        let fetched_acc = db.get_integration_account("github").unwrap().unwrap();
+        assert_eq!(fetched_acc.account_label, "personal-dev");
+        assert_eq!(fetched_acc.service_name, "github");
+
+        let accounts = db.list_integration_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
     }
 }

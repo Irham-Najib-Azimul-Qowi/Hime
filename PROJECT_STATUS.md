@@ -32,8 +32,8 @@
 | **Phase 10** | Storage Intelligence | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-10-COMPLETION-REPORT.md` | Indexer, Storage Analyzer, Duplicates/Versions, Smart Organizer, Download Intelligence, Safe Ops (Staging, Hime Recycle, 1-Click Restore), 89 tests. |
 | **Phase 11** | Hime Mobile & Device Layer | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-11-COMPLETION-REPORT.md` | Android Kotlin Compose (`apps/mobile/`), mTLS Local CA, QR anti-replay pairing, remote approvals (UR-02/04), posture audit (UR-12), chunked SHA-256 transfer, 97 tests. |
 | **Phase 12** | Productivity & Documents | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-12-COMPLETION-REPORT.md` | Kanban accountability, pengingat HP/desktop, DOCX/HTML report generation, Academic ID template (TNR 12, margin 4-3-3-3), PDF merge, Artcraft discovery, 102 tests. |
-| **Phase 13** | Browser & Developer Workspace | `READY TO START` | — | Playwright browser profile Hime, GitHub/Drive integration, sandboxed developer terminal. |
-| **Phase 14** | Specialist Agents & Skills | `PLANNED` | — | Registri specialist agent, quality bar, anti-loop. |
+| **Phase 13** | Browser & Developer Workspace | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-13-COMPLETION-REPORT.md` | Browser SSRF defense, anti-prompt injection wrapping, quarantined downloads, GitHub/Drive adapters, allowlisted runner, pre-commit secret scanner, SE templates, 111 tests. |
+| **Phase 14** | Specialist Agents & Skills | `READY TO START` | — | Registri specialist agent, quality bar, anti-loop. |
 | **Phase 15** | Hardening, Release & Linux | `PLANNED` | — | MSIX installer, benchmark resource, Linux beta. |
 
 ---

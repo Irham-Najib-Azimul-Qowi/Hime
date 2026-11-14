@@ -7,6 +7,8 @@ export type DesktopView =
   | 'tasks'
   | 'productivity'
   | 'documents'
+  | 'developer'
+  | 'browser'
   | 'storage'
   | 'devices'
   | 'notifications'

@@ -7,6 +7,8 @@ import { ActivityStream } from './features/activity/ActivityStream';
 import { TasksView } from './features/tasks/TasksView';
 import { ProductivityView } from './features/productivity/ProductivityView';
 import { DocumentsView } from './features/documents/DocumentsView';
+import { DeveloperWorkspaceView } from './features/developer/DeveloperWorkspaceView';
+import { BrowserIntegrationsView } from './features/browser/BrowserIntegrationsView';
 import { StorageView } from './features/storage/StorageView';
 import { DevicesView } from './features/devices/DevicesView';
 import { NotificationCenter } from './features/notifications/NotificationCenter';
@@ -306,9 +308,9 @@ export const App: React.FC = () => {
         if (e.key === '4') setCurrentView('tasks');
         if (e.key === '5') setCurrentView('productivity');
         if (e.key === '6') setCurrentView('documents');
-        if (e.key === '7') setCurrentView('storage');
-        if (e.key === '8') setCurrentView('devices');
-        if (e.key === '9') setCurrentView('notifications');
+        if (e.key === '7') setCurrentView('developer');
+        if (e.key === '8') setCurrentView('browser');
+        if (e.key === '9') setCurrentView('storage');
         if (e.key === '0') setCurrentView('settings');
       }
     };
@@ -460,13 +462,14 @@ export const App: React.FC = () => {
               { id: 'tasks', label: 'Tasks', icon: '📋', shortcut: 'Alt+4' },
               { id: 'productivity', label: 'Productivity', icon: '🎯', shortcut: 'Alt+5' },
               { id: 'documents', label: 'Documents', icon: '📄', shortcut: 'Alt+6' },
-              { id: 'storage', label: 'Storage', icon: '💾', shortcut: 'Alt+7' },
-              { id: 'devices', label: 'Devices', icon: '📱', shortcut: 'Alt+8' },
+              { id: 'developer', label: 'Developer', icon: '💻', shortcut: 'Alt+7' },
+              { id: 'browser', label: 'Browser & Web', icon: '🌐', shortcut: 'Alt+8' },
+              { id: 'storage', label: 'Storage', icon: '💾', shortcut: 'Alt+9' },
+              { id: 'devices', label: 'Devices', icon: '📱' },
               {
                 id: 'notifications',
                 label: 'Notifications',
                 icon: '🔔',
-                shortcut: 'Alt+9',
                 badge: unreadCount > 0 ? unreadCount : undefined,
               },
               { id: 'settings', label: 'Settings', icon: '⚙️', shortcut: 'Alt+0' },
@@ -637,6 +640,14 @@ export const App: React.FC = () => {
 
           {currentView === 'documents' && (
             <DocumentsView />
+          )}
+
+          {currentView === 'developer' && (
+            <DeveloperWorkspaceView />
+          )}
+
+          {currentView === 'browser' && (
+            <BrowserIntegrationsView />
           )}
 
           {currentView === 'storage' && (

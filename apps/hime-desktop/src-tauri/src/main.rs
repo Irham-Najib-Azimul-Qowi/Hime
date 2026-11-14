@@ -4,12 +4,20 @@ use tauri::{command, LogicalSize, Size};
 use tracing::info;
 
 use hime_desktop::{
-    cancel_conversation_logic, cancel_task_logic, create_conversation_logic, create_task_logic,
+    browser_close_logic, browser_download_logic, browser_downloads_list_logic, browser_extract_logic,
+    browser_history_list_logic, browser_open_logic, cancel_conversation_logic, cancel_task_logic,
+    create_conversation_logic, create_task_logic, developer_command_run_logic, developer_git_commit_logic,
+    developer_git_diff_logic, developer_git_status_logic, developer_templates_list_logic,
+    developer_templates_render_logic, developer_workspaces_list_logic, developer_workspaces_register_logic,
     devices_list_logic, devices_pairing_start_logic, devices_revoke_logic, devices_storage_get_logic,
     devices_transfers_list_logic, documents_artcraft_discover_logic, documents_create_report_logic,
     documents_jobs_list_logic, documents_merge_pdfs_logic, execute_tool_logic,
     get_activity_events_logic, get_ai_models_logic, get_ai_status_logic,
     get_conversation_messages_logic, get_system_status_logic, get_tasks_logic,
+    integrations_accounts_list_logic, integrations_drive_files_list_logic,
+    integrations_drive_files_share_logic, integrations_drive_files_upload_logic,
+    integrations_github_inspect_logic, integrations_github_issues_create_logic,
+    integrations_github_issues_list_logic, integrations_github_pr_create_logic,
     kanban_board_get_logic, kanban_columns_list_logic, list_conversations_logic,
     list_credentials_logic, ping_core_logic, productivity_accountability_checkin_logic,
     productivity_accountability_get_logic, productivity_accountability_set_mode_logic,
@@ -734,6 +742,293 @@ async fn documents_artcraft_discover() -> Result<serde_json::Value, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 13: Browser, Integrations & Developer Workspace Commands
+// ---------------------------------------------------------------------------
+
+#[command]
+async fn browser_open(url: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        browser_open_logic(DEFAULT_HIME_PIPE, &url).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn browser_extract(session_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        browser_extract_logic(DEFAULT_HIME_PIPE, &session_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn browser_download(url: String, target_path: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        browser_download_logic(DEFAULT_HIME_PIPE, &url, &target_path).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (url, target_path);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn browser_close(session_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        browser_close_logic(DEFAULT_HIME_PIPE, &session_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn browser_history_list(limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        browser_history_list_logic(DEFAULT_HIME_PIPE, limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn browser_downloads_list(limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        browser_downloads_list_logic(DEFAULT_HIME_PIPE, limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = limit;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_github_inspect(owner: String, repo: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        integrations_github_inspect_logic(DEFAULT_HIME_PIPE, &owner, &repo).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, repo);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_github_issues_list(owner: String, repo: String, state: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        integrations_github_issues_list_logic(DEFAULT_HIME_PIPE, &owner, &repo, state.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, repo, state);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_github_issues_create(owner: String, repo: String, title: String, body: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        integrations_github_issues_create_logic(DEFAULT_HIME_PIPE, &owner, &repo, &title, &body).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, repo, title, body);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_github_pr_create(owner: String, repo: String, title: String, head: String, base: String, body: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        integrations_github_pr_create_logic(DEFAULT_HIME_PIPE, &owner, &repo, &title, &head, &base, &body).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (owner, repo, title, head, base, body);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_drive_files_list(parent_id: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        integrations_drive_files_list_logic(DEFAULT_HIME_PIPE, parent_id.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = parent_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_drive_files_upload(name: String, local_path: String, mime_type: Option<String>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        integrations_drive_files_upload_logic(DEFAULT_HIME_PIPE, &name, &local_path, mime_type.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (name, local_path, mime_type);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_drive_files_share(file_id: String, email: String, role: Option<String>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        integrations_drive_files_share_logic(DEFAULT_HIME_PIPE, &file_id, &email, role.as_deref()).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (file_id, email, role);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn integrations_accounts_list() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        integrations_accounts_list_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_workspaces_register(name: String, root_path: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_workspaces_register_logic(DEFAULT_HIME_PIPE, &name, &root_path).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (name, root_path);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_workspaces_list() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        developer_workspaces_list_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_command_run(workspace_id: String, command: String, args: Vec<String>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_command_run_logic(DEFAULT_HIME_PIPE, &workspace_id, &command, args).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (workspace_id, command, args);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_git_status(workspace_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_git_status_logic(DEFAULT_HIME_PIPE, &workspace_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = workspace_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_git_diff(workspace_id: String, staged_only: Option<bool>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_git_diff_logic(DEFAULT_HIME_PIPE, &workspace_id, staged_only).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (workspace_id, staged_only);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_git_commit(workspace_id: String, message: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_git_commit_logic(DEFAULT_HIME_PIPE, &workspace_id, &message).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (workspace_id, message);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_templates_list() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        developer_templates_list_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn developer_templates_render(template_id: String, project_name: String, author: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        developer_templates_render_logic(DEFAULT_HIME_PIPE, &template_id, &project_name, &author).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (template_id, project_name, author);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -782,6 +1077,28 @@ fn main() {
             documents_merge_pdfs,
             documents_jobs_list,
             documents_artcraft_discover,
+            browser_open,
+            browser_extract,
+            browser_download,
+            browser_close,
+            browser_history_list,
+            browser_downloads_list,
+            integrations_github_inspect,
+            integrations_github_issues_list,
+            integrations_github_issues_create,
+            integrations_github_pr_create,
+            integrations_drive_files_list,
+            integrations_drive_files_upload,
+            integrations_drive_files_share,
+            integrations_accounts_list,
+            developer_workspaces_register,
+            developer_workspaces_list,
+            developer_command_run,
+            developer_git_status,
+            developer_git_diff,
+            developer_git_commit,
+            developer_templates_list,
+            developer_templates_render,
             window_set_always_on_top,
             window_set_size_mode,
             window_minimize,
