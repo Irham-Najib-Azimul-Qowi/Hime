@@ -9,16 +9,16 @@
   "app": {
     "windows": [
       {
-        "title": "Hime Assistant",
-        "width": 520,
-        "height": 72,
-        "minWidth": 420,
-        "minHeight": 64,
+        "title": "Hime Dynamic Island",
+        "width": 620,
+        "height": 580,
+        "minWidth": 460,
+        "minHeight": 360,
         "center": true,
         "resizable": true,
         "fullscreen": false,
-        "decorations": false,
-        "transparent": true,
+        "decorations": true,
+        "transparent": false,
         "alwaysOnTop": true
       }
     ],

@@ -146,12 +146,14 @@ try {
         Write-Host "Launching Hime Desktop (Floating Dynamic Island)..." -ForegroundColor Cyan
         $releaseDesktop = Join-Path $workspaceRoot "target\release\hime-desktop.exe"
         $debugDesktop = Join-Path $workspaceRoot "target\debug\hime-desktop.exe"
+        $desktopWorkingDir = Join-Path $workspaceRoot "apps\hime-desktop\src-tauri"
+
         if (Test-Path $releaseDesktop) {
-            $desktopProc = Start-Process -FilePath $releaseDesktop -PassThru
+            $desktopProc = Start-Process -FilePath $releaseDesktop -WorkingDirectory $desktopWorkingDir -PassThru
         } elseif (Test-Path $debugDesktop) {
-            $desktopProc = Start-Process -FilePath $debugDesktop -PassThru
+            $desktopProc = Start-Process -FilePath $debugDesktop -WorkingDirectory $desktopWorkingDir -PassThru
         } else {
-            $desktopProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-desktop" -PassThru
+            $desktopProc = Start-Process -FilePath "cargo" -ArgumentList "run -p hime-desktop" -WorkingDirectory $desktopWorkingDir -PassThru
         }
         $spawnedProcesses.Add($desktopProc)
     }

@@ -342,15 +342,18 @@ export const App: React.FC = () => {
         style={{
           width: '100vw',
           height: '100vh',
-          backgroundColor: 'transparent',
+          backgroundColor: 'var(--bg-app)',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'flex-start',
-          padding: '6px 12px',
+          padding: '12px 16px',
           overflow: 'hidden',
+          boxSizing: 'border-box',
+          gap: '12px',
         }}
       >
+        {/* Dynamic Island Hero Pill */}
         <DynamicIsland
           status={status}
           isCoreOnline={isCoreOnline}
@@ -372,6 +375,69 @@ export const App: React.FC = () => {
           unreadCount={unreadCount}
           isFloatingMode={true}
         />
+
+        {/* Dynamic Island Active Conversation Stage */}
+        <div
+          style={{
+            flex: 1,
+            width: '100%',
+            maxWidth: '580px',
+            borderRadius: '16px',
+            overflow: 'hidden',
+            border: '1px solid var(--border-subtle)',
+            backgroundColor: 'var(--bg-surface-1)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <ConversationView
+            isCoreOnline={isCoreOnline}
+            onSendSystemCommand={async (cmd) => {
+              if (cmd.startsWith('ping')) {
+                const res = await handlePing();
+                return `Core ping response: ${JSON.stringify(res)}`;
+              } else if (cmd.startsWith('policy')) {
+                const res = await handlePolicyTest();
+                return `Policy test result: ${JSON.stringify(res)}`;
+              } else {
+                return `Perintah '${cmd}' diterima dan diakui oleh Hime Core.`;
+              }
+            }}
+          />
+        </div>
+
+        {/* Bottom Status & Mode Switcher */}
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            width: '100%',
+            maxWidth: '580px',
+            fontSize: '11px',
+            color: 'var(--text-muted)',
+            padding: '0 4px',
+          }}
+        >
+          <span>Pintasan: <kbd style={{ padding: '2px 5px', borderRadius: '4px', background: 'rgba(255,255,255,0.08)' }}>Ctrl+K</kbd> Omnibox</span>
+          <button
+            onClick={() => {
+              setIslandMode('integrated');
+              handleToggleWindowSize('expanded');
+            }}
+            className="btn-pressable"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--accent-primary)',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontWeight: 600,
+            }}
+          >
+            ⛶ Buka Workstation Lengkap (Alt+M) →
+          </button>
+        </div>
 
         {/* Omnibox Modal in Island Mode */}
         <OmniboxModal
