@@ -11,3 +11,4 @@ start "" "%~dp0target\release\hime-desktop.exe"
 echo.
 echo Hime is now running! Dynamic Island should appear on your screen.
 timeout /t 3 /nobreak >nul
+

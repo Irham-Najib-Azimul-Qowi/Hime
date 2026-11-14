@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{command, LogicalSize, Size};
+use tauri::{command, LogicalPosition, LogicalSize, Manager, Position, Size};
 use tracing::info;
 
 use hime_desktop::{
@@ -162,13 +162,26 @@ async fn window_set_always_on_top(
 async fn window_set_size_mode(window: tauri::Window, mode: String) -> Result<(), String> {
     match mode.as_str() {
         "compact" => {
-            // Dynamic Island Floating HUD compact pill mode (520x72)
+            // Dynamic Island Floating HUD mode (docked to top center of primary screen)
+            if let Ok(Some(monitor)) = window.primary_monitor() {
+                let screen_size = monitor.size();
+                let scale = monitor.scale_factor();
+                let screen_w = screen_size.width as f64 / scale;
+                let win_w = 640.0;
+                let x = (screen_w - win_w) / 2.0;
+                let y = 0.0;
+                let _ = window.set_position(Position::Logical(LogicalPosition { x, y }));
+            }
             window
                 .set_size(Size::Logical(LogicalSize {
-                    width: 520.0,
-                    height: 72.0,
+                    width: 640.0,
+                    height: 220.0,
                 }))
                 .map_err(|e| e.to_string())?;
+            let _ = window.set_skip_taskbar(true);
+            let _ = window.set_always_on_top(true);
+            let _ = window.set_decorations(false);
+            let _ = window.set_shadow(false);
         }
         "island_chat" => {
             // Dynamic Island Expanded Chat card mode (540x480)
@@ -187,6 +200,11 @@ async fn window_set_size_mode(window: tauri::Window, mode: String) -> Result<(),
                     height: 700.0,
                 }))
                 .map_err(|e| e.to_string())?;
+            let _ = window.center();
+            let _ = window.set_skip_taskbar(false);
+            let _ = window.set_always_on_top(false);
+            let _ = window.set_decorations(true);
+            let _ = window.set_shadow(true);
         }
         _ => return Err(format!("Unknown mode: {}", mode)),
     }
@@ -1204,6 +1222,24 @@ async fn data_ai_design_experiment(target_variable: String, problem_type: String
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = window.primary_monitor() {
+                    let screen_size = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let screen_w = screen_size.width as f64 / scale;
+                    let win_w = 640.0;
+                    let x = (screen_w - win_w) / 2.0;
+                    let y = 0.0;
+                    let _ = window.set_position(Position::Logical(LogicalPosition { x, y }));
+                }
+                let _ = window.set_always_on_top(true);
+                let _ = window.set_skip_taskbar(true);
+                let _ = window.set_decorations(false);
+                let _ = window.set_shadow(false);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ping_core,
             execute_tool,
