@@ -1468,3 +1468,161 @@ pub async fn developer_templates_render_logic(
     )
     .await
 }
+
+// ---------------------------------------------------------------------------
+// Phase 14: Specialist Agents, Skills & Proactive Assistance Logic Functions
+// ---------------------------------------------------------------------------
+
+pub async fn specialists_list_logic(
+    pipe_name: &str,
+    active_only: Option<bool>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "specialists.list",
+        Some(serde_json::json!({ "active_only": active_only.unwrap_or(false) })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn specialists_get_logic(pipe_name: &str, id: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "specialists.get", Some(serde_json::json!({ "id": id }))).await
+}
+
+pub async fn specialists_delegate_logic(
+    pipe_name: &str,
+    specialist_id: &str,
+    task_id: &str,
+    input_prompt: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "specialists.delegate",
+        Some(serde_json::json!({
+            "specialist_id": specialist_id,
+            "task_id": task_id,
+            "input_prompt": input_prompt,
+        })),
+    )
+    .await
+}
+
+pub async fn specialists_delegations_list_logic(
+    pipe_name: &str,
+    specialist_id: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "specialists.delegations.list",
+        Some(serde_json::json!({
+            "specialist_id": specialist_id,
+            "limit": limit.unwrap_or(20),
+        })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn specialists_evaluate_logic(
+    pipe_name: &str,
+    specialist_id: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "specialists.evaluate",
+        Some(serde_json::json!({ "specialist_id": specialist_id })),
+    )
+    .await
+}
+
+pub async fn proactive_suggestions_list_logic(
+    pipe_name: &str,
+    status: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(
+        pipe_name,
+        "proactive.suggestions.list",
+        Some(serde_json::json!({
+            "status": status,
+            "limit": limit.unwrap_or(20),
+        })),
+    )
+    .await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn proactive_suggestions_evaluate_logic(pipe_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    let val = send_rpc_request(pipe_name, "proactive.suggestions.evaluate", None).await?;
+    Ok(val.as_array().cloned().unwrap_or_default())
+}
+
+pub async fn proactive_suggestions_respond_logic(
+    pipe_name: &str,
+    suggestion_id: &str,
+    action: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "proactive.suggestions.respond",
+        Some(serde_json::json!({
+            "suggestion_id": suggestion_id,
+            "action": action,
+        })),
+    )
+    .await
+}
+
+pub async fn proactive_settings_get_logic(pipe_name: &str) -> Result<serde_json::Value, String> {
+    send_rpc_request(pipe_name, "proactive.settings.get", None).await
+}
+
+pub async fn proactive_settings_set_logic(
+    pipe_name: &str,
+    is_enabled: bool,
+    cooldown_minutes: i64,
+    mute_hours: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "proactive.settings.set",
+        Some(serde_json::json!({
+            "is_enabled": is_enabled,
+            "cooldown_minutes": cooldown_minutes,
+            "mute_hours": mute_hours,
+        })),
+    )
+    .await
+}
+
+pub async fn data_ai_profile_dataset_logic(
+    pipe_name: &str,
+    csv_data: &str,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "data_ai.profile_dataset",
+        Some(serde_json::json!({ "csv_data": csv_data })),
+    )
+    .await
+}
+
+pub async fn data_ai_design_experiment_logic(
+    pipe_name: &str,
+    target_variable: &str,
+    problem_type: &str,
+    num_features: usize,
+) -> Result<serde_json::Value, String> {
+    send_rpc_request(
+        pipe_name,
+        "data_ai.design_experiment",
+        Some(serde_json::json!({
+            "target_variable": target_variable,
+            "problem_type": problem_type,
+            "num_features": num_features,
+        })),
+    )
+    .await
+}

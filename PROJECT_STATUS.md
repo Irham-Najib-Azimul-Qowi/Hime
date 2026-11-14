@@ -33,8 +33,8 @@
 | **Phase 11** | Hime Mobile & Device Layer | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-11-COMPLETION-REPORT.md` | Android Kotlin Compose (`apps/mobile/`), mTLS Local CA, QR anti-replay pairing, remote approvals (UR-02/04), posture audit (UR-12), chunked SHA-256 transfer, 97 tests. |
 | **Phase 12** | Productivity & Documents | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-12-COMPLETION-REPORT.md` | Kanban accountability, pengingat HP/desktop, DOCX/HTML report generation, Academic ID template (TNR 12, margin 4-3-3-3), PDF merge, Artcraft discovery, 102 tests. |
 | **Phase 13** | Browser & Developer Workspace | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-13-COMPLETION-REPORT.md` | Browser SSRF defense, anti-prompt injection wrapping, quarantined downloads, GitHub/Drive adapters, allowlisted runner, pre-commit secret scanner, SE templates, 111 tests. |
-| **Phase 14** | Specialist Agents & Skills | `READY TO START` | — | Registri specialist agent, quality bar, anti-loop. |
-| **Phase 15** | Hardening, Release & Linux | `PLANNED` | — | MSIX installer, benchmark resource, Linux beta. |
+| **Phase 14** | Specialist Agents & Skills | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-14-COMPLETION-REPORT.md` | Specialist registry (6 domains), Data/AI engine (UR-13, CSV profiling, leakage-free ML), opt-in proactive engine, evaluation harness, 118 tests. |
+| **Phase 15** | Hardening, Release & Linux | `READY TO START` | — | MSIX installer, benchmark resource, Linux PAL abstractions, v1.0 release. |
 
 ---
 
@@ -74,8 +74,8 @@ Lihat `project-management/OWNER-DECISIONS-NEEDED.md`:
 
 ## 6. METRIK TERAKHIR
 
-- **Test Suite Workspace:** 97 passed, 0 failed, 0 ignored (100% pass)
-- **Frontend Build (Vite):** 1.00 detik (51 modul ditransformasikan, dist bersih)
-- **Rust Dev Build:** 6.99 detik (Workspace crates kompilasi bersih)
-- **Hime Core Runtime RAM:** ~20.1 MB (di bawah batas 60 MB)
-- **Commit Baseline:** Local branch `phase/11-mobile-device-layer`, zero push.
+- **Test Suite Workspace:** 118 passed, 0 failed, 0 ignored (100% pass)
+- **Frontend Build (Vite):** 1.25 detik (TypeScript compilation bersih, bundle dist terverifikasi)
+- **Rust Dev Build:** ~8.5 detik (Workspace crates kompilasi bersih)
+- **Hime Core Runtime RAM:** ~24.5 MB (jauh di bawah batas 60 MB)
+- **Commit Baseline:** Local branch `phase/14-specialist-agents-skills`, zero push.

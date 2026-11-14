@@ -6,7 +6,8 @@ pub use database::{
     DeveloperWorkspaceRecord, DeviceStorageSummaryRecord, DocumentJobRecord, DuplicateGroup,
     ExtensionBreakdown, FileOperationRecord, FileRuleRecord, FileTransferRecord, IndexedFileRecord,
     IntegrationAccountRecord, KanbanBoardRecord, KanbanColumnRecord, MemoryRecord, MessageRecord,
-    PairedDeviceRecord, PairingTokenRecord, ProductivityTaskRecord, ScreenTimeSessionRecord,
+    PairedDeviceRecord, PairingTokenRecord, ProactiveSettingsRecord, ProactiveSuggestionRecord,
+    ProductivityTaskRecord, ScreenTimeSessionRecord, SpecialistDelegationRecord, SpecialistRecord,
     StorageAnalysisReport, StorageBackupRecord, StorageError, StudyScheduleRecord, TaskRecord,
     TokenValidationResult, ToolExecutionRecord,
 };

@@ -9,6 +9,7 @@ import { ProductivityView } from './features/productivity/ProductivityView';
 import { DocumentsView } from './features/documents/DocumentsView';
 import { DeveloperWorkspaceView } from './features/developer/DeveloperWorkspaceView';
 import { BrowserIntegrationsView } from './features/browser/BrowserIntegrationsView';
+import { SpecialistsView } from './features/specialists/SpecialistsView';
 import { StorageView } from './features/storage/StorageView';
 import { DevicesView } from './features/devices/DevicesView';
 import { NotificationCenter } from './features/notifications/NotificationCenter';
@@ -310,7 +311,7 @@ export const App: React.FC = () => {
         if (e.key === '6') setCurrentView('documents');
         if (e.key === '7') setCurrentView('developer');
         if (e.key === '8') setCurrentView('browser');
-        if (e.key === '9') setCurrentView('storage');
+        if (e.key === '9') setCurrentView('specialists');
         if (e.key === '0') setCurrentView('settings');
       }
     };
@@ -464,7 +465,8 @@ export const App: React.FC = () => {
               { id: 'documents', label: 'Documents', icon: '📄', shortcut: 'Alt+6' },
               { id: 'developer', label: 'Developer', icon: '💻', shortcut: 'Alt+7' },
               { id: 'browser', label: 'Browser & Web', icon: '🌐', shortcut: 'Alt+8' },
-              { id: 'storage', label: 'Storage', icon: '💾', shortcut: 'Alt+9' },
+              { id: 'specialists', label: 'Specialists & AI', icon: '🤖', shortcut: 'Alt+9' },
+              { id: 'storage', label: 'Storage', icon: '💾' },
               { id: 'devices', label: 'Devices', icon: '📱' },
               {
                 id: 'notifications',
@@ -648,6 +650,10 @@ export const App: React.FC = () => {
 
           {currentView === 'browser' && (
             <BrowserIntegrationsView />
+          )}
+
+          {currentView === 'specialists' && (
+            <SpecialistsView />
           )}
 
           {currentView === 'storage' && (

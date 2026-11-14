@@ -9,6 +9,7 @@ export type DesktopView =
   | 'documents'
   | 'developer'
   | 'browser'
+  | 'specialists'
   | 'storage'
   | 'devices'
   | 'notifications'

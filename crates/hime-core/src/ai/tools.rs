@@ -644,6 +644,58 @@ impl ToolGateway {
                 idempotent: true,
                 timeout_ms: 3000,
             },
+            ToolDefinition {
+                id: "data_ai.profile_dataset".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "data_ai".to_string(),
+                description: "Generate descriptive statistics, missing value analysis, and column type inference from CSV data".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["csv_data"],
+                    "properties": {
+                        "csv_data": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "data_ai.design_experiment".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "data_ai".to_string(),
+                description: "Design anti-leakage ML experiment with baseline models, metrics, and CPU constraints".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["target_variable"],
+                    "properties": {
+                        "target_variable": { "type": "string" },
+                        "problem_type": { "type": "string" },
+                        "num_features": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "specialists.delegate".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "specialists".to_string(),
+                description: "Delegate a specialized reasoning or execution task to a sandboxed domain specialist".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["specialist_id", "task_id", "input_prompt"],
+                    "properties": {
+                        "specialist_id": { "type": "string" },
+                        "task_id": { "type": "string" },
+                        "input_prompt": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
         ]
     }
 
@@ -1240,6 +1292,32 @@ impl ToolGateway {
             "dev.git_status" => {
                 let path_str = params["workspace_path"].as_str().unwrap_or(".");
                 let res = crate::developer::GitOperations::status(std::path::Path::new(path_str)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "data_ai.profile_dataset" => {
+                let csv_data = params["csv_data"].as_str().ok_or("Missing required field 'csv_data'")?;
+                let engine = crate::ai::specialists::DataAiEngine::new();
+                let profile = engine.profile_csv(csv_data).map_err(|e| e.to_string())?;
+                serde_json::to_value(&profile).map_err(|e| e.to_string())
+            }
+
+            "data_ai.design_experiment" => {
+                let target = params["target_variable"].as_str().unwrap_or("target");
+                let prob_type = params["problem_type"].as_str().unwrap_or("classification");
+                let num_feat = params["num_features"].as_u64().unwrap_or(10) as usize;
+                let engine = crate::ai::specialists::DataAiEngine::new();
+                let exp = engine.design_experiment(target, prob_type, num_feat);
+                serde_json::to_value(&exp).map_err(|e| e.to_string())
+            }
+
+            "specialists.delegate" => {
+                let spec_id = params["specialist_id"].as_str().ok_or("Missing required field 'specialist_id'")?;
+                let task_id = params["task_id"].as_str().ok_or("Missing required field 'task_id'")?;
+                let prompt = params["input_prompt"].as_str().ok_or("Missing required field 'input_prompt'")?;
+                let registry = std::sync::Arc::new(crate::ai::specialists::SpecialistRegistry::new(self.storage.clone()));
+                let delegation = crate::ai::specialists::DelegationEngine::new(self.storage.clone(), registry);
+                let res = delegation.delegate_task(spec_id, task_id, prompt).map_err(|e| e.to_string())?;
                 serde_json::to_value(&res).map_err(|e| e.to_string())
             }
 

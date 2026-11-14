@@ -78,11 +78,18 @@ export const createCommandRegistry = (ctx: CommandContext): CommandItem[] => {
       action: () => ctx.navigate('browser'),
     },
     {
+      id: 'nav-specialists',
+      title: 'Go to Specialist Agents & Data AI',
+      description: 'Defined domain specialists, verified delegation, and proactive assistance',
+      category: 'navigation',
+      shortcut: 'Alt+9',
+      action: () => ctx.navigate('specialists'),
+    },
+    {
       id: 'nav-storage',
       title: 'Go to Storage',
       description: 'Safe storage operations, recycle bin, duplicate finder, and rules',
       category: 'navigation',
-      shortcut: 'Alt+9',
       action: () => ctx.navigate('storage'),
     },
     {

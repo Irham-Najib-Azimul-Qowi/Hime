@@ -6,7 +6,8 @@ use tracing::info;
 use hime_desktop::{
     browser_close_logic, browser_download_logic, browser_downloads_list_logic, browser_extract_logic,
     browser_history_list_logic, browser_open_logic, cancel_conversation_logic, cancel_task_logic,
-    create_conversation_logic, create_task_logic, developer_command_run_logic, developer_git_commit_logic,
+    create_conversation_logic, create_task_logic, data_ai_design_experiment_logic,
+    data_ai_profile_dataset_logic, developer_command_run_logic, developer_git_commit_logic,
     developer_git_diff_logic, developer_git_status_logic, developer_templates_list_logic,
     developer_templates_render_logic, developer_workspaces_list_logic, developer_workspaces_register_logic,
     devices_list_logic, devices_pairing_start_logic, devices_revoke_logic, devices_storage_get_logic,
@@ -19,14 +20,19 @@ use hime_desktop::{
     integrations_github_inspect_logic, integrations_github_issues_create_logic,
     integrations_github_issues_list_logic, integrations_github_pr_create_logic,
     kanban_board_get_logic, kanban_columns_list_logic, list_conversations_logic,
-    list_credentials_logic, ping_core_logic, productivity_accountability_checkin_logic,
-    productivity_accountability_get_logic, productivity_accountability_set_mode_logic,
-    productivity_schedules_list_logic, productivity_schedules_plan_logic,
-    productivity_tasks_create_logic, productivity_tasks_list_logic, productivity_tasks_move_logic,
+    list_credentials_logic, ping_core_logic, proactive_settings_get_logic,
+    proactive_settings_set_logic, proactive_suggestions_evaluate_logic,
+    proactive_suggestions_list_logic, proactive_suggestions_respond_logic,
+    productivity_accountability_checkin_logic, productivity_accountability_get_logic,
+    productivity_accountability_set_mode_logic, productivity_schedules_list_logic,
+    productivity_schedules_plan_logic, productivity_tasks_create_logic,
+    productivity_tasks_list_logic, productivity_tasks_move_logic,
     productivity_tasks_parse_natural_logic, resolve_approval_logic, send_conversation_message_logic,
-    storage_get_analysis_logic, storage_get_duplicates_logic, storage_get_operations_logic,
-    storage_get_rules_logic, storage_restore_operation_logic, storage_scan_logic,
-    storage_search_logic, storage_toggle_rule_logic, store_credential_logic, PingResult,
+    specialists_delegate_logic, specialists_delegations_list_logic, specialists_evaluate_logic,
+    specialists_get_logic, specialists_list_logic, storage_get_analysis_logic,
+    storage_get_duplicates_logic, storage_get_operations_logic, storage_get_rules_logic,
+    storage_restore_operation_logic, storage_scan_logic, storage_search_logic,
+    storage_toggle_rule_logic, store_credential_logic, PingResult,
 };
 #[cfg(windows)]
 use hime_ipc::transport::windows_pipe::DEFAULT_HIME_PIPE;
@@ -1029,6 +1035,164 @@ async fn developer_templates_render(template_id: String, project_name: String, a
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 14: Specialist Agents, Skills & Proactive Commands
+// ---------------------------------------------------------------------------
+
+#[command]
+async fn specialists_list(active_only: Option<bool>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        specialists_list_logic(DEFAULT_HIME_PIPE, active_only).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = active_only;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn specialists_get(id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        specialists_get_logic(DEFAULT_HIME_PIPE, &id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn specialists_delegate(specialist_id: String, task_id: String, input_prompt: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        specialists_delegate_logic(DEFAULT_HIME_PIPE, &specialist_id, &task_id, &input_prompt).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (specialist_id, task_id, input_prompt);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn specialists_delegations_list(specialist_id: Option<String>, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        specialists_delegations_list_logic(DEFAULT_HIME_PIPE, specialist_id.as_deref(), limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (specialist_id, limit);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn specialists_evaluate(specialist_id: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        specialists_evaluate_logic(DEFAULT_HIME_PIPE, &specialist_id).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = specialist_id;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn proactive_suggestions_list(status: Option<String>, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        proactive_suggestions_list_logic(DEFAULT_HIME_PIPE, status.as_deref(), limit).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (status, limit);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn proactive_suggestions_evaluate() -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(windows)]
+    {
+        proactive_suggestions_evaluate_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn proactive_suggestions_respond(suggestion_id: String, action: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        proactive_suggestions_respond_logic(DEFAULT_HIME_PIPE, &suggestion_id, &action).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (suggestion_id, action);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn proactive_settings_get() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        proactive_settings_get_logic(DEFAULT_HIME_PIPE).await
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn proactive_settings_set(is_enabled: bool, cooldown_minutes: i64, mute_hours: Option<i64>) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        proactive_settings_set_logic(DEFAULT_HIME_PIPE, is_enabled, cooldown_minutes, mute_hours).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (is_enabled, cooldown_minutes, mute_hours);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn data_ai_profile_dataset(csv_data: String) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        data_ai_profile_dataset_logic(DEFAULT_HIME_PIPE, &csv_data).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = csv_data;
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
+#[command]
+async fn data_ai_design_experiment(target_variable: String, problem_type: String, num_features: usize) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        data_ai_design_experiment_logic(DEFAULT_HIME_PIPE, &target_variable, &problem_type, num_features).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (target_variable, problem_type, num_features);
+        Err("Unsupported on this platform".to_string())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -1099,6 +1263,18 @@ fn main() {
             developer_git_commit,
             developer_templates_list,
             developer_templates_render,
+            specialists_list,
+            specialists_get,
+            specialists_delegate,
+            specialists_delegations_list,
+            specialists_evaluate,
+            proactive_suggestions_list,
+            proactive_suggestions_evaluate,
+            proactive_suggestions_respond,
+            proactive_settings_get,
+            proactive_settings_set,
+            data_ai_profile_dataset,
+            data_ai_design_experiment,
             window_set_always_on_top,
             window_set_size_mode,
             window_minimize,

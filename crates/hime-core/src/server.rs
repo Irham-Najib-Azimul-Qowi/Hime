@@ -36,6 +36,11 @@ pub struct CoreServer {
     pub github_adapter: Arc<crate::integrations::GitHubAdapter>,
     pub drive_adapter: Arc<crate::integrations::GoogleDriveAdapter>,
     pub developer_engine: Arc<crate::developer::DeveloperEngine>,
+    pub specialist_registry: Arc<crate::ai::specialists::SpecialistRegistry>,
+    pub delegation_engine: Arc<crate::ai::specialists::DelegationEngine>,
+    pub proactive_engine: Arc<crate::ai::proactive::ProactiveEngine>,
+    pub data_ai_engine: Arc<crate::ai::specialists::DataAiEngine>,
+    pub evaluation_harness: Arc<crate::ai::evaluation::EvaluationHarness>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -121,6 +126,11 @@ impl CoreServer {
         let github_adapter = Arc::new(crate::integrations::GitHubAdapter::new(storage.clone()));
         let drive_adapter = Arc::new(crate::integrations::GoogleDriveAdapter::new(storage.clone()));
         let developer_engine = Arc::new(crate::developer::DeveloperEngine::new(storage.clone()));
+        let specialist_registry = Arc::new(crate::ai::specialists::SpecialistRegistry::new(storage.clone()));
+        let delegation_engine = Arc::new(crate::ai::specialists::DelegationEngine::new(storage.clone(), specialist_registry.clone()));
+        let proactive_engine = Arc::new(crate::ai::proactive::ProactiveEngine::new(storage.clone()));
+        let data_ai_engine = Arc::new(crate::ai::specialists::DataAiEngine::new());
+        let evaluation_harness = Arc::new(crate::ai::evaluation::EvaluationHarness::new(specialist_registry.clone(), delegation_engine.clone()));
 
         Self {
             version: "0.1.0".to_string(),
@@ -141,6 +151,11 @@ impl CoreServer {
             github_adapter,
             drive_adapter,
             developer_engine,
+            specialist_registry,
+            delegation_engine,
+            proactive_engine,
+            data_ai_engine,
+            evaluation_harness,
         }
     }
 
@@ -1858,6 +1873,112 @@ impl CoreServer {
                     Some(doc) => JsonRpcResponse::success(req_id, serde_json::json!({ "rendered_content": doc })),
                     None => JsonRpcResponse::error(req_id, hime_ipc::protocol::INVALID_REQUEST, "Unknown template ID".to_string(), None),
                 }
+            }
+
+            // ---------------------------------------------------------------------------
+            // Phase 14: Specialist Agents, Skills & Proactive Assistance Endpoints
+            // ---------------------------------------------------------------------------
+            "specialists.list" => {
+                let params = req.params.unwrap_or_default();
+                let active_only = params.get("active_only").and_then(|v| v.as_bool()).unwrap_or(false);
+                let list = self.specialist_registry.list_specialists(active_only);
+                JsonRpcResponse::success(req_id, serde_json::to_value(list).unwrap_or_default())
+            }
+
+            "specialists.get" => {
+                let params = req.params.unwrap_or_default();
+                let spec_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.specialist_registry.get_specialist(spec_id) {
+                    Some(spec) => JsonRpcResponse::success(req_id, serde_json::to_value(spec).unwrap_or_default()),
+                    None => JsonRpcResponse::error(req_id, hime_ipc::protocol::INVALID_REQUEST, format!("Specialist '{}' not found", spec_id), None),
+                }
+            }
+
+            "specialists.delegate" => {
+                let params = req.params.unwrap_or_default();
+                let spec_id = params.get("specialist_id").and_then(|v| v.as_str()).unwrap_or("");
+                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                let prompt = params.get("input_prompt").and_then(|v| v.as_str()).unwrap_or("");
+                match self.delegation_engine.delegate_task(spec_id, task_id, prompt) {
+                    Ok(res) => JsonRpcResponse::success(req_id, serde_json::to_value(res).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None),
+                }
+            }
+
+            "specialists.delegations.list" => {
+                let params = req.params.unwrap_or_default();
+                let spec_id = params.get("specialist_id").and_then(|v| v.as_str());
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let list = self.delegation_engine.list_delegations(spec_id, limit);
+                JsonRpcResponse::success(req_id, serde_json::to_value(list).unwrap_or_default())
+            }
+
+            "specialists.evaluate" => {
+                let params = req.params.unwrap_or_default();
+                let spec_id = params.get("specialist_id").and_then(|v| v.as_str()).unwrap_or("");
+                match self.evaluation_harness.evaluate_specialist(spec_id) {
+                    Ok(report) => JsonRpcResponse::success(req_id, serde_json::to_value(report).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None),
+                }
+            }
+
+            "proactive.suggestions.list" => {
+                let params = req.params.unwrap_or_default();
+                let status = params.get("status").and_then(|v| v.as_str());
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let list = self.proactive_engine.list_suggestions(status, limit);
+                JsonRpcResponse::success(req_id, serde_json::to_value(list).unwrap_or_default())
+            }
+
+            "proactive.suggestions.evaluate" => {
+                match self.proactive_engine.evaluate_and_generate_suggestions() {
+                    Ok(list) => JsonRpcResponse::success(req_id, serde_json::to_value(list).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None),
+                }
+            }
+
+            "proactive.suggestions.respond" => {
+                let params = req.params.unwrap_or_default();
+                let sug_id = params.get("suggestion_id").and_then(|v| v.as_str()).unwrap_or("");
+                let action = params.get("action").and_then(|v| v.as_str()).unwrap_or("dismiss");
+                match self.proactive_engine.respond_suggestion(sug_id, action) {
+                    Ok(ok) => JsonRpcResponse::success(req_id, serde_json::json!({ "success": ok })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INVALID_REQUEST, e, None),
+                }
+            }
+
+            "proactive.settings.get" => {
+                let settings = self.proactive_engine.get_settings();
+                JsonRpcResponse::success(req_id, serde_json::to_value(settings).unwrap_or_default())
+            }
+
+            "proactive.settings.set" => {
+                let params = req.params.unwrap_or_default();
+                let is_enabled = params.get("is_enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                let cooldown = params.get("cooldown_minutes").and_then(|v| v.as_i64()).unwrap_or(30);
+                let mute_hours = params.get("mute_hours").and_then(|v| v.as_i64());
+                match self.proactive_engine.update_settings(is_enabled, cooldown, mute_hours) {
+                    Ok(()) => JsonRpcResponse::success(req_id, serde_json::json!({ "success": true })),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None),
+                }
+            }
+
+            "data_ai.profile_dataset" => {
+                let params = req.params.unwrap_or_default();
+                let csv_data = params.get("csv_data").and_then(|v| v.as_str()).unwrap_or("");
+                match self.data_ai_engine.profile_csv(csv_data) {
+                    Ok(profile) => JsonRpcResponse::success(req_id, serde_json::to_value(profile).unwrap_or_default()),
+                    Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INVALID_REQUEST, e, None),
+                }
+            }
+
+            "data_ai.design_experiment" => {
+                let params = req.params.unwrap_or_default();
+                let target = params.get("target_variable").and_then(|v| v.as_str()).unwrap_or("target");
+                let prob_type = params.get("problem_type").and_then(|v| v.as_str()).unwrap_or("classification");
+                let num_feat = params.get("num_features").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let exp = self.data_ai_engine.design_experiment(target, prob_type, num_feat);
+                JsonRpcResponse::success(req_id, serde_json::to_value(exp).unwrap_or_default())
             }
 
             other => JsonRpcResponse::error(

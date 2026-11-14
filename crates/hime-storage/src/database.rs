@@ -382,7 +382,61 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_integ_svc ON integration_accounts(service_name);",
+            CREATE INDEX IF NOT EXISTS idx_integ_svc ON integration_accounts(service_name);
+
+            CREATE TABLE IF NOT EXISTS specialist_registry (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                role_title TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                responsibilities TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                allowed_tools TEXT NOT NULL,
+                max_permission_level TEXT NOT NULL,
+                resource_budget TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                evaluation_score REAL NOT NULL DEFAULT 0.0,
+                version TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_spec_domain ON specialist_registry(domain);
+
+            CREATE TABLE IF NOT EXISTS specialist_delegations (
+                id TEXT PRIMARY KEY,
+                specialist_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                input_prompt TEXT NOT NULL,
+                status TEXT NOT NULL,
+                output_summary TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                delegated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_spec_del_spec ON specialist_delegations(specialist_id);
+            CREATE INDEX IF NOT EXISTS idx_spec_del_task ON specialist_delegations(task_id);
+
+            CREATE TABLE IF NOT EXISTS proactive_suggestions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                category TEXT NOT NULL,
+                status TEXT NOT NULL,
+                score REAL NOT NULL DEFAULT 1.0,
+                created_at INTEGER NOT NULL,
+                responded_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_proact_status ON proactive_suggestions(status);
+
+            CREATE TABLE IF NOT EXISTS proactive_settings (
+                id TEXT PRIMARY KEY,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                cooldown_minutes INTEGER NOT NULL DEFAULT 30,
+                muted_until INTEGER,
+                updated_at INTEGER NOT NULL
+            );",
         )?;
 
         // Ensure backward compatibility if audit_events already existed without hash columns
@@ -2278,6 +2332,321 @@ impl Database {
         )?;
         Ok(count > 0)
     }
+
+    // ---------------------------------------------------------------------------
+    // Phase 14: Specialist Agents, Skills & Proactive Storage Operations
+    // ---------------------------------------------------------------------------
+
+    pub fn upsert_specialist(&self, spec: &SpecialistRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO specialist_registry (
+                id, name, role_title, domain, responsibilities, system_prompt, allowed_tools,
+                max_permission_level, resource_budget, is_active, evaluation_score, version,
+                created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                role_title = excluded.role_title,
+                domain = excluded.domain,
+                responsibilities = excluded.responsibilities,
+                system_prompt = excluded.system_prompt,
+                allowed_tools = excluded.allowed_tools,
+                max_permission_level = excluded.max_permission_level,
+                resource_budget = excluded.resource_budget,
+                is_active = excluded.is_active,
+                evaluation_score = excluded.evaluation_score,
+                version = excluded.version,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                spec.id,
+                spec.name,
+                spec.role_title,
+                spec.domain,
+                spec.responsibilities,
+                spec.system_prompt,
+                spec.allowed_tools,
+                spec.max_permission_level,
+                spec.resource_budget,
+                if spec.is_active { 1 } else { 0 },
+                spec.evaluation_score,
+                spec.version,
+                spec.created_at,
+                spec.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_specialist(&self, id: &str) -> Result<Option<SpecialistRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, role_title, domain, responsibilities, system_prompt, allowed_tools,
+                    max_permission_level, resource_budget, is_active, evaluation_score, version,
+                    created_at, updated_at
+             FROM specialist_registry WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], map_specialist)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_specialists(&self, active_only: bool) -> Result<Vec<SpecialistRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let query = if active_only {
+            "SELECT id, name, role_title, domain, responsibilities, system_prompt, allowed_tools,
+                    max_permission_level, resource_budget, is_active, evaluation_score, version,
+                    created_at, updated_at
+             FROM specialist_registry WHERE is_active = 1 ORDER BY evaluation_score DESC, name ASC"
+        } else {
+            "SELECT id, name, role_title, domain, responsibilities, system_prompt, allowed_tools,
+                    max_permission_level, resource_budget, is_active, evaluation_score, version,
+                    created_at, updated_at
+             FROM specialist_registry ORDER BY is_active DESC, evaluation_score DESC, name ASC"
+        };
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map([], map_specialist)?;
+        let mut specialists = Vec::new();
+        for r in rows {
+            specialists.push(r?);
+        }
+        Ok(specialists)
+    }
+
+    pub fn update_specialist_evaluation(&self, id: &str, score: f64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let count = conn.execute(
+            "UPDATE specialist_registry SET evaluation_score = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![score, now, id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn record_specialist_delegation(&self, del: &SpecialistDelegationRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO specialist_delegations (
+                id, specialist_id, task_id, input_prompt, status, output_summary, evidence,
+                tokens_used, duration_ms, delegated_at, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                output_summary = excluded.output_summary,
+                evidence = excluded.evidence,
+                tokens_used = excluded.tokens_used,
+                duration_ms = excluded.duration_ms,
+                completed_at = excluded.completed_at",
+            rusqlite::params![
+                del.id,
+                del.specialist_id,
+                del.task_id,
+                del.input_prompt,
+                del.status,
+                del.output_summary,
+                del.evidence,
+                del.tokens_used,
+                del.duration_ms,
+                del.delegated_at,
+                del.completed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_specialist_delegation(&self, id: &str) -> Result<Option<SpecialistDelegationRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, specialist_id, task_id, input_prompt, status, output_summary, evidence,
+                    tokens_used, duration_ms, delegated_at, completed_at
+             FROM specialist_delegations WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], map_specialist_delegation)?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_specialist_delegations(
+        &self,
+        specialist_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SpecialistDelegationRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut delegations = Vec::new();
+        if let Some(sid) = specialist_id {
+            let mut stmt = conn.prepare(
+                "SELECT id, specialist_id, task_id, input_prompt, status, output_summary, evidence,
+                        tokens_used, duration_ms, delegated_at, completed_at
+                 FROM specialist_delegations WHERE specialist_id = ?1 ORDER BY delegated_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![sid, limit as i64], map_specialist_delegation)?;
+            for r in rows {
+                delegations.push(r?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, specialist_id, task_id, input_prompt, status, output_summary, evidence,
+                        tokens_used, duration_ms, delegated_at, completed_at
+                 FROM specialist_delegations ORDER BY delegated_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], map_specialist_delegation)?;
+            for r in rows {
+                delegations.push(r?);
+            }
+        }
+        Ok(delegations)
+    }
+
+    pub fn complete_specialist_delegation(
+        &self,
+        id: &str,
+        status: &str,
+        output_summary: &str,
+        evidence: &str,
+        tokens_used: i64,
+        duration_ms: i64,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let count = conn.execute(
+            "UPDATE specialist_delegations SET
+                status = ?1,
+                output_summary = ?2,
+                evidence = ?3,
+                tokens_used = ?4,
+                duration_ms = ?5,
+                completed_at = ?6
+             WHERE id = ?7",
+            rusqlite::params![status, output_summary, evidence, tokens_used, duration_ms, now, id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn insert_proactive_suggestion(&self, sug: &ProactiveSuggestionRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proactive_suggestions (
+                id, title, content, category, status, score, created_at, responded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                content = excluded.content,
+                category = excluded.category,
+                status = excluded.status,
+                score = excluded.score,
+                responded_at = excluded.responded_at",
+            rusqlite::params![
+                sug.id,
+                sug.title,
+                sug.content,
+                sug.category,
+                sug.status,
+                sug.score,
+                sug.created_at,
+                sug.responded_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_proactive_suggestions(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ProactiveSuggestionRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut suggestions = Vec::new();
+        if let Some(st) = status {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, content, category, status, score, created_at, responded_at
+                 FROM proactive_suggestions WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![st, limit as i64], map_proactive_suggestion)?;
+            for r in rows {
+                suggestions.push(r?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, content, category, status, score, created_at, responded_at
+                 FROM proactive_suggestions ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], map_proactive_suggestion)?;
+            for r in rows {
+                suggestions.push(r?);
+            }
+        }
+        Ok(suggestions)
+    }
+
+    pub fn respond_proactive_suggestion(&self, id: &str, status: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let count = conn.execute(
+            "UPDATE proactive_suggestions SET status = ?1, responded_at = ?2 WHERE id = ?3",
+            rusqlite::params![status, now, id],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn get_proactive_settings(&self) -> Result<ProactiveSettingsRecord, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, is_enabled, cooldown_minutes, muted_until, updated_at
+             FROM proactive_settings WHERE id = 'default'",
+        )?;
+        let mut rows = stmt.query_map([], map_proactive_settings)?;
+        if let Some(r) = rows.next() {
+            Ok(r?)
+        } else {
+            // Default initial settings
+            Ok(ProactiveSettingsRecord {
+                id: "default".to_string(),
+                is_enabled: true,
+                cooldown_minutes: 30,
+                muted_until: None,
+                updated_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            })
+        }
+    }
+
+    pub fn set_proactive_settings(&self, settings: &ProactiveSettingsRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proactive_settings (id, is_enabled, cooldown_minutes, muted_until, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                is_enabled = excluded.is_enabled,
+                cooldown_minutes = excluded.cooldown_minutes,
+                muted_until = excluded.muted_until,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                settings.id,
+                if settings.is_enabled { 1 } else { 0 },
+                settings.cooldown_minutes,
+                settings.muted_until,
+                settings.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -2917,6 +3286,124 @@ fn map_integration_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<Integrat
         status: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 Structs & Mappers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SpecialistRecord {
+    pub id: String,
+    pub name: String,
+    pub role_title: String,
+    pub domain: String,
+    pub responsibilities: String, // JSON array
+    pub system_prompt: String,
+    pub allowed_tools: String, // JSON array
+    pub max_permission_level: String,
+    pub resource_budget: String, // JSON object
+    pub is_active: bool,
+    pub evaluation_score: f64,
+    pub version: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_specialist(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecialistRecord> {
+    let active_int: i32 = row.get(9)?;
+    Ok(SpecialistRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        role_title: row.get(2)?,
+        domain: row.get(3)?,
+        responsibilities: row.get(4)?,
+        system_prompt: row.get(5)?,
+        allowed_tools: row.get(6)?,
+        max_permission_level: row.get(7)?,
+        resource_budget: row.get(8)?,
+        is_active: active_int != 0,
+        evaluation_score: row.get(10)?,
+        version: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SpecialistDelegationRecord {
+    pub id: String,
+    pub specialist_id: String,
+    pub task_id: String,
+    pub input_prompt: String,
+    pub status: String,
+    pub output_summary: String,
+    pub evidence: String,
+    pub tokens_used: i64,
+    pub duration_ms: i64,
+    pub delegated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+fn map_specialist_delegation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecialistDelegationRecord> {
+    Ok(SpecialistDelegationRecord {
+        id: row.get(0)?,
+        specialist_id: row.get(1)?,
+        task_id: row.get(2)?,
+        input_prompt: row.get(3)?,
+        status: row.get(4)?,
+        output_summary: row.get(5)?,
+        evidence: row.get(6)?,
+        tokens_used: row.get(7)?,
+        duration_ms: row.get(8)?,
+        delegated_at: row.get(9)?,
+        completed_at: row.get(10)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ProactiveSuggestionRecord {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub category: String,
+    pub status: String,
+    pub score: f64,
+    pub created_at: i64,
+    pub responded_at: Option<i64>,
+}
+
+fn map_proactive_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProactiveSuggestionRecord> {
+    Ok(ProactiveSuggestionRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        content: row.get(2)?,
+        category: row.get(3)?,
+        status: row.get(4)?,
+        score: row.get(5)?,
+        created_at: row.get(6)?,
+        responded_at: row.get(7)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProactiveSettingsRecord {
+    pub id: String,
+    pub is_enabled: bool,
+    pub cooldown_minutes: i64,
+    pub muted_until: Option<i64>,
+    pub updated_at: i64,
+}
+
+fn map_proactive_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProactiveSettingsRecord> {
+    let enabled_int: i32 = row.get(1)?;
+    Ok(ProactiveSettingsRecord {
+        id: row.get(0)?,
+        is_enabled: enabled_int != 0,
+        cooldown_minutes: row.get(2)?,
+        muted_until: row.get(3)?,
+        updated_at: row.get(4)?,
     })
 }
 
@@ -3634,5 +4121,116 @@ mod tests {
 
         let accounts = db.list_integration_accounts().unwrap();
         assert_eq!(accounts.len(), 1);
+    }
+
+    #[test]
+    fn test_phase14_specialist_and_proactive_storage() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Specialist Registry
+        let spec = SpecialistRecord {
+            id: "specialist.software_engineer".to_string(),
+            name: "Hime Software Engineer".to_string(),
+            role_title: "Senior Systems Engineer".to_string(),
+            domain: "developer".to_string(),
+            responsibilities: "[\"code_review\", \"refactoring\", \"testing\"]".to_string(),
+            system_prompt: "You are Hime Software Engineer specialist.".to_string(),
+            allowed_tools: "[\"dev.run_command\", \"dev.git_status\"]".to_string(),
+            max_permission_level: "L2".to_string(),
+            resource_budget: "{\"max_tokens\": 4096, \"timeout_secs\": 60, \"max_concurrency\": 1}".to_string(),
+            is_active: true,
+            evaluation_score: 94.5,
+            version: "1.0.0".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.upsert_specialist(&spec).unwrap();
+
+        let fetched = db.get_specialist("specialist.software_engineer").unwrap().unwrap();
+        assert_eq!(fetched.name, "Hime Software Engineer");
+        assert_eq!(fetched.domain, "developer");
+        assert!(fetched.is_active);
+        assert!((fetched.evaluation_score - 94.5).abs() < f64::EPSILON);
+
+        assert!(db.update_specialist_evaluation("specialist.software_engineer", 98.0).unwrap());
+        let updated = db.get_specialist("specialist.software_engineer").unwrap().unwrap();
+        assert!((updated.evaluation_score - 98.0).abs() < f64::EPSILON);
+
+        let active_specs = db.list_specialists(true).unwrap();
+        assert_eq!(active_specs.len(), 1);
+
+        // 2. Delegations
+        let del = SpecialistDelegationRecord {
+            id: "del-001".to_string(),
+            specialist_id: "specialist.software_engineer".to_string(),
+            task_id: "task-999".to_string(),
+            input_prompt: "Implement safe boundary check".to_string(),
+            status: "running".to_string(),
+            output_summary: "Analyzing boundary check".to_string(),
+            evidence: "[]".to_string(),
+            tokens_used: 120,
+            duration_ms: 350,
+            delegated_at: 1100,
+            completed_at: None,
+        };
+        db.record_specialist_delegation(&del).unwrap();
+
+        let fetched_del = db.get_specialist_delegation("del-001").unwrap().unwrap();
+        assert_eq!(fetched_del.status, "running");
+
+        assert!(db.complete_specialist_delegation(
+            "del-001",
+            "completed",
+            "Boundary check implemented and passing all tests",
+            "[\"crates/hime-core/src/developer/workspace.rs:45\"]",
+            520,
+            1200
+        ).unwrap());
+
+        let completed_del = db.get_specialist_delegation("del-001").unwrap().unwrap();
+        assert_eq!(completed_del.status, "completed");
+        assert_eq!(completed_del.tokens_used, 520);
+        assert!(completed_del.completed_at.is_some());
+
+        let list_del = db.list_specialist_delegations(Some("specialist.software_engineer"), 10).unwrap();
+        assert_eq!(list_del.len(), 1);
+
+        // 3. Proactive Suggestions & Settings
+        let sug = ProactiveSuggestionRecord {
+            id: "sug-001".to_string(),
+            title: "Tinjau Jadwal Belajar".to_string(),
+            content: "Ada blok belajar Skripsi Bab 4 dalam 15 menit.".to_string(),
+            category: "schedule".to_string(),
+            status: "pending".to_string(),
+            score: 0.95,
+            created_at: 1200,
+            responded_at: None,
+        };
+        db.insert_proactive_suggestion(&sug).unwrap();
+
+        let pending_sugs = db.list_proactive_suggestions(Some("pending"), 10).unwrap();
+        assert_eq!(pending_sugs.len(), 1);
+        assert_eq!(pending_sugs[0].title, "Tinjau Jadwal Belajar");
+
+        assert!(db.respond_proactive_suggestion("sug-001", "accepted").unwrap());
+        let updated_sugs = db.list_proactive_suggestions(Some("accepted"), 10).unwrap();
+        assert_eq!(updated_sugs.len(), 1);
+
+        let default_proact = db.get_proactive_settings().unwrap();
+        assert!(default_proact.is_enabled);
+        assert_eq!(default_proact.cooldown_minutes, 30);
+
+        let custom_proact = ProactiveSettingsRecord {
+            id: "default".to_string(),
+            is_enabled: true,
+            cooldown_minutes: 45,
+            muted_until: Some(1500),
+            updated_at: 1300,
+        };
+        db.set_proactive_settings(&custom_proact).unwrap();
+
+        let fetched_proact = db.get_proactive_settings().unwrap();
+        assert_eq!(fetched_proact.cooldown_minutes, 45);
+        assert_eq!(fetched_proact.muted_until, Some(1500));
     }
 }

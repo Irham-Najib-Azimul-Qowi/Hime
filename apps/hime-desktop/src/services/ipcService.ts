@@ -14,6 +14,15 @@ import { HimeTask } from '../types/tasks';
 import { BrowserSession, BrowserHistoryItem, BrowserDownload, BrowserExtractionResult } from '../types/browser';
 import { DeveloperWorkspace, DeveloperCommandOutput, GitStatusResult, SeTemplateItem } from '../types/developer';
 import { IntegrationAccount, GitHubRepoSummary, GitHubIssue, GoogleDriveFile } from '../types/integrations';
+import {
+  SpecialistDefinition,
+  DelegationResult,
+  DatasetProfile,
+  ExperimentDesign,
+  ProactiveSuggestionItem,
+  ProactiveSettings,
+  EvaluationReport,
+} from '../types/specialists';
 
 export const isTauriEnvironment = (): boolean => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -1162,6 +1171,277 @@ export const renderSeTemplate = async (
     templateId,
     projectName,
     author,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Phase 14: Specialist Agents, Skills & Proactive Assistance Service Calls
+// ---------------------------------------------------------------------------
+
+export const listSpecialists = async (activeOnly?: boolean): Promise<SpecialistDefinition[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'specialist.software_engineer',
+        name: 'Hime Software Engineer',
+        role_title: 'Senior Systems & Software Engineer',
+        domain: 'developer',
+        responsibilities: [
+          'Analisis kebutuhan perangkat lunak dan arsitektur (IEEE 830/1016)',
+          'Eksekusi perintah build, lint, dan test sandboxed',
+          'Inspeksi Git, safe pre-commit secret scan, dan refactoring aman',
+        ],
+        system_prompt: 'You are the Hime Software Engineering Specialist.',
+        allowed_tools: ['dev.run_command', 'dev.git_status', 'files.stat'],
+        max_permission_level: 'L2',
+        resource_budget: { max_tokens: 6144, timeout_secs: 90, max_concurrency: 1 },
+        is_active: true,
+        evaluation_score: 96.5,
+        version: '1.0.0',
+      },
+      {
+        id: 'specialist.data_ai',
+        name: 'Hime Data & AI Engineer',
+        role_title: 'Data Analyst, Scientist & ML Engineer',
+        domain: 'data_ai',
+        responsibilities: [
+          'Profil dataset, statistik deskriptif, dan deteksi nilai hilang',
+          'Pembersihan data dan validasi integritas dataset',
+          'Perancangan eksperimen ML tanpa kebocoran data dan model card',
+        ],
+        system_prompt: 'You are the Hime Data & AI Specialist.',
+        allowed_tools: ['data_ai.profile_dataset', 'data_ai.design_experiment', 'files.stat'],
+        max_permission_level: 'L1',
+        resource_budget: { max_tokens: 4096, timeout_secs: 60, max_concurrency: 1 },
+        is_active: true,
+        evaluation_score: 95.0,
+        version: '1.0.0',
+      },
+      {
+        id: 'specialist.research',
+        name: 'Hime Web Researcher',
+        role_title: 'Autonomous Web & Documentation Researcher',
+        domain: 'browser',
+        responsibilities: [
+          'Riset web publik dengan proteksi SSRF dan anti-prompt injection',
+          'Ekstraksi teks keterbacaan DOM dan sitasi sumber terpercaya',
+        ],
+        system_prompt: 'You are the Hime Web Research Specialist.',
+        allowed_tools: ['browser.open_page', 'browser.extract', 'browser.download'],
+        max_permission_level: 'L1',
+        resource_budget: { max_tokens: 5120, timeout_secs: 60, max_concurrency: 1 },
+        is_active: true,
+        evaluation_score: 94.0,
+        version: '1.0.0',
+      },
+      {
+        id: 'specialist.document',
+        name: 'Hime Document Specialist',
+        role_title: 'Office Document & Academic Formatting Specialist',
+        domain: 'documents',
+        responsibilities: [
+          'Sintesis dokumen standar akademik Indonesia (TNR 12, margin 4-3-3-3)',
+          'Penyusunan laporan modern DOCX/HTML dan verifikasi visual',
+        ],
+        system_prompt: 'You are the Hime Document Specialist.',
+        allowed_tools: ['docs.create_report', 'docs.merge_pdfs'],
+        max_permission_level: 'L2',
+        resource_budget: { max_tokens: 4096, timeout_secs: 60, max_concurrency: 1 },
+        is_active: true,
+        evaluation_score: 97.0,
+        version: '1.0.0',
+      },
+    ];
+  }
+  return await invoke<SpecialistDefinition[]>('specialists_list', { activeOnly });
+};
+
+export const getSpecialist = async (id: string): Promise<SpecialistDefinition> => {
+  return await invoke<SpecialistDefinition>('specialists_get', { id });
+};
+
+export const delegateToSpecialist = async (
+  specialistId: string,
+  taskId: string,
+  inputPrompt: string
+): Promise<DelegationResult> => {
+  if (!isTauriEnvironment()) {
+    return {
+      delegation_id: `del-prev-${Date.now()}`,
+      specialist_id: specialistId,
+      task_id: taskId,
+      status: 'completed',
+      output_summary: `[Preview] Tugas berhasil diproses oleh spesialis '${specialistId}'.`,
+      evidence: ['Batas sandbox dipatuhi', 'Resource budget terkontrol'],
+      tokens_used: 350,
+      duration_ms: 420,
+    };
+  }
+  return await invoke<DelegationResult>('specialists_delegate', {
+    specialistId,
+    taskId,
+    inputPrompt,
+  });
+};
+
+export const listSpecialistDelegations = async (
+  specialistId?: string,
+  limit?: number
+): Promise<DelegationResult[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        delegation_id: 'del-sample-1',
+        specialist_id: specialistId || 'specialist.software_engineer',
+        task_id: 'task-prev-101',
+        status: 'completed',
+        output_summary: 'Analisis rekayasa selesai. Working tree bersih dan safe commit diverifikasi.',
+        evidence: ['Git status OK', 'Pre-commit scanner passed'],
+        tokens_used: 410,
+        duration_ms: 512,
+      },
+    ];
+  }
+  return await invoke<DelegationResult[]>('specialists_delegations_list', {
+    specialistId,
+    limit,
+  });
+};
+
+export const evaluateSpecialist = async (specialistId: string): Promise<EvaluationReport> => {
+  if (!isTauriEnvironment()) {
+    return {
+      specialist_id: specialistId,
+      scenarios_evaluated: 2,
+      scenarios_passed: 2,
+      pass_rate: 100.0,
+      average_tokens: 380,
+      average_duration_ms: 450,
+      overall_score: 96.5,
+      evaluation_summary: `Evaluasi spesialis '${specialistId}' lulus 100% pada seluruh skenario regresi dan kapabilitas.`,
+    };
+  }
+  return await invoke<EvaluationReport>('specialists_evaluate', { specialistId });
+};
+
+export const listProactiveSuggestions = async (
+  status?: string,
+  limit?: number
+): Promise<ProactiveSuggestionItem[]> => {
+  if (!isTauriEnvironment()) {
+    return [
+      {
+        id: 'sug-sample-1',
+        title: 'Rekomendasi Fokus & Belajar',
+        content: 'Ada blok belajar Skripsi Bab 4 dalam 15 menit. Siapkan materi atau aktifkan Mode Strict?',
+        category: 'schedule',
+        status: 'pending',
+        score: 0.95,
+        created_at: Math.floor(Date.now() / 1000) - 600,
+        responded_at: null,
+      },
+      {
+        id: 'sug-sample-2',
+        title: 'Pembersihan Unduhan Tertunda',
+        content: 'Ditemukan 5 file baru di folder Downloads. Pindahkan ke arsip proyek?',
+        category: 'storage',
+        status: 'pending',
+        score: 0.88,
+        created_at: Math.floor(Date.now() / 1000) - 1800,
+        responded_at: null,
+      },
+    ];
+  }
+  return await invoke<ProactiveSuggestionItem[]>('proactive_suggestions_list', {
+    status,
+    limit,
+  });
+};
+
+export const evaluateProactiveSuggestions = async (): Promise<ProactiveSuggestionItem[]> => {
+  if (!isTauriEnvironment()) {
+    return await listProactiveSuggestions();
+  }
+  return await invoke<ProactiveSuggestionItem[]>('proactive_suggestions_evaluate');
+};
+
+export const respondProactiveSuggestion = async (
+  suggestionId: string,
+  action: string
+): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { success: true };
+  }
+  return await invoke<any>('proactive_suggestions_respond', {
+    suggestionId,
+    action,
+  });
+};
+
+export const getProactiveSettings = async (): Promise<ProactiveSettings> => {
+  if (!isTauriEnvironment()) {
+    return {
+      is_enabled: true,
+      cooldown_minutes: 30,
+      muted_until: null,
+      updated_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  return await invoke<ProactiveSettings>('proactive_settings_get');
+};
+
+export const setProactiveSettings = async (
+  isEnabled: boolean,
+  cooldownMinutes: number,
+  muteHours?: number
+): Promise<any> => {
+  if (!isTauriEnvironment()) {
+    return { success: true };
+  }
+  return await invoke<any>('proactive_settings_set', {
+    isEnabled,
+    cooldownMinutes,
+    muteHours,
+  });
+};
+
+export const profileDataset = async (csvData: string): Promise<DatasetProfile> => {
+  if (!isTauriEnvironment()) {
+    return {
+      row_count: 5,
+      column_count: 3,
+      columns: [
+        { name: 'id', inferred_type: 'numeric', missing_count: 0, missing_percentage: 0, min: 1, max: 5, mean: 3 },
+        { name: 'score', inferred_type: 'numeric', missing_count: 0, missing_percentage: 0, min: 70, max: 98, mean: 84 },
+        { name: 'category', inferred_type: 'text', missing_count: 0, missing_percentage: 0, min: null, max: null, mean: null },
+      ],
+      summary_markdown: '### Ringkasan Profil Dataset Preview\n- 5 baris, 3 kolom',
+    };
+  }
+  return await invoke<DatasetProfile>('data_ai_profile_dataset', { csvData });
+};
+
+export const designExperiment = async (
+  targetVariable: string,
+  problemType: string,
+  numFeatures: number
+): Promise<ExperimentDesign> => {
+  if (!isTauriEnvironment()) {
+    return {
+      target_variable: targetVariable,
+      problem_type: problemType,
+      baseline_models: ['LogisticRegression', 'RandomForestClassifier'],
+      recommended_metrics: ['F1-Macro', 'ROC-AUC'],
+      validation_strategy: 'Stratified 5-Fold Cross Validation without data leakage',
+      uncertainty_and_limitations: 'Predictions must report probabilities and out-of-distribution risks.',
+      execution_constraints: 'CPU friendly (Intel i5, max 1GB RAM budget)',
+      model_card_markdown: `# MODEL CARD: ${targetVariable}\n- Problem: ${problemType}\n- Features: ${numFeatures}`,
+    };
+  }
+  return await invoke<ExperimentDesign>('data_ai_design_experiment', {
+    targetVariable,
+    problemType,
+    numFeatures,
   });
 };
 
