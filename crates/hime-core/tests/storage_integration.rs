@@ -315,6 +315,26 @@ async fn test_storage_e2e_download_intelligence_workflow() {
 
     // Existing file should now contain new content
     assert_eq!(fs::read_to_string(&existing).unwrap(), "New contract version with revisions");
+
+    // 4. Directory scanner & drain
+    let downloads_dir = sandbox.root.join("Downloads");
+    let initial_scan = download_intel.scan_and_inspect_directory(&downloads_dir);
+    // Initial scan seeds seen files and should return empty
+    assert!(initial_scan.is_empty());
+
+    // Create a brand new unique download
+    let _fresh_dl = sandbox.create_file("Downloads/brand_new_research.pdf", b"Unique research paper content");
+    let scanned_new = download_intel.scan_and_inspect_directory(&downloads_dir);
+    assert_eq!(scanned_new.len(), 1);
+    assert_eq!(scanned_new[0].file_name, "brand_new_research.pdf");
+    assert!(matches!(scanned_new[0].status, DownloadStatus::NewUniqueFile));
+
+    let drained = download_intel.drain_recent_reports();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].file_name, "brand_new_research.pdf");
+
+    // Subsequent drain is empty
+    assert!(download_intel.drain_recent_reports().is_empty());
 }
 
 #[tokio::test]

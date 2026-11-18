@@ -1,7 +1,9 @@
 use crate::storage::operations::{FileOpError, SafeFileOperationsEngine};
 use hime_storage::Database;
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -15,30 +17,46 @@ pub enum DownloadStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DownloadEventReport {
     pub download_path: String,
+    pub file_name: String,
     pub status: DownloadStatus,
     pub notification_prompt: Option<String>,
+    pub timestamp_ms: u64,
 }
 
 pub struct DownloadIntelligence {
     db: Arc<Database>,
     ops_engine: Arc<SafeFileOperationsEngine>,
+    seen_files: Mutex<HashSet<PathBuf>>,
+    recent_reports: Mutex<Vec<DownloadEventReport>>,
 }
 
 impl DownloadIntelligence {
     pub fn new(db: Arc<Database>, ops_engine: Arc<SafeFileOperationsEngine>) -> Self {
-        Self { db, ops_engine }
+        Self {
+            db,
+            ops_engine,
+            seen_files: Mutex::new(HashSet::new()),
+            recent_reports: Mutex::new(Vec::new()),
+        }
     }
 
     /// Evaluates a file in Downloads directory.
     pub fn inspect_download(&self, path: &Path) -> Result<DownloadEventReport, FileOpError> {
         let path_str = path.to_string_lossy();
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
         // 1. Check if it is an incomplete download
         if path_str.ends_with(".crdownload") || path_str.ends_with(".part") || path_str.ends_with(".tmp") {
             return Ok(DownloadEventReport {
                 download_path: path_str.to_string(),
+                file_name,
                 status: DownloadStatus::InProgress,
                 notification_prompt: None,
+                timestamp_ms: now,
             });
         }
 
@@ -46,7 +64,6 @@ impl DownloadIntelligence {
             return Err(FileOpError::SourceNotFound(format!("File does not exist: {:?}", path)));
         }
 
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let file_hash = SafeFileOperationsEngine::compute_sha256(path)?;
 
         // 2. Check for exact duplicate in database
@@ -55,6 +72,7 @@ impl DownloadIntelligence {
             if Path::new(&f.path) != path {
                 return Ok(DownloadEventReport {
                     download_path: path_str.to_string(),
+                    file_name: file_name.clone(),
                     status: DownloadStatus::ExactDuplicate {
                         existing_path: f.path.clone(),
                     },
@@ -62,6 +80,7 @@ impl DownloadIntelligence {
                         "Exact duplicate detected: '{}' is identical to existing file '{}'. Would you like to discard or keep both?",
                         file_name, f.path
                     )),
+                    timestamp_ms: now,
                 });
             }
         }
@@ -72,6 +91,7 @@ impl DownloadIntelligence {
             if Path::new(&f.path) != path && f.file_name == file_name {
                 return Ok(DownloadEventReport {
                     download_path: path_str.to_string(),
+                    file_name: file_name.clone(),
                     status: DownloadStatus::NewVersionCandidate {
                         existing_path: f.path.clone(),
                         suggested_action: "Archive existing file to Hime Recycle as older version and place new download into folder".to_string(),
@@ -80,15 +100,63 @@ impl DownloadIntelligence {
                         "File '{}' already exists at '{}'. Is this a newer version? Options: replace & archive old, keep both, or discard.",
                         file_name, f.path
                     )),
+                    timestamp_ms: now,
                 });
             }
         }
 
         Ok(DownloadEventReport {
             download_path: path_str.to_string(),
+            file_name,
             status: DownloadStatus::NewUniqueFile,
             notification_prompt: None,
+            timestamp_ms: now,
         })
+    }
+
+    /// Scans a directory (such as Downloads) for newly added completed files.
+    pub fn scan_and_inspect_directory(&self, dir: &Path) -> Vec<DownloadEventReport> {
+        let mut new_reports = Vec::new();
+        if !dir.exists() || !dir.is_dir() {
+            return new_reports;
+        }
+
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => return new_reports,
+        };
+
+        let mut seen = self.seen_files.lock().unwrap();
+        // If seen is empty (initial run), seed it with current files so we don't spam for all existing downloads
+        if seen.is_empty() {
+            for entry in read_dir.flatten() {
+                seen.insert(entry.path());
+            }
+            return new_reports;
+        }
+
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_file() && !seen.contains(&path) {
+                let p_str = path.to_string_lossy();
+                if p_str.ends_with(".crdownload") || p_str.ends_with(".part") || p_str.ends_with(".tmp") {
+                    continue;
+                }
+                seen.insert(path.clone());
+                if let Ok(report) = self.inspect_download(&path) {
+                    new_reports.push(report.clone());
+                    self.recent_reports.lock().unwrap().push(report);
+                }
+            }
+        }
+
+        new_reports
+    }
+
+    /// Drains and returns all recent download reports since last poll.
+    pub fn drain_recent_reports(&self) -> Vec<DownloadEventReport> {
+        let mut lock = self.recent_reports.lock().unwrap();
+        std::mem::take(&mut *lock)
     }
 
     /// Resolves download conflict by archiving existing file and moving new download in place.
@@ -108,5 +176,3 @@ impl DownloadIntelligence {
         self.ops_engine.safe_move(&op_id, new_download, existing_file, actor, None)
     }
 }
-
-use std::time::{SystemTime, UNIX_EPOCH};

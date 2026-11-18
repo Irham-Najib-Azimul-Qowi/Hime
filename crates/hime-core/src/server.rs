@@ -1318,6 +1318,23 @@ impl CoreServer {
                 }
             }
 
+            "storage.download.poll_new" => {
+                let params = req.params.unwrap_or_default();
+                let scan_dir = if let Some(p) = params.get("directory").and_then(|v| v.as_str()) {
+                    std::path::PathBuf::from(p)
+                } else {
+                    hime_pal::PlatformPaths::downloads_dir()
+                };
+                let new_reports = self.storage_engine.download_intel.scan_and_inspect_directory(&scan_dir);
+                let mut all = self.storage_engine.download_intel.drain_recent_reports();
+                for r in new_reports {
+                    if !all.iter().any(|existing| existing.download_path == r.download_path) {
+                        all.push(r);
+                    }
+                }
+                JsonRpcResponse::success(req_id, serde_json::to_value(all).unwrap_or_default())
+            }
+
             "storage.download.replace_and_archive" => {
                 let params = req.params.unwrap_or_default();
                 let new_dl = params.get("new_download").and_then(|v| v.as_str()).unwrap_or("");

@@ -58,6 +58,28 @@ impl PlatformPaths {
         std::env::temp_dir().join("Hime")
     }
 
+    /// Returns the user's Downloads directory (%USERPROFILE%\Downloads on Windows, ~/Downloads on Linux/macOS).
+    pub fn downloads_dir() -> PathBuf {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            PathBuf::from(profile).join("Downloads")
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join("Downloads")
+        } else {
+            Self::data_dir().join("Downloads")
+        }
+    }
+
+    /// Returns the user's Documents directory (%USERPROFILE%\Documents on Windows, ~/Documents on Linux/macOS).
+    pub fn documents_dir() -> PathBuf {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            PathBuf::from(profile).join("Documents")
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join("Documents")
+        } else {
+            Self::data_dir().join("Documents")
+        }
+    }
+
     /// Returns the default IPC socket address (Named Pipe name on Windows, Unix domain socket path on Linux/Unix).
     pub fn default_ipc_endpoint() -> String {
         #[cfg(windows)]
@@ -87,6 +109,10 @@ mod tests {
         assert!(runtime.to_str().unwrap().to_lowercase().contains("hime"));
         let temp = PlatformPaths::temp_dir();
         assert!(temp.to_str().unwrap().to_lowercase().contains("hime"));
+        let dl = PlatformPaths::downloads_dir();
+        assert!(dl.to_str().unwrap().to_lowercase().contains("downloads"));
+        let docs = PlatformPaths::documents_dir();
+        assert!(docs.to_str().unwrap().to_lowercase().contains("documents"));
     }
 
     #[test]
