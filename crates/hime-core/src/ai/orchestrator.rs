@@ -160,6 +160,17 @@ impl AiOrchestrator {
         conversation_id: &str,
         user_prompt: &str,
     ) -> Result<String, String> {
+        self.execute_chat_prompt_with_model(conversation_id, user_prompt, None)
+            .await
+    }
+
+    /// Dispatches a prompt through the end-to-end AI orchestration pipeline with optional model override.
+    pub async fn execute_chat_prompt_with_model(
+        &self,
+        conversation_id: &str,
+        user_prompt: &str,
+        model_override: Option<&str>,
+    ) -> Result<String, String> {
         // Step 1: Persist user message
         let _ = self
             .conversation_service
@@ -182,7 +193,7 @@ impl AiOrchestrator {
         // Step 3: Execute turn through Hermes adapter
         let response_text = self
             .hermes_adapter
-            .execute_turn(conversation_id, user_prompt, event_tx)
+            .execute_turn_with_model(conversation_id, user_prompt, model_override, event_tx)
             .await?;
 
         // Step 4: Persist assistant message in SQLite WAL

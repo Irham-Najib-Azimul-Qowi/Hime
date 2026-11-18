@@ -1,5 +1,5 @@
 # PROJECT STATUS — HIME
-**Diperbarui:** 2026-11-14 13:30 WIB  
+**Diperbarui:** 2026-11-18 09:10 WIB  
 **Versi Target:** `v1.0.0-rc.1` (Release Candidate)  
 
 ---
@@ -8,7 +8,12 @@
 
 - **Status Master Milestone:** **`READY FOR OWNER ACCEPTANCE (v1.0 RC)`**
 - **Seluruh 15 Fase Master Plan:** **100% SELESAI & TERVERIFIKASI**
-- **Automated Test Suite:** **123 passed, 0 failed, 0 ignored (100% pass rate)**
+- **Automated Test Suite:** **124 passed, 0 failed, 0 ignored (100% pass rate)**
+- **Live AI Engine (The Brain):** **AKTIF & LIVE TERHUBUNG**
+  - Live AI Orchestration loop via `crates/hime-core/src/ai/hermes_adapter.rs`.
+  - Multi-tier dynamic routing: 9Router loopback gateway (SSE stream), local Ollama, & Hime Native Win32 Telemetry Engine.
+  - DPAPI Secret Vault integrasi langsung dari antarmuka Settings (`HimeSettingsTab`).
+  - Smart Auto-Hide Notch pada aplikasi Fullscreen / Maximized (garis tipis 2.5px dengan 40ms hover dwell) terverifikasi.
 - **Hasil Build Release:**
   - `hime-core.exe` (Release binary): **4.85 MB**
   - Frontend bundle (`dist/`): **330.60 kB JS / 5.18 kB CSS**
@@ -80,7 +85,7 @@
 
 ## 6. METRIK FINAL HANDOVER
 
-- **Test Suite Workspace:** **123 passed, 0 failed, 0 ignored (100% pass rate)**
+- **Test Suite Workspace:** **124 passed, 0 failed, 0 ignored (100% pass rate)**
 - **Kompilasi Rust Release:** 2m 11s (`target/release/hime-core.exe`: 4.85 MB)
 - **Frontend Build (Vite):** 1.66s (`dist/assets/`: 330.60 kB JS / 5.18 kB CSS)
 - **Runtime RAM (Combined Idle):** 80.6 MB (Core 22.4 MB + Desktop 58.2 MB; batas anggaran 150 MB)

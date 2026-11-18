@@ -25,9 +25,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = Arc::new(JobSupervisor::new(Some("HimeSupervisorJob"))?);
     info!("Process Supervisor successfully attached to Windows Job Object");
 
-    // Generate runtime session authentication token
-    let auth_token = generate_token_256().unwrap_or_else(|_| "hime-default-dev-token".to_string());
-    info!("Generated runtime IPC authentication token");
+    // Read runtime session authentication token from environment or generate
+    let auth_token = std::env::var("HIME_AUTH_TOKEN")
+        .unwrap_or_else(|_| generate_token_256().unwrap_or_else(|_| "hime-default-dev-token".to_string()));
+    let token_path = data_dir.join("session.token");
+    let _ = std::fs::write(&token_path, &auth_token);
+    info!(token_file = %token_path.display(), "IPC authentication token active");
 
     // Initialize Core Server
     let server = Arc::new(CoreServer::new(auth_token.clone(), storage.clone()));
@@ -71,11 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ = signal::ctrl_c() => {
             info!("Ctrl+C signal received. Commencing graceful shutdown.");
         }
-        event = event_rx.recv() => {
-            if let Ok(SystemEvent::ShutdownInitiated) = event {
-                info!("IPC shutdown signal received. Commencing graceful shutdown.");
+        _ = async {
+            while let Ok(event) = event_rx.recv().await {
+                if let SystemEvent::ShutdownInitiated = event {
+                    info!("IPC shutdown signal received. Commencing graceful shutdown.");
+                    break;
+                }
             }
-        }
+        } => {}
     }
 
     info!("Gracefully terminating supervised processes...");

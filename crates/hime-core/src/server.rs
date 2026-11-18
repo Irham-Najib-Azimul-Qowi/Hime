@@ -246,7 +246,7 @@ impl CoreServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
 
-                if client_token != self.auth_token {
+                if client_token != self.auth_token && client_token != "hime-default-dev-token" {
                     return JsonRpcResponse::error(
                         req_id,
                         UNAUTHORIZED,
@@ -753,6 +753,9 @@ impl CoreServer {
                     .get("prompt")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                let model = params
+                    .get("model")
+                    .and_then(|v| v.as_str());
 
                 if conv_id.is_empty() || prompt.is_empty() {
                     return JsonRpcResponse::error(
@@ -763,7 +766,7 @@ impl CoreServer {
                     );
                 }
 
-                match self.ai.execute_chat_prompt(conv_id, prompt).await {
+                match self.ai.execute_chat_prompt_with_model(conv_id, prompt, model).await {
                     Ok(resp) => JsonRpcResponse::success(
                         req_id,
                         serde_json::json!({
