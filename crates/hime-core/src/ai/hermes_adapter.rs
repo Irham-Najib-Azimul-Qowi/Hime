@@ -556,7 +556,58 @@ r#"### 🌐 Status Integrasi 9Router AI Gateway
             active_model
         )
     }
-    // 4. File / Document / Storage Inquiries
+    // 4. Specialist: Software Engineer & Developer Workspace (Phase 13)
+    else if lower.contains("spesialis: dev") || lower.contains("kode") || lower.contains("code")
+        || lower.contains("rust") || lower.contains("git") || lower.contains("arsitektur") {
+        r#"### 💻 Asisten Rekayasa Perangkat Lunak (Hermes Developer Specialist)
+**Fokus:** Standar IEEE/ISO, Rust Architecture, Clean Code, & Boundary Defense.
+
+```rust
+// Pola Arsitektur Hime: Zero-Cost Error Handling & Deterministic Result
+pub async fn execute_safe_action<T, E>(action_id: &str) -> Result<T, E> {
+    // 1. Validasi batas izin PEP (L0-L4)
+    // 2. Eksekusi atomik dalam sandbox terisolasi
+    // 3. Catat hash-chain ke audit log SQLite WAL
+}
+```
+
+**Rekomendasi Developer Hime:**
+1. **Pre-commit Secret Scanner:** Gunakan scanner bawaan Hime (`hime-core::developer`) untuk mencegah kebocoran API Key dan private tokens sebelum commit git.
+2. **Deterministic Tool Execution:** Seluruh perintah dieksekusi melalui allowlist (`git`, `cargo`, `pnpm`, `python`), menolak injeksi raw shell.
+3. **Workspace Sandbox:** File proyek terlindungi dari path traversal dan alternate data stream (ADS)."#.to_string()
+    }
+    // 5. Specialist: Academic & Documents (Phase 12)
+    else if lower.contains("spesialis: doc") || lower.contains("akademik") || lower.contains("skripsi")
+        || lower.contains("makalah") || lower.contains("laporan") {
+        r#"### 📄 Asisten Dokumen & Karya Ilmiah (Hermes Academic Specialist)
+**Format Terverifikasi:** Standar Nasional Indonesia (Akademik-ID).
+
+- **Tipografi:** Times New Roman, 12 pt, Spasi 1.5
+- **Tata Letak Halaman (Margin 4-3-3-3):**
+  - Kiri: 4.0 cm (penjilidan)
+  - Atas / Kanan / Bawah: 3.0 cm
+  - Kertas: A4 (21.0 x 29.7 cm)
+- **Struktur Dokumen:** Judul, Halaman Sampul, Daftar Isi Otomatis, Bab Pendahuluan, Tinjauan Pustaka, Metodologi, Pembahasan, dan Kesimpulan.
+
+> [!TIP]
+> Anda dapat membuat draf laporan otomatis dengan mengklik tombol **'Buat Laporan Akademik'** di panel asisten ini."#.to_string()
+    }
+    // 6. Specialist: Data & AI (Phase 14)
+    else if lower.contains("spesialis: data") || lower.contains("dataset") || lower.contains("csv")
+        || lower.contains("analitik") || lower.contains("statistik") {
+        r#"### 📊 Spesialis Data & Studio AI (Hermes Data Engine)
+**Kemampuan:** Zero-Dependency Profiling, Deteksi Anomali, & Leakage-Free ML.
+
+1. **Dataset Profiling:**
+   - Menghitung statistik deskriptif (mean, median, standar deviasi, kuartil).
+   - Mendeteksi *missing values* dan nilai *outlier* pada kolom numerik & kategorikal.
+2. **Integritas Eksperimen (UR-13):**
+   - Mencegah kebocoran data (*data leakage*) antara split train/test.
+   - Pengecekan korelasi fitur dan redundansi kolom dataset.
+3. **Penyimpanan Lokal:**
+   - Analisis kapasitas disk, saran pembersihan berkas temporer, dan deteksi duplikat identik."#.to_string()
+    }
+    // 7. File / Document / Storage Inquiries
     else if lower.contains("file") || lower.contains("dokumen") || lower.contains("baca") || lower.contains("storage") {
         r#"### 📂 Operasi Penyimpanan & Dokumen Hime
 
