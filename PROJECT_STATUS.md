@@ -1,93 +1,65 @@
-# PROJECT STATUS — HIME
-**Diperbarui:** 2026-11-18 09:10 WIB  
+# PROJECT STATUS — HIME ISLAND
+**Diperbarui:** 2026-11-19 10:55 WIB  
 **Versi Target:** `v1.0.0-rc.1` (Release Candidate)  
+**Dokumen Induk:** `hime-island-update-pack/` (00 → 18), `02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md`, `18-ROADMAP-UPDATE.md`  
 
 ---
 
 ## 1. POSISI SAAT INI
 
-- **Status Master Milestone:** **`READY FOR OWNER ACCEPTANCE (v1.0 RC)`**
-- **Seluruh 15 Fase Master Plan:** **100% SELESAI & TERVERIFIKASI**
-- **Automated Test Suite:** **124 passed, 0 failed, 0 ignored (100% pass rate)**
-- **Live AI Engine (The Brain):** **AKTIF & LIVE TERHUBUNG**
-  - Live AI Orchestration loop via `crates/hime-core/src/ai/hermes_adapter.rs`.
-  - Multi-tier dynamic routing: 9Router loopback gateway (SSE stream), local Ollama, & Hime Native Win32 Telemetry Engine.
-  - DPAPI Secret Vault integrasi langsung dari antarmuka Settings (`HimeSettingsTab`).
-  - Smart Auto-Hide Notch pada aplikasi Fullscreen / Maximized (garis tipis 2.5px dengan 40ms hover dwell) terverifikasi.
-- **Hasil Build Release:**
-  - `hime-core.exe` (Release binary): **4.85 MB**
-  - Frontend bundle (`dist/`): **330.60 kB JS / 5.18 kB CSS**
-  - Idle RAM Footprint: **22.4 MB Core / 58.2 MB Desktop** (Total: 80.6 MB vs limit 150 MB)
-- **Status Git:** Branch `phase/15-hardening-release-linux`, local commit only, **ZERO PUSH**.
+- **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
+- **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
+- **Tahap Berjalan:** **STAGE H0 (Studi & Baseline Bloom) & STAGE H1 (Monorepo In-Place Migration)**
+- **Kondisi Komponen Terverifikasi:**
+  - **Hime Core (`crates/`):** 124 tests pass (100% pass rate), DPAPI vault, streaming, policy L0–L4.
+  - **Bloom Shell (`Hime-Bloom`):** Berhasil dikompilasi ke release, DirectComposition transparency & workarea broadcast hang telah diperbaiki, berjalan stabil di Windows desktop.
+  - **Penyebab Kegagalan Hotkey:** Win32 Error 1409 pada `Ctrl+Alt+H` terbukti bentrok dengan utilitas OEM laptop; daemon eksternal terbukti tidak memproses loop window message tanpa integrasi shell. Keybinds akan diintegrasikan langsung ke dalam shell `island/` sesuai spesifikasi `13-KEYBINDS-AND-SETTINGS.md`.
+- **Target Segera:**
+  1. Eksekusi migrasi di tempat (`02b §4`): Karantina repo lama ke `_old/`, buat struktur direktori target `Hime/`.
+  2. Impor Bloom ke `island/` (`X:\folder_ai\Hime\island`), verifikasi build dan test hijau di `island/`.
+  3. Panen crate Core ke `core/crates/`, satukan pintu perintah tunggal `scripts/hime.ps1`.
+  4. Lanjut ke **Stage R0 (Rebrand + Fondasi Desain + Fondasi Modul)**.
 
 ---
 
-## 2. STATUS FASE MASTER PLAN
+## 2. ROADMAP RESMI (18-ROADMAP-UPDATE.MD)
 
-| Fase | Nama Fase | Status | Laporan | Catatan Kunci |
-|:---:|:---|:---:|:---|:---|
-| **Phase 00** | Project Governance | **`DONE`** *(ACCEPTED)* | `project-management/phases/PHASE-00-ACCEPTANCE.md` | Aturan agent `AGENTS.md`, .gitignore, repo init. |
-| **Phase 01** | Discovery & Environment Audit | **`DONE`** *(ACCEPTED)* | `project-management/PHASE-01-ACCEPTANCE.md` | Baseline hardware terukur, security threat model. |
-| **Phase 02** | Nusa Reverse Engineering | **`DONE`** *(ACCEPTED)* | `project-management/PHASE-02-ACCEPTANCE.md` | 8 laporan RE Nusa, UX limitations, clean-room. |
-| **Phase 03** | Hermes & 9Router Integration Audit | **`DONE`** *(ACCEPTED)* | `project-management/PHASE-03-ACCEPTANCE.md` | 19 laporan RE, PRD (33 FR / 18 NFR), 16 constraints, 12 ADR. |
-| **Phase 04** | Engineering Planning | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-04-COMPLETION-REPORT.md` | 8 spesifikasi teknis implementasi di `system-architecture/implementation/`. |
-| **Phase 05** | Development Readiness | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-05-COMPLETION-REPORT.md` | Skrip kanonikal `check-env.ps1`, `build.ps1`, `test.ps1`, `dev.ps1`. |
-| **Phase 06** | Engineering Foundation | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-06-COMPLETION-REPORT.md` | Multi-crate Rust workspace, Tauri shell, IPC framing 12-byte, DPAPI, 33 tests. |
-| **Phase 07** | Hime Desktop Experience | **`DONE`** *(QUALIFIED ACCEPTANCE)* | `project-management/phases/PHASE-07-COMPLETION-REPORT.md` | React 18 UI, Dynamic Island 5 state, Omnibox, Activity Stream, 37 tests. |
-| **Phase 08** | AI Runtime Integration | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-08-COMPLETION-REPORT.md` | Hermes Adapter, 9Router Adapter, DPAPI Vault Provider (:20129), SEC-09 CoT Redaction, 47 tests. |
-| **Phase 09** | Hime Intelligence Core | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-09-COMPLETION-REPORT.md` | Policy L0–L4, Tool Gateway, Task Engine, Event Buffer, Memory Token Budget, Island Translation, 76 tests. |
-| **Phase 10** | Storage Intelligence | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-10-COMPLETION-REPORT.md` | Indexer, Storage Analyzer, Duplicates/Versions, Smart Organizer, Download Intelligence, Safe Ops (Staging, Hime Recycle, 1-Click Restore), 89 tests. |
-| **Phase 11** | Hime Mobile & Device Layer | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-11-COMPLETION-REPORT.md` | Android Kotlin Compose (`apps/mobile/`), mTLS Local CA, QR anti-replay pairing, remote approvals (UR-02/04), posture audit (UR-12), chunked SHA-256 transfer, 97 tests. |
-| **Phase 12** | Productivity & Documents | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-12-COMPLETION-REPORT.md` | Kanban accountability, pengingat HP/desktop, DOCX/HTML report generation, Academic ID template (TNR 12, margin 4-3-3-3), PDF merge, Artcraft discovery, 102 tests. |
-| **Phase 13** | Browser & Developer Workspace | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-13-COMPLETION-REPORT.md` | Browser SSRF defense, anti-prompt injection wrapping, quarantined downloads, GitHub/Drive adapters, allowlisted runner, pre-commit secret scanner, SE templates, 111 tests. |
-| **Phase 14** | Specialist Agents & Skills | **`READY FOR OWNER ACCEPTANCE`** | `project-management/phases/PHASE-14-COMPLETION-REPORT.md` | Specialist registry (6 domains), Data/AI engine (UR-13, CSV profiling, leakage-free ML), opt-in proactive engine, evaluation harness, 118 tests. |
-| **Phase 15** | Hardening, Release & Linux | **`READY FOR OWNER ACCEPTANCE (v1.0 RC)`** | `project-management/phases/PHASE-15-COMPLETION-REPORT.md` | Packaging v1.0.0, per-user installer, XDG & Unix sockets PAL, release binary 4.85 MB, benchmarks, manuals, 123 tests. |
-
----
-
-## 3. BLOCKER AKTIF
-
-| ID | Deskripsi Masalah | Status | Bukti Faktual | Dampak & Penanganan |
-|:---:|:---|:---:|:---|:---|
-| **IB-01** | Penyimpanan Kredensial Plaintext pada 9Router SQLite (`data.sqlite`) | **`RESOLVED`** | `test_ai_credential_storage_and_dpapi_vault` pass; Provider Adapter (:20129) | Kunci disimpan eksklusif di Hime DPAPI Vault; 9Router DB menerima 0% plaintext keys. |
-| **IB-02** | Bypass Autentikasi Localhost pada 9Router (`dashboardGuard.js:161-165`) | **`CONTAINED`** | `src/dashboardGuard.js:161-165`; loopback strict binding `127.0.0.1` | Kredensial sensitif komersial diblokir dari koneksi publik 9Router; menunggu keputusan Owner di OD-01. |
-
----
-
-## 4. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER)
-
-| ID | Deskripsi Kewajiban | Target Penutupan | Status Terkini |
+| Tahap | Deskripsi | Status | Rujukan / Target |
 |:---:|:---|:---:|:---|
-| **G1** | Tetapkan baseline Git lokal pada branch terstruktur | Fase 08–15 | **CLOSED**: Branch `phase/08` s/d `phase/15` terstruktur dengan commit konvensional atomik. |
-| **G2** | Verifikasi GUI interaktif penuh (pointer, drag, DPI) | Fase 15 | **CLOSED WITH QUALIFICATION**: Peluncuran native HWND, IPC roundtrip, keyboard navigasi, dan DPI terverifikasi. Interaksi klik mouse fisik memerlukan sesi desktop pengguna aktif. |
-| **G3** | IB-01 RESOLVED tuntas | Fase 08 | **CLOSED (RESOLVED)** via Provider Adapter :20129 + DPAPI Vault. |
-| **G4** | IB-02 RESOLVED atau tetap diblokir | Fase 08–15 | **CLOSED (CONTAINED)** via loopback-only 127.0.0.1; keputusan akhir di OD-01. |
-| **G5** | Uji Win32 Job Object (breakaway, fail-closed) | Fase 08 | **CLOSED**: Terverifikasi pada `hime-pal::supervisor::JobSupervisor`. |
-| **G6** | Idempotency & Crash Recovery pada Task Engine | Fase 09 | **CLOSED**: Interrupted tasks dipulihkan otomatis saat Core restart. |
-| **G7** | Owner Gate #6 Uji Fisik Perangkat Android | Gate #6 | **CLOSED (RUNBOOK READY)**: Runbook siap di `docs/mobile/REAL-DEVICE-TEST-GUIDE.md`. |
-| **G8** | Traceability Functional Requirement -> Automated Tests | Fase 09–15 | **CLOSED**: 123/123 test passing 100%. |
-| **G9** | Kebijakan Trash / Pemulihan Reversibel (Hime Recycle) | Fase 10 | **CLOSED**: `.hime/recycle/` dengan 1-Click Restore terverifikasi. |
-| **G10** | Dukungan Linux Cross-Platform (PAL, Sockets, Vault) | Fase 15 | **CLOSED**: XDG paths, Unix Domain Sockets 0600, SoftwareEncryptedVault di `hime-pal`/`hime-ipc`/`hime-security`. |
-| **G11** | Lisensi & Audit Nol Aset Nusa | Fase 15 | **CLOSED**: 100% clean-room reimplementation (`docs/legal/THIRD-PARTY.md`). |
-| **G12** | Benchmark Performa Hardware Target | Fase 15 | **CLOSED**: Terukur pada Intel i5 di `docs/benchmarks/PERFORMANCE-REPORT.md`. |
-| **G13** | Audit Trail Tak-Dapat-Diubah & Hash-Chain | Fase 10 | **CLOSED**: SHA-256 hash-chained events di `hime-storage`. |
+| **H0** | Studi & Impor Bloom (ke `island/`) | **`IN PROGRESS`** | Baseline resource, komponen notch, spring, font |
+| **H1** | Monorepo + Panen (migrasi di tempat) | **`IN PROGRESS`** | `02b §4`: satu folder `Hime`, karantina `_old/` |
+| **R0** | Rebrand + Fondasi Desain + Fondasi Modul | `PENDING` | `03`, `04`, `14`: check-brand, tokens, hime-modsdk, `hime.ps1` |
+| **H2** | Bridge + Irisan Vertikal Island | `PENDING` | Mata mini di pill, bubble approval, Presentation NCM dasar |
+| **U1** | Notch Compose Manager + Mata + Animasi + Pintasan + Settings baru | `PENDING` | `05`, `06`, `13`: 22 ekspresi, NCM, keybinds terintegrasi, Settings baru |
+| **08R** | AI Runtime + Chat (07) + Persona (17) | `PENDING` | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
+| **U2** | Lirik (12) | `PENDING` | `12`: LRCLIB + local cache, sinkron waktu |
+| **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | `PENDING` | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
+| **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | `PENDING` | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat |
+| **10R** | Storage Intelligence + Hime Proaktif (11) | `PENDING` | `11`: Interaction Engine, anggaran perhatian, katalog 1–22 |
+| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | `PENDING` | `16`: Android Kotlin Compose, mTLS, overlay penegakan |
+| **12R** | Dokumen & Produktivitas Lanjutan | `PENDING` | Template akademik, DOCX/HTML, headless worker |
+| **13R** | Browser, Integrasi, Dev Workspace | `PENDING` | SSRF defense, Git adapter, dev runner allowlisted |
+| **U4** | Optimasi Resource (Pass Khusus) | `PENDING` | `15`: Idle ≤ 350 MB, WebView2 low-memory/suspend, soak test |
+| **15R** | Hardening & Rilis Kandidat v1.0 | `PENDING` | RC v1.0, audit GPL, installer Hime Island |
 
 ---
 
-## 5. KEPUTUSAN OWNER MENUNGGU (OWNER DECISION GATES)
+## 3. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER BARU)
 
-1. **OD-01:** Kebijakan penanganan upstream bug `dashboardGuard.js:161-165` (IB-02).
-2. **OD-02:** Penyediaan Commercial Cloud Model API Keys untuk pengujian langsung Hermes v0.8.2.
-3. **Owner Gate #3:** Eksekusi `git push` ke repositori remote untuk publikasi resmi v1.0.0-rc.1.
-4. **Owner Gate #7:** Penandatanganan kode Authenticode Windows pada installer.
+| ID | Deskripsi Kewajiban | Target Penutupan | Status |
+|:---:|:---|:---:|:---|
+| **G18** | Rebrand total + gerbang `scripts/check-brand.ps1` | Stage R0 | PENDING |
+| **G19** | Design tokens + audit kontras + registry string + lint panjang | Stage R0 | PENDING |
+| **G20** | Registry modul (shell + Core) + scaffold + saklar nol-biaya terbukti | Stage R0 / U1 | PENDING |
+| **G21** | Baseline resource Bloom + anggaran Hime + skrip ukur | Stage H0 / Tiap Tahap | PENDING |
+| **G22** | Gerbang higienitas kode (`scripts/check-hygiene.ps1`) | Stage R0 | PENDING |
+| **G23** | Persona Hime di Hermes + uji emas identitas | Stage 08R | PENDING |
+| **G24** | Verifikasi visual tiap milestone (VC-R0 s/d VC-U10) | Semua Milestone | PENDING |
 
 ---
 
-## 6. METRIK FINAL HANDOVER
+## 4. BUKTI AUDIT TERKINI
 
-- **Test Suite Workspace:** **124 passed, 0 failed, 0 ignored (100% pass rate)**
-- **Kompilasi Rust Release:** 2m 11s (`target/release/hime-core.exe`: 4.85 MB)
-- **Frontend Build (Vite):** 1.66s (`dist/assets/`: 330.60 kB JS / 5.18 kB CSS)
-- **Runtime RAM (Combined Idle):** 80.6 MB (Core 22.4 MB + Desktop 58.2 MB; batas anggaran 150 MB)
-- **Cold Startup Latency:** Core 182 ms, Dynamic Island HUD 38 ms, Omnibox 24 ms
-- **Commit Baseline:** Local branch `phase/15-hardening-release-linux`, zero push.
+- **Crate Tests Core:** 124 passed, 0 failed.
+- **Bloom Release Binary:** `X:\folder_ai\Hime-Bloom\src-tauri\target\release\bloom.exe` (34.9 MB) berhasil diverifikasi.
+- **Status Monorepo:** Siap dieksekusi sesuai `02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md`.

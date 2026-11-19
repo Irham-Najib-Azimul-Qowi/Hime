@@ -140,3 +140,11 @@ RE/9ROUTER/00-source-materials/9router/
 RE/Nusa/00-source-materials/*.exe
 RE/Nusa/00-source-materials/*.zip
 RE/Nusa/00-source-materials/extracted/
+
+# -----------------------------------------------------------------------------
+# 11. Hime Island Monorepo Quarantine and Local Data
+# -----------------------------------------------------------------------------
+_old/
+.dev-data/
+runtimes/hermes/
+runtimes/9router/

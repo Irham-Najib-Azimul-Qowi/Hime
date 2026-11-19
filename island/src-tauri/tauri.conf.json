@@ -1,0 +1,130 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "hime",
+	"version": "3.10.2",
+	"identifier": "ai.hime.desktop",
+	"build": {
+		"beforeBuildCommand": "bun run build",
+		"frontendDist": "../dist"
+	},
+	"app": {
+		"windows": [
+			{
+				"label": "main",
+				"title": "Hime",
+				"width": 1920,
+				"height": 420,
+				"x": 0,
+				"y": 0,
+				"decorations": false,
+				"transparent": true,
+				"resizable": false,
+				"maximizable": false,
+				"minimizable": false,
+				"closable": false,
+				"alwaysOnTop": true,
+				"visibleOnAllWorkspaces": true,
+				"focus": false,
+				"skipTaskbar": true,
+				"shadow": false,
+				"visible": false,
+				"dragDropEnabled": true
+			},
+			{
+				"label": "settings",
+				"create": false,
+				"title": "Settings",
+				"url": "settings.html",
+				"width": 740,
+				"height": 560,
+				"decorations": false,
+				"transparent": true,
+				"resizable": true,
+				"maximizable": false,
+				"minimizable": false,
+				"closable": false,
+				"alwaysOnTop": false,
+				"visibleOnAllWorkspaces": false,
+				"focus": true,
+				"skipTaskbar": false,
+				"shadow": true,
+				"visible": false,
+				"center": true
+			},
+			{
+				"label": "overlay",
+				"title": "Overlay",
+				"url": "overlay.html",
+				"width": 1920,
+				"height": 1080,
+				"x": 0,
+				"y": 0,
+				"decorations": false,
+				"transparent": true,
+				"resizable": false,
+				"maximizable": false,
+				"minimizable": false,
+				"closable": false,
+				"alwaysOnTop": true,
+				"visibleOnAllWorkspaces": true,
+				"focus": false,
+				"skipTaskbar": true,
+				"shadow": false,
+				"visible": false
+			},
+			{
+				"label": "dock",
+				"title": "Bloom Dock",
+				"url": "dock.html",
+				"width": 1920,
+				"height": 600,
+				"x": 0,
+				"y": 480,
+				"decorations": false,
+				"transparent": true,
+				"resizable": false,
+				"maximizable": false,
+				"minimizable": false,
+				"closable": false,
+				"alwaysOnTop": true,
+				"visibleOnAllWorkspaces": true,
+				"focus": false,
+				"skipTaskbar": true,
+				"shadow": false,
+				"visible": false
+			}
+		],
+		"security": {
+			"csp": null
+		}
+	},
+	"bundle": {
+		"active": true,
+		"createUpdaterArtifacts": true,
+		"targets": "all",
+		"publisher": "Sehajveer Singh",
+		"copyright": "Copyright © 2026 Sehajveer Singh",
+		"category": "Utility",
+		"shortDescription": "A notch and dock for Windows",
+		"longDescription": "Bloom replaces the Windows taskbar with a dock and adds a notch for media, quick controls and status.",
+		"windows": {
+			"webviewInstallMode": {
+				"type": "embedBootstrapper"
+			}
+		},
+		"icon": [
+			"icons/32x32.png",
+			"icons/128x128.png",
+			"icons/128x128@2x.png",
+			"icons/icon.icns",
+			"icons/icon.ico"
+		]
+	},
+	"plugins": {
+		"updater": {
+			"active": false,
+			"endpoints": [],
+			"pubkey": ""
+		}
+	}
+}

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<link rel="icon" type="image/svg+xml" href="/bloom.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Bloom</title>
+		<script>
+			window.addEventListener("error", (e) => {
+				const msg = "FRONTEND_ERROR: " + e.message + " at " + e.filename + ":" + e.lineno;
+				console.error(msg);
+				try {
+					if (window.__TAURI_INTERNALS__) {
+						window.__TAURI_INTERNALS__.invoke("log_frontend_event", { level: "error", message: msg });
+					}
+				} catch (_) {}
+			});
+			window.addEventListener("unhandledrejection", (e) => {
+				const msg = "FRONTEND_REJECTION: " + e.reason;
+				console.error(msg);
+				try {
+					if (window.__TAURI_INTERNALS__) {
+						window.__TAURI_INTERNALS__.invoke("log_frontend_event", { level: "error", message: msg });
+					}
+				} catch (_) {}
+			});
+			try {
+				if (window.__TAURI_INTERNALS__) {
+					window.__TAURI_INTERNALS__.invoke("log_frontend_event", { level: "info", message: "index.html inline script executed" });
+				}
+			} catch (_) {}
+		</script>
+	</head>
+
+	<body>
+		<div id="boot-notch" style="position:fixed;top:0;left:50%;transform:translateX(-50%);width:220px;height:34px;background:#000000;border-radius:0 0 18px 18px;color:#fff;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:12px;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,0.5);pointer-events:auto;z-index:999999;">
+			<span style="display:inline-block;width:8px;height:8px;background:#34C759;border-radius:50%;margin-right:8px;"></span>
+			Hime Dynamic Island
+		</div>
+		<div id="root"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
+</html>
