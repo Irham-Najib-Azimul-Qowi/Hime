@@ -155,7 +155,7 @@ export function getAppCategory(name: string, path: string): AppCategory {
 		n.includes("settings") ||
 		n.includes("pengaturan") ||
 		n.includes("control panel") ||
-		n.includes("bloom") ||
+		n.includes("hime") ||
 		p.includes("systemsettings.exe") ||
 		p.includes("control.exe")
 	) {

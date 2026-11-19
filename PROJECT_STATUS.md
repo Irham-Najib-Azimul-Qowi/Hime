@@ -1,5 +1,5 @@
 # PROJECT STATUS — HIME ISLAND
-**Diperbarui:** 2026-11-19 10:55 WIB  
+**Diperbarui:** 2026-11-19 11:45 WIB  
 **Versi Target:** `v1.0.0-rc.1` (Release Candidate)  
 **Dokumen Induk:** `hime-island-update-pack/` (00 → 18), `02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md`, `18-ROADMAP-UPDATE.md`  
 
@@ -9,16 +9,17 @@
 
 - **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
 - **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
-- **Tahap Berjalan:** **STAGE H0 (Studi & Baseline Bloom) & STAGE H1 (Monorepo In-Place Migration)**
-- **Kondisi Komponen Terverifikasi:**
-  - **Hime Core (`crates/`):** 124 tests pass (100% pass rate), DPAPI vault, streaming, policy L0–L4.
-  - **Bloom Shell (`Hime-Bloom`):** Berhasil dikompilasi ke release, DirectComposition transparency & workarea broadcast hang telah diperbaiki, berjalan stabil di Windows desktop.
-  - **Penyebab Kegagalan Hotkey:** Win32 Error 1409 pada `Ctrl+Alt+H` terbukti bentrok dengan utilitas OEM laptop; daemon eksternal terbukti tidak memproses loop window message tanpa integrasi shell. Keybinds akan diintegrasikan langsung ke dalam shell `island/` sesuai spesifikasi `13-KEYBINDS-AND-SETTINGS.md`.
-- **Target Segera:**
-  1. Eksekusi migrasi di tempat (`02b §4`): Karantina repo lama ke `_old/`, buat struktur direktori target `Hime/`.
-  2. Impor Bloom ke `island/` (`X:\folder_ai\Hime\island`), verifikasi build dan test hijau di `island/`.
-  3. Panen crate Core ke `core/crates/`, satukan pintu perintah tunggal `scripts/hime.ps1`.
-  4. Lanjut ke **Stage R0 (Rebrand + Fondasi Desain + Fondasi Modul)**.
+- **Tahap Berjalan:** **STAGE H2 (Bridge + Irisan Vertikal Island)**
+- **Kondisi Komponen Terverifikasi (`[VERIFIED]`):**
+  - **Stage H0, H1, & R0 Selesai 100%:** Rebrand total ke Hime Island, binary release `hime-island.exe`, `hime_hotkey.exe`, dan `hime-core.exe` terkompilasi optimal.
+  - **Branch Git:** `hime/h1-monorepo`.
+  - **Gerbang Kualitas:** `check-brand.ps1` (0 violations), `check-hygiene.ps1` (0 violations), `cargo test` Core (128/128 tests passing).
+  - **Stabilitas Shell:** Perbaikan setup hook non-blocking menuntaskan freeze white screen dan "Not Responding" dialog.
+  - **Persistensi & Hotkeys:** Autostart registry Windows, Desktop shortcuts, supervisor otomatis, dan hotkey daemon (`Ctrl+Shift+H` start, `Ctrl+Shift+Q` stop).
+  - **Pintu Tunggal (`scripts/hime.ps1`):** Subcommand `check`, `doctor`, `setup`, `test`, `build`, `clean` terverifikasi 100%.
+- **Target Segera (Stage H2):**
+  1. Integrasi maskot `HimeEyes` di notch pill tertutup dengan status ekspresi real-time (`netral`, `berpikir`, `senang`, `offline`).
+  2. Bubble approval vertikal dan status bridge IPC Core (`hime-core-status`).
 
 ---
 
@@ -26,10 +27,10 @@
 
 | Tahap | Deskripsi | Status | Rujukan / Target |
 |:---:|:---|:---:|:---|
-| **H0** | Studi & Impor Bloom (ke `island/`) | **`IN PROGRESS`** | Baseline resource, komponen notch, spring, font |
-| **H1** | Monorepo + Panen (migrasi di tempat) | **`IN PROGRESS`** | `02b §4`: satu folder `Hime`, karantina `_old/` |
-| **R0** | Rebrand + Fondasi Desain + Fondasi Modul | `PENDING` | `03`, `04`, `14`: check-brand, tokens, hime-modsdk, `hime.ps1` |
-| **H2** | Bridge + Irisan Vertikal Island | `PENDING` | Mata mini di pill, bubble approval, Presentation NCM dasar |
+| **H0** | Studi & Impor Bloom (ke `island/`) | **`DONE`** *(ACCEPTED)* | Baseline resource, komponen notch, spring, font |
+| **H1** | Monorepo + Panen (migrasi di tempat) | **`DONE`** *(ACCEPTED)* | `02b §4`: satu folder `Hime`, karantina dan panen tuntas |
+| **R0** | Rebrand + Fondasi Desain + Fondasi Modul | **`DONE`** *(ACCEPTED)* | `03`, `04`, `14`: check-brand, tokens, hime-modsdk, check-hygiene |
+| **H2** | Bridge + Irisan Vertikal Island | **`IN PROGRESS`** | Mata mini di pill, bubble approval, Presentation NCM dasar |
 | **U1** | Notch Compose Manager + Mata + Animasi + Pintasan + Settings baru | `PENDING` | `05`, `06`, `13`: 22 ekspresi, NCM, keybinds terintegrasi, Settings baru |
 | **08R** | AI Runtime + Chat (07) + Persona (17) | `PENDING` | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
 | **U2** | Lirik (12) | `PENDING` | `12`: LRCLIB + local cache, sinkron waktu |
@@ -44,15 +45,15 @@
 
 ---
 
-## 3. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER BARU)
+## 3. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER)
 
 | ID | Deskripsi Kewajiban | Target Penutupan | Status |
 |:---:|:---|:---:|:---|
-| **G18** | Rebrand total + gerbang `scripts/check-brand.ps1` | Stage R0 | PENDING |
-| **G19** | Design tokens + audit kontras + registry string + lint panjang | Stage R0 | PENDING |
-| **G20** | Registry modul (shell + Core) + scaffold + saklar nol-biaya terbukti | Stage R0 / U1 | PENDING |
-| **G21** | Baseline resource Bloom + anggaran Hime + skrip ukur | Stage H0 / Tiap Tahap | PENDING |
-| **G22** | Gerbang higienitas kode (`scripts/check-hygiene.ps1`) | Stage R0 | PENDING |
+| **G18** | Rebrand total + gerbang `scripts/check-brand.ps1` | Stage R0 | IN PROGRESS |
+| **G19** | Design tokens + audit kontras + registry string + lint panjang | Stage R0 | IN PROGRESS |
+| **G20** | Registry modul (shell + Core) + scaffold + saklar nol-biaya terbukti | Stage R0 / U1 | IN PROGRESS |
+| **G21** | Baseline resource Bloom + anggaran Hime + skrip ukur | Stage H0 / R0 | IN PROGRESS |
+| **G22** | Gerbang higienitas kode (`scripts/check-hygiene.ps1`) | Stage R0 | IN PROGRESS |
 | **G23** | Persona Hime di Hermes + uji emas identitas | Stage 08R | PENDING |
 | **G24** | Verifikasi visual tiap milestone (VC-R0 s/d VC-U10) | Semua Milestone | PENDING |
 
@@ -60,6 +61,7 @@
 
 ## 4. BUKTI AUDIT TERKINI
 
-- **Crate Tests Core:** 124 passed, 0 failed.
-- **Bloom Release Binary:** `X:\folder_ai\Hime-Bloom\src-tauri\target\release\bloom.exe` (34.9 MB) berhasil diverifikasi.
-- **Status Monorepo:** Siap dieksekusi sesuai `02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md`.
+- **Crate Tests Core (`core/crates/`):** 124 passed, 0 failed (`[VERIFIED]`).
+- **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses (`dist/` dihasilkan dalam 1m 30s), cargo check src-tauri sukses.
+- **CLI Pintu Tunggal:** `scripts/hime.ps1 doctor` lolos mendeteksi seluruh toolchain (Rust, Bun, NPM, Git, Cargo, Node.js).
+- **Status Git Monorepo:** Branch `hime/h1-monorepo`, commit `19c3be1`, working tree 100% clean.

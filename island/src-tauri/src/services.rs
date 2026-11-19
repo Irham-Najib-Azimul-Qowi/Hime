@@ -4146,7 +4146,7 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
             }
 
             // Filter out system containers and background stuff
-            if title == "Program Manager" || title == "Bloom" || title == "Bloom Dock" {
+            if title == "Program Manager" || title == "Hime" || title == "Hime Island" || title == "Hime Dock" || title == "Bloom" || title == "Bloom Dock" {
                 return true.into();
             }
 
@@ -4185,8 +4185,8 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
                         || window_class == "ExploreWClass"
                         || (window_class == "#32770" && dialog_has_tab_control(hwnd));
 
-                    // Filter out Bloom itself (except the Settings window) and some common background processes
-                    if (lowercase_path.contains("bloom.exe") && title != "Settings")
+                    // Filter out Hime Island itself (except the Settings window) and some common background processes
+                    if ((lowercase_path.contains("hime-island.exe") || lowercase_path.contains("hime.exe") || lowercase_path.contains("bloom.exe")) && title != "Settings")
                         || lowercase_path.contains("conhost.exe")
                         || (lowercase_path.contains("explorer.exe") && !is_explorer_window)
                         || lowercase_path.contains("shellexperiencehost.exe")
@@ -4723,7 +4723,7 @@ fn recover_from_webview_failure(handle: &AppHandle) {
             crate::diagnostics::record("webview_recovery", "startup failure; exiting safely");
             crate::commands::restore_taskbar_and_exit(&handle);
         } else {
-            crate::diagnostics::record("webview_recovery", "restarting Bloom");
+            crate::diagnostics::record("webview_recovery", "restarting Hime");
             crate::commands::restart_bloom(handle).await;
         }
     });

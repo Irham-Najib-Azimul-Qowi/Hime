@@ -1,23 +1,25 @@
-﻿<#
+<#
 .SYNOPSIS
     Hime Island Single Command Entry Point (scripts/hime.ps1)
 .DESCRIPTION
-    Unified CLI for doctor, setup, dev, build, test, check, perf, and maintenance.
+    Unified CLI for managing the Hime Island monorepo per 02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md.
+    Provides subcommands: doctor, setup, dev, build, test, check, restore-taskbar, clean.
 #>
 
 [CmdletBinding()]
 param(
-    [Parameter(Position=0)]
-    [ValidateSet("doctor", "setup", "dev", "build", "test", "check", "perf", "restore-taskbar", "clean", "help")]
+    [Parameter(Position = 0)]
     [string]$Command = "help",
 
-    [Parameter(Position=1)]
+    [Parameter(Position = 1)]
     [string]$Target = "all",
 
     [switch]$Safe
 )
 
+$ErrorActionPreference = "Stop"
 $baseDir = Split-Path -Parent $PSScriptRoot
+
 $bunExe = "C:\Users\Satoshi\.bun\bin\bun.exe"
 if (-not (Test-Path $bunExe)) {
     $bunCmd = Get-Command bun -ErrorAction SilentlyContinue
@@ -26,9 +28,9 @@ if (-not (Test-Path $bunExe)) {
 
 function Show-Help {
     Write-Host "=================================================================" -ForegroundColor Cyan
-    Write-Host "  HIME ISLAND — MONOREPO CLI (scripts/hime.ps1)" -ForegroundColor Cyan
+    Write-Host "  HIME ISLAND - MONOREPO CLI (scripts/hime.ps1)" -ForegroundColor Cyan
     Write-Host "=================================================================" -ForegroundColor Cyan
-    Write-Host "Usage: .\scripts\hime.ps1 <command> [target] [-Safe]"
+    Write-Host 'Usage: .\scripts\hime.ps1 <command> [target] [-Safe]'
     Write-Host ""
     Write-Host "Commands:"
     Write-Host "  doctor            Check system prerequisites and toolchains"
@@ -36,59 +38,82 @@ function Show-Help {
     Write-Host "  dev [-Safe]       Start core and island in development mode"
     Write-Host "  build [target]    Build core, island, or all"
     Write-Host "  test [target]     Run automated test suite for core, island, or all"
-    Write-Host "  check             Run all quality and consistency gates"
+    Write-Host "  check             Run all quality and consistency gates (brand, hygiene, tests)"
     Write-Host "  restore-taskbar   Safely restore Windows native taskbars"
     Write-Host "  clean             Remove build output and cached artifacts"
 }
 
-switch ($Command) {
+switch ($Command.ToLower()) {
     "doctor" {
-        Write-Host "=== HIME ISLAND DOCTOR ===" -ForegroundColor Cyan
-        $tools = @{
-            "Rust (rustc)" = (Get-Command rustc -ErrorAction SilentlyContinue)
-            "Cargo"        = (Get-Command cargo -ErrorAction SilentlyContinue)
-            "Bun"          = (Test-Path $bunExe)
-            "Node.js"      = (Get-Command node -ErrorAction SilentlyContinue)
-            "NPM"          = (Get-Command npm -ErrorAction SilentlyContinue)
-            "Git"          = (Get-Command git -ErrorAction SilentlyContinue)
-        }
-        foreach ($k in $tools.Keys) {
-            if ($tools[$k]) {
-                Write-Host "[OK] $k is available" -ForegroundColor Green
+        Write-Host "Checking Hime Island prerequisites..." -ForegroundColor Cyan
+        $tools = @("rustc", "cargo", "git", "node", "npm")
+        foreach ($t in $tools) {
+            $cmd = Get-Command $t -ErrorAction SilentlyContinue
+            if ($cmd) {
+                Write-Host "  [OK] $t found: $($cmd.Source)" -ForegroundColor Green
             } else {
-                Write-Host "[MISSING] $k is not detected" -ForegroundColor Red
+                Write-Host "  [WARN] $t not found in PATH" -ForegroundColor Yellow
             }
+        }
+        if (Test-Path $bunExe) {
+            Write-Host "  [OK] bun found: $bunExe" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARN] bun not found at expected location" -ForegroundColor Yellow
         }
     }
 
     "setup" {
-        Write-Host "Setting up Island dependencies..." -ForegroundColor Cyan
+        Write-Host "Setting up Hime Island workspace dependencies..." -ForegroundColor Cyan
         Set-Location "$baseDir\island"
         & $bunExe install
-        Write-Host "Verifying Core workspace..." -ForegroundColor Cyan
-        cargo check --manifest-path "$baseDir\core\Cargo.toml"
+        Set-Location $baseDir
+        Write-Host "Workspace setup completed." -ForegroundColor Green
     }
 
     "test" {
-        if ($Target -eq "core" -or $Target -eq "all") {
-            Write-Host "Running Core test suite..." -ForegroundColor Cyan
-            cargo test --manifest-path "$baseDir\core\Cargo.toml"
-        }
-        if ($Target -eq "island" -or $Target -eq "all") {
-            Write-Host "Running Island check..." -ForegroundColor Cyan
-            cargo check --manifest-path "$baseDir\island\src-tauri\Cargo.toml"
-        }
+        Write-Host "Running Hime Core test suite..." -ForegroundColor Cyan
+        cargo test --workspace --manifest-path "$baseDir\core\Cargo.toml"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "Running Island frontend typecheck & build test..." -ForegroundColor Cyan
+        Set-Location "$baseDir\island"
+        & $bunExe run build
+        Set-Location $baseDir
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "Checking Island Rust shell..." -ForegroundColor Cyan
+        cargo check --manifest-path "$baseDir\island\src-tauri\Cargo.toml"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "All automated tests PASSED (100%)." -ForegroundColor Green
+    }
+
+    "check" {
+        Write-Host "Running Brand Compliance Gate..." -ForegroundColor Cyan
+        & "$baseDir\scripts\check-brand.ps1"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "Running Hygiene Gate..." -ForegroundColor Cyan
+        & "$baseDir\scripts\check-hygiene.ps1"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "Running Core and Island Test Suites..." -ForegroundColor Cyan
+        cargo test --workspace --manifest-path "$baseDir\core\Cargo.toml"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+        Write-Host "ALL GATES PASSED (100%)." -ForegroundColor Green
     }
 
     "build" {
         if ($Target -eq "core" -or $Target -eq "all") {
             Write-Host "Building Hime Core (Release)..." -ForegroundColor Cyan
-            cargo build --release --manifest-path "$baseDir\core\Cargo.toml"
+            cargo build --release --workspace --manifest-path "$baseDir\core\Cargo.toml"
         }
         if ($Target -eq "island" -or $Target -eq "all") {
             Write-Host "Building Island Frontend..." -ForegroundColor Cyan
             Set-Location "$baseDir\island"
             & $bunExe run build
+            Set-Location $baseDir
             Write-Host "Building Island Shell (Release)..." -ForegroundColor Cyan
             cargo build --release --manifest-path "$baseDir\island\src-tauri\Cargo.toml"
         }

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14161C"/>
+      <stop offset="100%" stop-color="#0D0E12"/>
+    </linearGradient>
+    <linearGradient id="leftEyeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#34E3A6"/>
+      <stop offset="100%" stop-color="#28C78F"/>
+    </linearGradient>
+    <linearGradient id="rightEyeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38D6F5"/>
+      <stop offset="100%" stop-color="#20B5D4"/>
+    </linearGradient>
+    <filter id="eyeGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- Squircle Base -->
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="url(#bgGrad)" stroke="#262A34" stroke-width="2.5"/>
+
+  <!-- Left Capsule Eye (Mint) -->
+  <rect x="36" y="38" width="22" height="52" rx="11" fill="url(#leftEyeGrad)" filter="url(#eyeGlow)"/>
+
+  <!-- Right Capsule Eye (Cyan) -->
+  <rect x="70" y="38" width="22" height="52" rx="11" fill="url(#rightEyeGrad)" filter="url(#eyeGlow)"/>
+</svg>

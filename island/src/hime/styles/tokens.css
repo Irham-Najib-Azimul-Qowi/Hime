@@ -1,0 +1,73 @@
+/**
+ * AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY
+ * Generated from design/tokens.json via tools/gen-tokens.js
+ */
+
+:root {
+  /* Surfaces */
+  --surface-island: #000000;
+  --surface-1: #0D0E12;
+  --surface-2: #14161C;
+  --surface-3: #1B1E26;
+  --line: #262A34;
+
+  /* Text */
+  --text-1: #F4F6FA;
+  --text-2: #A7AEBB;
+  --text-3: #6F7785;
+
+  /* Accents */
+  --accent-mint: #34E3A6;
+  --accent-mint-tint: #34E3A62e; /* 18% opacity */
+  --accent-mint-hover: #34E3A63d; /* 24% opacity */
+  --accent-cyan: #38D6F5;
+  --accent-cyan-tint: #38D6F52e; /* 18% opacity */
+  --accent-cyan-hover: #38D6F53d; /* 24% opacity */
+  --accent-sky: #5AA9FF;
+  --accent-sky-tint: #5AA9FF2e; /* 18% opacity */
+  --accent-sky-hover: #5AA9FF3d; /* 24% opacity */
+  --accent-violet: #A18BFF;
+  --accent-violet-tint: #A18BFF2e; /* 18% opacity */
+  --accent-violet-hover: #A18BFF3d; /* 24% opacity */
+  --accent-pink: #FF5C93;
+  --accent-pink-tint: #FF5C932e; /* 18% opacity */
+  --accent-pink-hover: #FF5C933d; /* 24% opacity */
+  --accent-coral: #FF7A59;
+  --accent-coral-tint: #FF7A592e; /* 18% opacity */
+  --accent-coral-hover: #FF7A593d; /* 24% opacity */
+  --accent-amber: #FFC247;
+  --accent-amber-tint: #FFC2472e; /* 18% opacity */
+  --accent-amber-hover: #FFC2473d; /* 24% opacity */
+  --accent-lime: #A8EE4B;
+  --accent-lime-tint: #A8EE4B2e; /* 18% opacity */
+  --accent-lime-hover: #A8EE4B3d; /* 24% opacity */
+  --accent-red: #FF4D5E;
+  --accent-red-tint: #FF4D5E2e; /* 18% opacity */
+  --accent-red-hover: #FF4D5E3d; /* 24% opacity */
+
+  /* Spacing */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+
+  /* Radii */
+  --radius-pill: 9999px;
+  --radius-card: 14px;
+  --radius-icon-tile: 10px;
+  --radius-input: 12px;
+
+  /* Typography */
+  --font-title-size: 14px;
+  --font-title-weight: 600;
+  --font-title-lh: 20px;
+
+  --font-body-size: 13px;
+  --font-body-weight: 500;
+  --font-body-lh: 18px;
+
+  --font-desc-size: 12px;
+  --font-desc-weight: 400;
+  --font-desc-lh: 16px;
+}

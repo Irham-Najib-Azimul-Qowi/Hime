@@ -283,9 +283,14 @@ fn main() {
                 DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             }
 
-            // Immediately register the notch appbar and show main window
-            crate::services::reconcile_main_appbar(app.handle());
+            // Non-blocking notch appbar reconciliation and show main window
+            let appbar_h = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                crate::services::reconcile_main_appbar(&appbar_h);
+            });
             let _ = window.show();
+            crate::diagnostics::record("debug", "setup step: main window shown");
 
             // Reconcile dock appbar if dock is enabled
             if crate::utils::dock_enabled() {
@@ -372,7 +377,9 @@ fn main() {
                 _ => {}
             });
 
+            crate::diagnostics::record("debug", "setup step: sync_overlays starting");
             sync_overlays(app.handle());
+            crate::diagnostics::record("debug", "setup step: sync_overlays done");
 
             // Initialize the overlay window — on Windows, set_position doesn't
             // take effect on a window that has never been shown. Show it once
@@ -391,11 +398,16 @@ fn main() {
                     }
                 });
             }
+            crate::diagnostics::record("debug", "setup step: overlay init done");
 
             watch_webview_processes(app.handle());
+            crate::diagnostics::record("debug", "setup step: watch_webview_processes done");
             setup_mouse_hook(app.handle().clone());
+            crate::diagnostics::record("debug", "setup step: setup_mouse_hook done");
             setup_display_change_monitor(app.handle().clone());
+            crate::diagnostics::record("debug", "setup step: setup_display_change_monitor done");
             setup_window_change_hook(app.handle().clone());
+            crate::diagnostics::record("debug", "setup step: setup_window_change_hook done");
             {
                 let _ = crate::state::THUMBNAIL_CACHE
                     .set(std::sync::Mutex::new(std::collections::HashMap::new()));

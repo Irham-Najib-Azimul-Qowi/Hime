@@ -1,0 +1,27 @@
+{
+  "$schema": "../../contracts/module-manifest.schema.json",
+  "id": "keybinds",
+  "version": "1.0.0",
+  "title": "Pintasan Global",
+  "desc": "Navigasi cepat dan kontrol Hime",
+  "icon": "keyboard",
+  "category": "sistem",
+  "island": {
+    "panels": ["cheatsheet"],
+    "bubbles": [],
+    "settings": "keybinds",
+    "keybinds": [
+      "hime.toggle",
+      "hime.chat",
+      "hime.cheatsheet"
+    ]
+  },
+  "resources": {
+    "ramEstimateMB": 1,
+    "timers": 0,
+    "listeners": ["tauri-global-shortcut"]
+  },
+  "default": {
+    "enabled": true
+  }
+}

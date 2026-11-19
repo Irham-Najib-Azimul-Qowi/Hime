@@ -196,6 +196,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hime-modsdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "hime-pal"
 version = "0.1.0"
 dependencies = [

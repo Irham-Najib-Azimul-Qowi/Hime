@@ -498,7 +498,7 @@ r#"### 🖥️ Status Telemetri Sistem Hime
 | **Model Aktif** | `{}` | Mode Hime Offline Core |
 
 > [!NOTE]
-> Seluruh antarmuka Bloom Shell (Dynamic Island, Dock, Tray HUD, dan Panel Asisten) beroperasi dalam performa optimal."#,
+> Seluruh antarmuka Hime Island (Dynamic Island, Dock, Tray HUD, dan Panel Asisten) beroperasi dalam performa optimal."#,
             metrics.os_name,
             metrics.arch,
             metrics.hostname,

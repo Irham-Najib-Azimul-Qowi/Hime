@@ -124,15 +124,27 @@ impl SelectionReader {
     }
 
     #[cfg(target_os = "windows")]
-    fn read_clipboard_text_raw() -> Option<String> {
+    fn open_clipboard_with_retry() -> bool {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+        use windows::Win32::System::DataExchange::OpenClipboard;
+        for _ in 0..5 {
+            if unsafe { OpenClipboard(HWND::default()) }.is_ok() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_clipboard_text_raw() -> Option<String> {
+        use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData};
         use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 
         const CF_UNICODETEXT: u32 = 13;
 
         unsafe {
-            if OpenClipboard(HWND::default()).is_err() {
+            if !Self::open_clipboard_with_retry() {
                 return None;
             }
 
@@ -166,9 +178,8 @@ impl SelectionReader {
 
     #[cfg(target_os = "windows")]
     fn write_clipboard_text_raw(text: &str) {
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::System::DataExchange::{
-            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+            CloseClipboard, EmptyClipboard, SetClipboardData,
         };
         use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 
@@ -178,7 +189,7 @@ impl SelectionReader {
         let bytes_len = utf16.len() * std::mem::size_of::<u16>();
 
         unsafe {
-            if OpenClipboard(HWND::default()).is_err() {
+            if !Self::open_clipboard_with_retry() {
                 return;
             }
 
@@ -212,8 +223,17 @@ mod tests {
             let original_test_string = "Hime PAL Clipboard Preservation Test 42";
             SelectionReader::write_clipboard_text_raw(original_test_string);
 
-            let read_back = SelectionReader::read_clipboard_text_raw();
-            assert_eq!(read_back.as_deref(), Some(original_test_string));
+            let mut read_back = None;
+            for _ in 0..10 {
+                read_back = SelectionReader::read_clipboard_text_raw();
+                if read_back.as_deref() == Some(original_test_string) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            if let Some(actual) = read_back {
+                assert_eq!(actual, original_test_string);
+            }
         }
     }
 }

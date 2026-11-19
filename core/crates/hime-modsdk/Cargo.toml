@@ -1,0 +1,11 @@
+[package]
+name = "hime-modsdk"
+version = "0.1.0"
+edition = "2021"
+description = "Hime Island Module SDK and Extension Runtime"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

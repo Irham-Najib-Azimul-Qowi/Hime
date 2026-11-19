@@ -3,11 +3,12 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
+    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
@@ -16,73 +17,103 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const HOTKEY_START_CSH: i32 = 201; // Ctrl + Shift + H
 const HOTKEY_START_CAS: i32 = 202; // Ctrl + Alt + Space
-const HOTKEY_START_CAH: i32 = 203; // Ctrl + Alt + H (fallback attempt)
+const HOTKEY_START_CWH: i32 = 203; // Ctrl + Win + H
+const HOTKEY_START_CAH: i32 = 204; // Ctrl + Alt + H (fallback)
 
 const HOTKEY_STOP_CSQ: i32 = 301;  // Ctrl + Shift + Q
 const HOTKEY_STOP_CAQ: i32 = 302;  // Ctrl + Alt + Q
+const HOTKEY_STOP_CWQ: i32 = 303;  // Ctrl + Win + Q
 
 const VK_SPACE: u32 = 0x20;
 const VK_H: u32 = 0x48;
 const VK_Q: u32 = 0x51;
 
+static LAST_TRIGGER_MS: AtomicU64 = AtomicU64::new(0);
+
 fn log(msg: &str) {
     if let Ok(appdata) = std::env::var("APPDATA") {
-        let log_path = format!("{}\\ai.hime.desktop\\hotkey.log", appdata);
+        let log_dir = format!("{}\\ai.hime.desktop", appdata);
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = format!("{}\\hotkey.log", log_dir);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
-            let _ = writeln!(file, "[hotkey] {}", msg);
+            let now = chrono_local();
+            let _ = writeln!(file, "[{}] [hotkey] {}", now, msg);
         }
+    }
+}
+
+fn chrono_local() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{}", now)
+}
+
+fn handle_hotkey(id: i32) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let prev = LAST_TRIGGER_MS.swap(now, Ordering::Relaxed);
+    if now.saturating_sub(prev) < 400 {
+        log(&format!("Ignoring duplicate trigger for ID {} (debounce)", id));
+        return;
+    }
+
+    log(&format!("WM_HOTKEY triggered: ID {}", id));
+
+    match id {
+        HOTKEY_START_CSH | HOTKEY_START_CAS | HOTKEY_START_CWH | HOTKEY_START_CAH => {
+            log("HotKey match -> Spawning start-hime.ps1");
+            let res = Command::new("powershell.exe")
+                .args([
+                    "-WindowStyle",
+                    "Hidden",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "X:\\folder_ai\\Hime\\scripts\\start-hime.ps1",
+                ])
+                .spawn();
+            match res {
+                Ok(_) => log("start-hime.ps1 spawned successfully"),
+                Err(e) => log(&format!("Failed to spawn start-hime: {}", e)),
+            }
+        }
+        HOTKEY_STOP_CSQ | HOTKEY_STOP_CAQ | HOTKEY_STOP_CWQ => {
+            log("HotKey match -> Spawning stop-hime.ps1");
+            let res = Command::new("powershell.exe")
+                .args([
+                    "-WindowStyle",
+                    "Hidden",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "X:\\folder_ai\\Hime\\scripts\\stop-hime.ps1",
+                ])
+                .spawn();
+            match res {
+                Ok(_) => log("stop-hime.ps1 spawned successfully"),
+                Err(e) => log(&format!("Failed to spawn stop-hime: {}", e)),
+            }
+        }
+        _ => {}
     }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_HOTKEY {
         let id = wparam.0 as i32;
-        log(&format!("WM_HOTKEY received in WndProc: ID {}", id));
-
-        match id {
-            HOTKEY_START_CSH | HOTKEY_START_CAS | HOTKEY_START_CAH => {
-                log("Executing start-hime.ps1");
-                let res = Command::new("powershell.exe")
-                    .args([
-                        "-WindowStyle",
-                        "Hidden",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        "X:\\folder_ai\\start-hime.ps1",
-                    ])
-                    .spawn();
-                match res {
-                    Ok(_) => log("start-hime.ps1 spawned successfully"),
-                    Err(e) => log(&format!("Failed to spawn start-hime: {}", e)),
-                }
-            }
-            HOTKEY_STOP_CSQ | HOTKEY_STOP_CAQ => {
-                log("Executing stop-hime.ps1");
-                let res = Command::new("powershell.exe")
-                    .args([
-                        "-WindowStyle",
-                        "Hidden",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        "X:\\folder_ai\\stop-hime.ps1",
-                    ])
-                    .spawn();
-                match res {
-                    Ok(_) => log("stop-hime.ps1 spawned successfully"),
-                    Err(e) => log(&format!("Failed to spawn stop-hime: {}", e)),
-                }
-            }
-            _ => {}
-        }
+        handle_hotkey(id);
         return LRESULT(0);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 fn main() {
-    log("=== hime_hotkey daemon (HWND listener) starting ===");
+    log("=== hime_hotkey daemon starting ===");
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
@@ -97,11 +128,9 @@ fn main() {
 
         let atom = RegisterClassW(&wc);
         if atom == 0 {
-            log("Failed to register window class");
-            return;
+            log("Notice: RegisterClassW returned 0 (class may already exist)");
         }
 
-        // Create a hidden message window
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class_name,
@@ -117,17 +146,22 @@ fn main() {
             None,
         );
 
-        if hwnd.is_err() {
-            log("Failed to create message window");
-            return;
-        }
-        let hwnd = hwnd.unwrap();
+        let window_hwnd = match hwnd {
+            Ok(h) => {
+                log(&format!("Created message window handle: 0x{:X}", h.0 as usize));
+                Some(h)
+            }
+            Err(e) => {
+                log(&format!("Failed to create message window: {}. Falling back to thread queue.", e));
+                None
+            }
+        };
 
         let reg = |id: i32, name: &str, mods: HOT_KEY_MODIFIERS, vk: u32| {
-            let res = RegisterHotKey(Some(hwnd), id, mods, vk);
+            let res = RegisterHotKey(window_hwnd, id, mods, vk);
             match res {
-                Ok(_) => log(&format!("Registered {} to HWND: SUCCESS", name)),
-                Err(e) => log(&format!("Registered {} to HWND: FAILED ({})", name, e)),
+                Ok(_) => log(&format!("Registered {}: SUCCESS", name)),
+                Err(e) => log(&format!("Registered {}: FAILED ({})", name, e)),
             }
         };
 
@@ -143,6 +177,12 @@ fn main() {
             "Ctrl + Alt + Space",
             HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0),
             VK_SPACE,
+        );
+        reg(
+            HOTKEY_START_CWH,
+            "Ctrl + Win + H",
+            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_WIN.0),
+            VK_H,
         );
         reg(
             HOTKEY_START_CAH,
@@ -164,15 +204,25 @@ fn main() {
             HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_ALT.0),
             VK_Q,
         );
+        reg(
+            HOTKEY_STOP_CWQ,
+            "Ctrl + Win + Q",
+            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_WIN.0),
+            VK_Q,
+        );
 
-        log("Entering HWND message loop...");
+        log("Entering message pump loop...");
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.message == WM_HOTKEY {
+                let id = msg.wParam.0 as i32;
+                handle_hotkey(id);
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
-        log("HWND Message loop exited.");
+        log("Message loop exited.");
     }
 }

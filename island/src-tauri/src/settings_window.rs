@@ -12,7 +12,7 @@ pub fn with_window<R: Runtime, T>(
     // Tray clicks, dock clicks and the second-instance signal can arrive together.
     let _guard = CREATION_LOCK.lock().map_err(|e| e.to_string())?;
     if crate::state::SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err("Bloom is shutting down".into());
+        return Err("Hime is shutting down".into());
     }
     if let Some(window) = app.get_webview_window("settings") {
         return Ok(action(&window, false));

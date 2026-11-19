@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HimeModuleManifest",
+  "description": "Schema for Hime Island modular extensions per 14-MODULARITY-AND-CODE-QUALITY.md",
+  "type": "object",
+  "required": ["id", "version", "title", "desc", "icon", "category", "default"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 16
+    },
+    "desc": {
+      "type": "string",
+      "maxLength": 36
+    },
+    "icon": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "core": {
+      "type": "object",
+      "properties": {
+        "crate": { "type": "string" },
+        "deps": { "type": "array", "items": { "type": "string" } },
+        "lazy": { "type": "boolean" },
+        "idleStopSec": { "type": "integer" }
+      }
+    },
+    "island": {
+      "type": "object",
+      "properties": {
+        "panels": { "type": "array", "items": { "type": "string" } },
+        "bubbles": { "type": "array", "items": { "type": "string" } },
+        "settings": { "type": "string" },
+        "keybinds": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "mobile": {
+      "type": "object",
+      "properties": {
+        "screens": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "ramEstimateMB": { "type": "number" },
+        "timers": { "type": "integer" },
+        "listeners": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "properties": {
+        "collects": { "type": "array", "items": { "type": "string" } },
+        "sendsToCloud": { "type": "boolean" },
+        "optIn": { "type": "boolean" }
+      }
+    },
+    "default": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

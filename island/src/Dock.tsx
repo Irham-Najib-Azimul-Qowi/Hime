@@ -129,12 +129,9 @@ function TaskViewIcon() {
 }
 
 function resolveStartIcon(startIcon: string): string {
-	if (startIcon === "bloom-colorful") return "/bloom-colorful.png";
-	if (startIcon === "bloom-golden") return "/bloom-golden.png";
-	if (startIcon === "bloom-biscuit") return "/bloom-biscuit.png";
 	if (startIcon === "windows") return "/windows-11.png";
 	if (startIcon.startsWith("custom:")) return startIcon.slice("custom:".length);
-	return "/bloom.png";
+	return "/hime.png";
 }
 
 // Stable module-level constants so object references never change between renders,
@@ -1583,8 +1580,9 @@ const Dock = memo(function Dock() {
 
 														const isBloomOrSettings =
 															app.name.toLowerCase() === "settings" ||
-															app.name.toLowerCase() === "bloom" ||
-															app.path.toLowerCase().includes("bloom.exe");
+															app.name.toLowerCase() === "hime" ||
+															app.path.toLowerCase().includes("hime.exe") ||
+															app.path.toLowerCase().includes("hime-island.exe");
 
 														return icon ? (
 															<img
@@ -1742,8 +1740,9 @@ const Dock = memo(function Dock() {
 
 												const isBloomOrSettings =
 													app.name.toLowerCase() === "settings" ||
-													app.name.toLowerCase() === "bloom" ||
-													app.path.toLowerCase().includes("bloom.exe");
+													app.name.toLowerCase() === "hime" ||
+													app.path.toLowerCase().includes("hime.exe") ||
+													app.path.toLowerCase().includes("hime-island.exe");
 
 												return icon ? (
 													<img
@@ -1944,10 +1943,10 @@ const Dock = memo(function Dock() {
 							</div>
 							<div
 								className="menu-item has-submenu"
-								onMouseEnter={() => setActiveSubmenu("bloom")}
+								onMouseEnter={() => setActiveSubmenu("hime")}
 								onMouseLeave={() => setActiveSubmenu(null)}
 							>
-								Bloom Options
+								Hime Options
 								<span className="submenu-arrow">▶</span>
 								<div className="submenu">
 									<div
@@ -1960,7 +1959,7 @@ const Dock = memo(function Dock() {
 										Open Settings
 									</div>
 									<div className="menu-item" onClick={() => invoke("restart_bloom")}>
-										Restart Bloom
+										Restart Hime
 									</div>
 									<div
 										className="menu-item"
@@ -1973,7 +1972,7 @@ const Dock = memo(function Dock() {
 									</div>
 									<div className="menu-divider" />
 									<div className="menu-item quit" onClick={() => invoke("quit_bloom")}>
-										Quit Bloom
+										Quit Hime
 									</div>
 								</div>
 							</div>
@@ -2043,10 +2042,10 @@ const Dock = memo(function Dock() {
 							</div>
 							<div
 								className="menu-item has-submenu"
-								onMouseEnter={() => setActiveSubmenu("bloom")}
+								onMouseEnter={() => setActiveSubmenu("hime")}
 								onMouseLeave={() => setActiveSubmenu(null)}
 							>
-								Bloom Options
+								Hime Options
 								<span className="submenu-arrow">▶</span>
 								<div className="submenu">
 									<div
@@ -2059,7 +2058,7 @@ const Dock = memo(function Dock() {
 										Open Settings
 									</div>
 									<div className="menu-item" onClick={() => invoke("restart_bloom")}>
-										Restart Bloom
+										Restart Hime
 									</div>
 									<div
 										className="menu-item"
@@ -2072,7 +2071,7 @@ const Dock = memo(function Dock() {
 									</div>
 									<div className="menu-divider" />
 									<div className="menu-item quit" onClick={() => invoke("quit_bloom")}>
-										Quit Bloom
+										Quit Hime
 									</div>
 								</div>
 							</div>

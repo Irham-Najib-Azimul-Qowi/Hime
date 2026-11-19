@@ -1,6 +1,4 @@
 import { Download, RefreshCw, FileDown, Upload } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { GithubIcon } from "../icons";
 import { SettingRow } from "./SettingRow";
 
 interface AboutTabProps {
@@ -37,7 +35,7 @@ export function AboutTab({
 			case "available":
 				return `Update Available (v${updateVersion})`;
 			case "uptodate":
-				return "Bloom is up to date";
+				return "Hime Island is up to date";
 			case "downloading":
 				return "Downloading Update...";
 			case "installing":
@@ -71,19 +69,14 @@ export function AboutTab({
 	return (
 		<div className="about-tab-container">
 			<div className="about-header">
-				<img src="/bloom.png" className="about-logo" alt="Bloom Logo" draggable={false} />
-				<h1 className="about-title">Bloom</h1>
+				<img src="/hime.png" className="about-logo" alt="Hime Island Logo" draggable={false} />
+				<h1 className="about-title">Hime Island</h1>
 				<p className="about-version">Version {appVersion}</p>
 				<p className="about-credit">
-					Made with <span className="about-heart">❤️</span> by{" "}
-					<button
-						className="about-author"
-						onClick={() => openUrl("https://github.com/SehajveerSingh2005")}
-						title="sehaz on GitHub"
-					>
-						<GithubIcon size={12} />
-						<span>sehaz</span>
-					</button>
+					Personal AI Dynamic Island for Windows
+				</p>
+				<p className="about-attribution" style={{ fontSize: "11px", color: "var(--text-3, #6F7785)", marginTop: "4px" }}>
+					Derivative work based upon Bloom (GPL-3.0) by Sehajveer Singh & contributors.
 				</p>
 			</div>
 

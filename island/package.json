@@ -1,5 +1,6 @@
 {
-	"name": "hime",
+	"name": "hime-island",
+	"description": "Hime Island Desktop Shell",
 	"version": "3.10.2",
 	"private": true,
 	"license": "GPL-3.0-only",

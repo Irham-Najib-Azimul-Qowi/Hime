@@ -297,7 +297,7 @@ impl TrayExposure {
     unsafe fn new() -> Result<Self, String> {
         use std::sync::atomic::Ordering;
         if crate::state::SHUTTING_DOWN.load(Ordering::Relaxed) {
-            return Err("Bloom is shutting down.".into());
+            return Err("Hime is shutting down.".into());
         }
         let hwnd = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null())
             .map_err(|_| "Windows taskbar is unavailable.")?;
@@ -623,7 +623,7 @@ unsafe fn find_overflow_icon(
         if let [button] = labelled[..] {
             return button.cast().map_err(|e| e.to_string());
         }
-        return Err("Bloom could not uniquely identify this app's Windows tray icon.".into());
+        return Err("Hime could not uniquely identify this app's Windows tray icon.".into());
     }
     // Name matches provide cross-checks of Explorer's ordered UI tree, but
     // cannot be required for every icon because tooltip text is app-defined.

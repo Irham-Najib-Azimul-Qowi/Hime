@@ -4286,7 +4286,7 @@ function App() {
 														e.stopPropagation();
 														openSettingsWindow();
 													}}
-													title="Bloom Settings"
+													title="Hime Settings"
 												>
 													<SettingsIcon />
 												</button>
@@ -4296,7 +4296,7 @@ function App() {
 														e.stopPropagation();
 														invoke("restart_bloom");
 													}}
-													title="Restart Bloom"
+													title="Restart Hime"
 												>
 													<ReloadIcon />
 												</button>

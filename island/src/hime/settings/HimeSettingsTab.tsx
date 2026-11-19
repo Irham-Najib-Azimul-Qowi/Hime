@@ -164,7 +164,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 				<SettingRow
 					icon={Bot}
 					label="Aktifkan Hime Assistant"
-					desc="Integrasi personal AI desktop environment di atas Bloom Shell"
+					desc="Integrasi personal AI desktop environment Hime Island"
 				>
 					<label className="toggle-switch">
 						<input type="checkbox" checked={himeEnabled} onChange={toggleHimeEnabled} />

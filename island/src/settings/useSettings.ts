@@ -956,9 +956,9 @@ export function useSettings() {
 		try {
 			const { ask } = await import("@tauri-apps/plugin-dialog");
 			const confirmed = await ask(
-				"All settings return to their defaults and Bloom restarts. Pinned apps and custom icons are kept.",
+				"All settings return to their defaults and Hime restarts. Pinned apps and custom icons are kept.",
 				{
-					title: "Reset Bloom to Defaults",
+					title: "Reset Hime to Defaults",
 					kind: "warning",
 					okLabel: "Reset and Restart",
 					cancelLabel: "Cancel"
