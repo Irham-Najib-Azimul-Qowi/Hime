@@ -48,7 +48,6 @@ import {
 	ArrowUpDown,
 	BellRing,
 	Play,
-	Bot,
 	Pause,
 	RotateCcw,
 	Megaphone,
@@ -69,8 +68,11 @@ import {
 } from "lucide-react";
 import { useHimeEvents } from "./hime/events/useHimeEvents";
 import { HimeAssistantPanel } from "./hime/panels/HimeAssistantPanel";
-import { ApprovalBubble } from "./hime/bubbles/ApprovalBubble";
+import { HimeTasksPanel } from "./hime/tasks";
 import { ApprovalDetailCard } from "./hime/panels/ApprovalDetailCard";
+import { ApprovalBubble } from "./hime/bubbles/ApprovalBubble";
+import { HimeEyes } from "./hime/ui/HimeEyes";
+import { useNCM } from "./hime/ncm";
 import type { ApprovalItem } from "./hime/types";
 
 /**
@@ -83,8 +85,8 @@ import type { ApprovalItem } from "./hime/types";
  *   Dragging files onto the notch also opens the shelf. Wheel/swipe switches
  *   between tool panels, including when a live activity occupies the pill.
  */
-type NotchPanel = "calendar" | "command-center" | "devices" | "hime";
-const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "devices", "hime"];
+type NotchPanel = "calendar" | "command-center" | "devices" | "hime" | "tasks";
+const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "devices", "hime", "tasks"];
 const asNotchPanel = (value: unknown): NotchPanel | null =>
 	NOTCH_PANELS.includes(value as NotchPanel) ? (value as NotchPanel) : null;
 
@@ -411,6 +413,7 @@ const RollDigit = memo(function RollDigit({
 interface MediaInfo {
 	title: string;
 	artist: string;
+	album?: string;
 	is_playing: boolean;
 	has_media: boolean;
 	artwork?: string[];
@@ -456,7 +459,8 @@ type BloomMode =
 	| "devices"
 	| "device"
 	| "hime"
-	| "hime-approval";
+	| "hime-approval"
+	| "tasks";
 
 // A device that just connected or disconnected, shown briefly in the pill.
 interface DeviceAlert {
@@ -1224,6 +1228,18 @@ function App() {
 			notchPinnedRef.current = false;
 		});
 
+		const unlistenShowIsland = listen("hime-show-island", () => {
+			if (isOpenRef.current) {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+			} else {
+				setIsOpen(true);
+				setBloomMode(openingPanel());
+			}
+		});
+
 		return () => {
 			unlistenVisibility.then((f) => f());
 			unlistenFs.then((f) => f());
@@ -1231,6 +1247,7 @@ function App() {
 			unlistenNotchEdgeHover.then((f) => f());
 			unlistenNotchPointerLeft.then((f) => f());
 			unlistenNotchDismiss.then((f) => f());
+			unlistenShowIsland.then((f) => f());
 			document.removeEventListener("contextmenu", preventContext);
 		};
 	}, [windowLabel]);
@@ -1399,6 +1416,7 @@ function App() {
 	const {
 		status: himeStatus,
 		approvals: himeApprovals,
+		approvalJustResolved,
 		resolveApproval: resolveHimeApproval
 	} = useHimeEvents({
 		onDownloadDetected: (report) => {
@@ -1406,6 +1424,16 @@ function App() {
 		}
 	});
 	const [activeApproval, setActiveApproval] = useState<ApprovalItem | null>(null);
+
+	// Notch Compose Manager (NCM) - foundational presentation arbiter
+	const { slotState: ncmSlotState } = useNCM({
+		isOnline: himeStatus.is_online,
+		approvals: himeApprovals,
+		approvalJustResolved
+	});
+
+	// Dynamically derived mascot expression for closed notch pill
+	const himeExpression = ncmSlotState.mascotExpression;
 
 	// Sync pending approval selection
 	useEffect(() => {
@@ -1688,7 +1716,8 @@ function App() {
 			prev === "bluetooth" ||
 			prev === "devices" ||
 			prev === "hime" ||
-			prev === "hime-approval"
+			prev === "hime-approval" ||
+			prev === "tasks"
 				? restingModeRef.current
 				: prev
 		);
@@ -1978,6 +2007,7 @@ function App() {
 		if (panel === "command-center") return settingsControlsPanelEnabled;
 		if (panel === "devices") return settingsDevicesPanelEnabled;
 		if (panel === "hime") return true;
+		if (panel === "tasks") return true;
 		return false;
 	}
 
@@ -2122,10 +2152,24 @@ function App() {
 	}, [isEditingTimer]);
 
 	useEffect(() => {
-		if (bloomMode === "hime" && isOpen) {
+		if ((bloomMode === "hime" || bloomMode === "tasks") && isOpen) {
 			getCurrentWebviewWindow().setFocus().catch(() => {});
 		}
 	}, [bloomMode, isOpen]);
+
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (e.ctrlKey && e.altKey && (e.key === "n" || e.key === "N")) {
+				e.preventDefault();
+				openNotch("tasks");
+			} else if (e.ctrlKey && e.altKey && (e.key === " " || e.key === "Space")) {
+				e.preventDefault();
+				openNotch("hime");
+			}
+		};
+		window.addEventListener("keydown", handleKeyDown);
+		return () => window.removeEventListener("keydown", handleKeyDown);
+	}, []);
 
 	const timerEditValid = timerDigitsToSeconds(timerEditDigits) !== null;
 
@@ -3174,7 +3218,7 @@ function App() {
 
 	// Calculate width dynamically based on enabled features
 	const getDynamicWidth = () => {
-		if (bloomMode === "hime" || bloomMode === "hime-approval") return 380;
+		if (bloomMode === "hime" || bloomMode === "hime-approval" || bloomMode === "tasks") return 380;
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
 		if (bloomMode === "device" && deviceAlert) return 330;
 		if (isCalendarMode) return 480;
@@ -3205,7 +3249,7 @@ function App() {
 		if (!isExpanded || !isVisible || isHidden) {
 			return isImpacted ? 28.9 : 44.2;
 		}
-		if (bloomMode === "hime" && isOpen) return 380;
+		if ((bloomMode === "hime" || bloomMode === "tasks") && isOpen) return 380;
 		if (bloomMode === "hime-approval" && isOpen) return 180;
 		// Announcement card: body is line-clamped, so a fixed size fits both cases.
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) {
@@ -3865,6 +3909,36 @@ function App() {
 																				)}
 																				{formatTimerTime(timerSeconds)}
 																			</motion.span>
+																		) : ncmSlotState.centerSlot ? (
+																			<motion.span
+																				key="ncm-center-slot"
+																				className="time ncm-center-slot"
+																				style={{
+																					display: "inline-flex",
+																					alignItems: "center",
+																					gap: "6px",
+																					position: "relative",
+																					lineHeight: 1,
+																					maxWidth: "240px",
+																					overflow: "hidden",
+																					textOverflow: "ellipsis",
+																					whiteSpace: "nowrap",
+																					fontSize: "12px",
+																					fontWeight: 500,
+																					color: "var(--text-1, #F4F6FA)",
+																				}}
+																				initial={{ opacity: 0, y: 3 }}
+																				animate={{ opacity: 1, y: 0 }}
+																				exit={{ opacity: 0, y: -3 }}
+																				transition={{ duration: 0.18 }}
+																			>
+																				<HimeEyes
+																					size={14}
+																					expression={himeExpression}
+																					onClick={() => openNotch("hime")}
+																				/>
+																				<span>{ncmSlotState.centerSlot.slice(0, 36)}</span>
+																			</motion.span>
 																		) : (
 																			<motion.span
 																				key="clock"
@@ -3881,15 +3955,10 @@ function App() {
 																				exit={{ opacity: 0 }}
 																				transition={{ duration: 0.15 }}
 																			>
-																				<Bot
-																					size={13}
-																					style={{
-																						color: himeStatus.is_online ? "#10b981" : "#a3a3a3",
-																						filter: himeStatus.is_online
-																							? "drop-shadow(0 0 4px rgba(16, 185, 129, 0.45))"
-																							: "none",
-																						flexShrink: 0
-																					}}
+																				<HimeEyes
+																					size={14}
+																					expression={himeExpression}
+																					onClick={() => openNotch("hime")}
 																				/>
 																				<span>{time}</span>
 																			</motion.span>
@@ -4750,7 +4819,47 @@ function App() {
 													setBloomMode("status");
 													setNotchPinned(false);
 												}}
+												onOpenTasks={() => {
+													setBloomMode("tasks");
+												}}
 												setNotchPinned={setNotchPinned}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Hime Tasks Panel */}
+								<AnimatePresence>
+									{bloomMode === "tasks" && (
+										<motion.div
+											key="tasks-panel"
+											onClick={(e) => e.stopPropagation()}
+											onWheel={(e) => e.stopPropagation()}
+											style={{
+												position: "absolute",
+												top: "36px",
+												left: 0,
+												width: "100%",
+												height: "calc(100% - 36px)",
+												boxSizing: "border-box",
+												overflow: "hidden",
+												zIndex: 2,
+												padding: "0 4px 8px 4px"
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<HimeTasksPanel
+												onClose={() => {
+													setIsOpen(false);
+													setBloomMode("status");
+													setNotchPinned(false);
+												}}
+												onOpenChat={() => {
+													setBloomMode("hime");
+												}}
 											/>
 										</motion.div>
 									)}
@@ -4866,7 +4975,6 @@ function App() {
 					{himeApprovals.length > 0 && !isOpen && (
 						<ApprovalBubble
 							approval={himeApprovals[0]}
-							pillWidth={getDynamicWidth()}
 							onClick={() => {
 								setActiveApproval(himeApprovals[0]);
 								setIsOpen(true);
