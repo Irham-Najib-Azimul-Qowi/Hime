@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Cpu, Zap, Activity, HardDrive, RefreshCw, CheckCircle2, AlertTriangle, Power } from "lucide-react";
+import { Cpu, Zap, Activity, HardDrive, RefreshCw, CheckCircle2 } from "lucide-react";
 import { SettingRow } from "../../settings/SettingRow";
 import { getResourceMetrics, setSaveMode, stopAiRuntime, ResourceMetrics } from "../api";
 

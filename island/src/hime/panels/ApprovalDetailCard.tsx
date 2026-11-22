@@ -69,7 +69,7 @@ export const ApprovalDetailCard: React.FC<ApprovalDetailCardProps> = ({
 					<div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
 						<ShieldAlert size={14} style={{ color: "#fbbf24" }} />
 						<span style={{ fontSize: "12px", fontWeight: 600, color: "#fbbf24" }}>
-							Izin Operasi Diperlukan
+							Izin Operasi
 						</span>
 					</div>
 					<div

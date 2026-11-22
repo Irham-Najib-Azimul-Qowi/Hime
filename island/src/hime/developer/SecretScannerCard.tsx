@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ShieldCheck, ShieldAlert, RefreshCw, EyeOff } from "lucide-react";
+import { ShieldCheck, RefreshCw } from "lucide-react";
 import { SecretFinding } from "./types";
 
 export const SecretScannerCard: React.FC = () => {

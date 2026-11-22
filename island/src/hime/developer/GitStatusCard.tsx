@@ -1,9 +1,9 @@
 import React, { useState } from "react";
-import { GitBranch, GitCommit, RefreshCw, CheckCircle, AlertTriangle } from "lucide-react";
+import { GitBranch, RefreshCw } from "lucide-react";
 import { GitStatusInfo } from "./types";
 
 export const GitStatusCard: React.FC = () => {
-	const [status, setStatus] = useState<GitStatusInfo>({
+	const [status] = useState<GitStatusInfo>({
 		branch: "hime/h1-monorepo",
 		ahead: 0,
 		behind: 0,

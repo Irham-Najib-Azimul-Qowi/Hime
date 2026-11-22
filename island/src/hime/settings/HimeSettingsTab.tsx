@@ -19,7 +19,6 @@ import {
 	RotateCcw,
 	Smartphone,
 	QrCode,
-	Copy,
 	GitBranch,
 	Cloud,
 	ShieldCheck

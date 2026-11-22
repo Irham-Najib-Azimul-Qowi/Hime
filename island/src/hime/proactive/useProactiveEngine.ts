@@ -5,8 +5,7 @@ import {
 	ProactiveSettings,
 	DEFAULT_PROACTIVE_SETTINGS,
 	AttentionBudget,
-	ATTENTION_LIMITS,
-	InteractionLevel
+	ATTENTION_LIMITS
 } from "./types";
 import { validateProactiveItem, CATALOG_TEMPLATES } from "./copyLint";
 import { playProactiveChime } from "./chime";
@@ -269,7 +268,7 @@ export function useProactiveEngine(options: UseProactiveEngineOptions = {}) {
 
 	// User dismisses / closes an item
 	const dismissProactive = useCallback(
-		(itemId?: string) => {
+		(_itemId?: string) => {
 			const target = activeItem || activeCard;
 			if (!target) return;
 

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Files, Minimize2, ArrowRight } from "lucide-react";
+import { Files } from "lucide-react";
 import { mergePdfs } from "../api";
 
 export const PdfOperationsCard: React.FC = () => {

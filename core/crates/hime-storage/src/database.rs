@@ -39,6 +39,14 @@ impl Database {
         Ok(db)
     }
 
+    /// Returns (cache_size, mmap_size) pragmas for resource optimization verification.
+    pub fn get_resource_tuning_pragmas(&self) -> Result<(i64, i64), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let cache_size: i64 = conn.query_row("PRAGMA cache_size;", [], |r| r.get(0))?;
+        let mmap_size: i64 = conn.query_row("PRAGMA mmap_size;", [], |r| r.get(0)).unwrap_or(0);
+        Ok((cache_size, mmap_size))
+    }
+
     /// Opens an in-memory database for testing purposes.
     pub fn open_in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()?;
@@ -55,7 +63,9 @@ impl Database {
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -2000;
+             PRAGMA mmap_size = 0;",
         )?;
         Ok(())
     }
@@ -306,7 +316,6 @@ impl Database {
                 date_str TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_screen_time_timestamp ON screen_time_sessions(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_screen_time_date ON screen_time_sessions(date_str);
             CREATE INDEX IF NOT EXISTS idx_screen_time_app ON screen_time_sessions(app_name);
 
             -- Stage U3: Routines, Commitments, Enforcement & Pauses
@@ -554,6 +563,7 @@ impl Database {
         if !existing_st_cols.iter().any(|c| c == "date_str") {
             let _ = conn.execute("ALTER TABLE screen_time_sessions ADD COLUMN date_str TEXT NOT NULL DEFAULT ''", []);
         }
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_screen_time_date ON screen_time_sessions(date_str)", []);
 
         Ok(())
     }
@@ -5282,5 +5292,24 @@ mod tests {
         assert_eq!(epoch_to_date_str(20513 * 86400), "2026-03-01");
         assert_eq!(epoch_to_date_str(19782 * 86400), "2024-02-29");
         assert_eq!(epoch_to_date_str(11016 * 86400), "2000-02-29");
+    }
+
+    #[test]
+    fn test_sqlite_cache_tuning_pragmas() {
+        // 1. In-memory database
+        let db = Database::open_in_memory().unwrap();
+        let (cache_size, mmap_size) = db.get_resource_tuning_pragmas().unwrap();
+        assert_eq!(cache_size, -2000, "cache_size must be configured to -2000 (~2MB)");
+        assert_eq!(mmap_size, 0, "mmap_size must be configured to 0 for resource optimization");
+
+        // 2. File-backed database
+        let temp_dir = std::env::temp_dir().join(format!("hime_db_tune_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let db_file = temp_dir.join("tuned.db");
+        let file_db = Database::open(&db_file).unwrap();
+        let (f_cache, f_mmap) = file_db.get_resource_tuning_pragmas().unwrap();
+        assert_eq!(f_cache, -2000);
+        assert_eq!(f_mmap, 0);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

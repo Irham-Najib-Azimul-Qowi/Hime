@@ -6,10 +6,7 @@ import {
 	Copy,
 	HardDrive,
 	CheckCircle2,
-	Calendar,
-	Check,
-	ArrowRight,
-	X
+	Calendar
 } from "lucide-react";
 import { ProactiveItem } from "./types";
 import { HimeEyes } from "../ui/HimeEyes";
@@ -69,7 +66,7 @@ export const ProactiveCard: React.FC<ProactiveCardProps> = ({ item, onAction, on
 							</div>
 						</div>
 					</div>
-					<HimeEyes expression="senang" width={22} height={11} />
+					<HimeEyes expression="senang" size={22} />
 				</div>
 
 				{/* 3 Tasks Today & Study Block */}
@@ -222,7 +219,7 @@ export const ProactiveCard: React.FC<ProactiveCardProps> = ({ item, onAction, on
 							</div>
 						</div>
 					</div>
-					<HimeEyes expression="tenang" width={22} height={11} />
+					<HimeEyes expression="senang" size={22} />
 				</div>
 
 				{/* Recap details */}
@@ -339,7 +336,7 @@ export const ProactiveCard: React.FC<ProactiveCardProps> = ({ item, onAction, on
 							</div>
 						</div>
 					</div>
-					<HimeEyes expression="penasaran" width={22} height={11} />
+					<HimeEyes expression="penasaran" size={22} />
 				</div>
 
 				{/* File details */}
@@ -482,7 +479,7 @@ export const ProactiveCard: React.FC<ProactiveCardProps> = ({ item, onAction, on
 							</div>
 						</div>
 					</div>
-					<HimeEyes expression="khawatir" width={22} height={11} />
+					<HimeEyes expression="khawatir" size={22} />
 				</div>
 
 				{/* Progress meter */}
@@ -577,7 +574,7 @@ export const ProactiveCard: React.FC<ProactiveCardProps> = ({ item, onAction, on
 						{item.description.slice(0, 36)}
 					</div>
 				</div>
-				<HimeEyes expression={item.expression} width={22} height={11} />
+				<HimeEyes expression={item.expression} size={22} />
 			</div>
 
 			<div style={{ display: "flex", justifyContent: "flex-end", gap: "6px", marginTop: "12px" }}>

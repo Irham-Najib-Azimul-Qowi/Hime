@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { BookOpen, Plus, FileText } from "lucide-react";
+import { Plus } from "lucide-react";
 import { AcademicReportModal } from "./AcademicReportModal";
 import { PdfOperationsCard } from "./PdfOperationsCard";
 import { ArtcraftCard } from "./ArtcraftCard";

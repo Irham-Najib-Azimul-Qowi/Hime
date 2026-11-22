@@ -391,8 +391,8 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
 		label: "Tingkat Sapa",
 		desc: "Anggaran perhatian proaktif"
 	},
-	"hime-quiet-hours": {
-		key: "hime-quiet-hours",
+	"hime-interact-quiet": {
+		key: "hime-interact-quiet",
 		type: "boolean",
 		default: true,
 		section: "interact",

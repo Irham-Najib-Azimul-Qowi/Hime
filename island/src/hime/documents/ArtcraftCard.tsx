@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Palette, CheckCircle, ExternalLink, RefreshCw } from "lucide-react";
+import { Palette, ExternalLink, RefreshCw } from "lucide-react";
 
 export const ArtcraftCard: React.FC = () => {
 	const [isInstalled, setIsInstalled] = useState(true);

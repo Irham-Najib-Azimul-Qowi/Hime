@@ -7,10 +7,12 @@ export interface DocumentVerificationReport {
 }
 
 export interface DocumentOpResult {
+	status?: string;
 	output_path: string;
 	file_size_bytes: number;
-	format: string;
-	verification: DocumentVerificationReport;
+	format?: string;
+	verification?: DocumentVerificationReport;
+	metadata?: Record<string, any>;
 }
 
 export interface DocumentJobItem {

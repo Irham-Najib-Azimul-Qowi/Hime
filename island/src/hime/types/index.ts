@@ -37,9 +37,19 @@ export interface DownloadEventReport {
 	timestamp_ms: number;
 }
 
+export interface DocumentVerificationReport {
+	page_count: number;
+	font_family: string;
+	has_table_of_contents: boolean;
+	has_overflow: boolean;
+	is_verified: boolean;
+}
+
 export interface DocumentOpResult {
-	status: string;
+	status?: string;
 	output_path: string;
 	file_size_bytes: number;
+	format?: string;
+	verification?: DocumentVerificationReport;
 	metadata?: Record<string, any>;
 }

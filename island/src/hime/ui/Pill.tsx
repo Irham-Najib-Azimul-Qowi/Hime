@@ -10,7 +10,8 @@ export type PillAccent =
   | "coral"
   | "amber"
   | "lime"
-  | "red";
+  | "red"
+  | "text-3";
 
 export interface PillProps {
   label: string;
@@ -32,13 +33,14 @@ export const Pill: React.FC<PillProps> = ({
   className = ""
 }) => {
   const getStyle = (): React.CSSProperties => {
-    const colorVar = `var(--accent-${accent}, #34E3A6)`;
-    const tintVar = `var(--accent-${accent}-tint, rgba(52, 227, 166, 0.18))`;
+    const colorVar = accent === "text-3" ? "var(--text-3, #6F7785)" : `var(--accent-${accent}, #34E3A6)`;
+    const tintVar = accent === "text-3" ? "rgba(111, 119, 133, 0.18)" : `var(--accent-${accent}-tint, rgba(52, 227, 166, 0.18))`;
 
     if (variant === "solid") {
+      const isMutedAccent = accent === "text-3";
       return {
         backgroundColor: colorVar,
-        color: "#0A0B0E",
+        color: isMutedAccent ? "#F4F6FA" : "#0A0B0E",
         border: "none",
         fontWeight: 600
       };

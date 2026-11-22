@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, HelpCircle, AlertCircle, CheckCircle, Clock, Check, X } from "lucide-react";
-import { ProactiveItem, ProactiveAction } from "./types";
+import { motion } from "framer-motion";
+import { Sparkles, HelpCircle, AlertCircle, Check, X } from "lucide-react";
+import { ProactiveItem } from "./types";
 import { HimeEyes } from "../ui/HimeEyes";
 
 export interface ProactiveBubbleProps {
@@ -79,7 +79,6 @@ export const ProactiveBubble: React.FC<ProactiveBubbleProps> = ({
 	};
 
 	const accent = getLevelAccent();
-	const IconComp = accent.icon;
 
 	return (
 		<motion.div
@@ -123,7 +122,7 @@ export const ProactiveBubble: React.FC<ProactiveBubbleProps> = ({
 					flexShrink: 0
 				}}
 			>
-				<HimeEyes expression={item.expression} width={18} height={9} />
+				<HimeEyes expression={item.expression} size={18} />
 			</div>
 
 			{/* Bubble Text (strictly <= 40 chars) */}

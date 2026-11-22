@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Terminal, Play, CheckCircle, XCircle } from "lucide-react";
+import { Terminal, Play } from "lucide-react";
 import { ALLOWED_DEV_BINARIES, CommandRunResult } from "./types";
 
 export const CommandRunnerCard: React.FC = () => {

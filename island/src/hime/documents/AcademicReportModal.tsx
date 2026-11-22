@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { FileText, Check, X, BookOpen } from "lucide-react";
+import { X, BookOpen } from "lucide-react";
 import { createAcademicReport } from "../api";
 import { DocumentOpResult } from "./types";
 
@@ -190,7 +190,7 @@ export const AcademicReportModal: React.FC<AcademicReportModalProps> = ({
 								color: "#34D399"
 							}}
 						>
-							<div style={{ fontWeight: 600 }}>Dokumen siap ({result.format.toUpperCase()})</div>
+							<div style={{ fontWeight: 600 }}>Dokumen siap ({(result.format || "PDF").toUpperCase()})</div>
 							<div style={{ fontSize: "10px", color: "#A7F3D0" }}>{result.output_path}</div>
 						</div>
 					)}
