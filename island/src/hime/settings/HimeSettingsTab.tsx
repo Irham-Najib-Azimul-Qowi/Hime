@@ -836,7 +836,6 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					icon={ShieldCheck}
 					label="Izin Cloud"
 					desc="Aksi cloud selalu minta izin"
-					divider={false}
 				>
 					<span
 						style={{
@@ -850,6 +849,23 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					>
 						<Check size={12} />
 						{"Wajib Izin"}
+					</span>
+				</SettingRow>
+
+				<SettingRow
+					icon={Cpu}
+					label="Sumber Daya"
+					desc="Pantau RAM & Mode Hemat"
+					divider={false}
+				>
+					<span
+						style={{
+							fontSize: "11px",
+							color: "#38bdf8",
+							fontWeight: 600
+						}}
+					>
+						{"Target ≤250MB"}
 					</span>
 				</SettingRow>
 			</div>

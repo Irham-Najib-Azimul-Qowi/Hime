@@ -12,7 +12,8 @@ export type SettingsTab =
 	| "dock"
 	| "overlays"
 	| "about"
-	| "hime";
+	| "hime"
+	| "resources";
 
 export interface SettingRowProps {
 	icon: ComponentType<SVGProps<SVGSVGElement> & { size?: number; strokeWidth?: number }>;

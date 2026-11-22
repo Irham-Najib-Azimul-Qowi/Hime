@@ -1099,6 +1099,56 @@ impl CoreServer {
                 )
             }
 
+            "resource.metrics.get" | "/api/resource/metrics" => {
+                let metrics = self.ai.resource_manager.get_process_metrics();
+                JsonRpcResponse::success(req_id, serde_json::to_value(metrics).unwrap_or_default())
+            }
+
+            "resource.save_mode.set" | "/api/resource/save_mode" => {
+                let params = req.params.unwrap_or_default();
+                let mode_str = params.get("mode")
+                    .or_else(|| params.get("save_mode"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto");
+                let save_mode = crate::ai::resource::SaveMode::from_str_loose(mode_str);
+                self.ai.resource_manager.set_save_mode(save_mode);
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "success": true,
+                        "save_mode": save_mode.as_str(),
+                        "is_active": self.ai.resource_manager.is_save_mode_active(),
+                        "ai_idle_timeout_seconds": self.ai.resource_manager.ai_idle_timeout_seconds(),
+                        "target_budget_mb": self.ai.resource_manager.target_budget_mb()
+                    }),
+                )
+            }
+
+            "resource.save_mode.get" => {
+                let save_mode = self.ai.resource_manager.get_save_mode();
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "save_mode": save_mode.as_str(),
+                        "is_active": self.ai.resource_manager.is_save_mode_active(),
+                        "ai_idle_timeout_seconds": self.ai.resource_manager.ai_idle_timeout_seconds(),
+                        "target_budget_mb": self.ai.resource_manager.target_budget_mb()
+                    }),
+                )
+            }
+
+            "resource.ai_runtime.stop" | "/api/resource/ai_runtime/stop" => {
+                let stopped = self.ai.resource_manager.stop_ai_runtime();
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "success": stopped,
+                        "status": "stopped",
+                        "freed": true
+                    }),
+                )
+            }
+
             "translate.selection" => {
                 let params = req.params.unwrap_or_default();
                 let target_lang = params.get("target_lang").and_then(|v| v.as_str()).unwrap_or("id");

@@ -13,7 +13,8 @@ import {
 	Layers,
 	Info,
 	Megaphone,
-	Bot
+	Bot,
+	Cpu
 } from "lucide-react";
 import {
 	useSettings,
@@ -28,7 +29,7 @@ import type { SettingsTab } from "./settings/index";
 import { useAnnouncement } from "./hooks/useAnnouncement";
 import { initTheme } from "./theme";
 import { FeaturePreview } from "./settings/FeaturePreview";
-import { HimeSettingsTab } from "./hime/settings/HimeSettingsTab";
+import { HimeSettingsTab, ResourcesTab } from "./hime/settings";
 import { useHimeEvents } from "./hime/events/useHimeEvents";
 import "./Settings.css";
 
@@ -41,6 +42,7 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
 	{ id: "dock", label: "Dock", icon: Monitor },
 	{ id: "overlays", label: "Overlays", icon: Layers },
 	{ id: "hime", label: "Hime", icon: Bot },
+	{ id: "resources", label: "Sumber Daya", icon: Cpu },
 	{ id: "about", label: "About", icon: Info }
 ];
 
@@ -51,6 +53,7 @@ const TAB_COPY: Record<SettingsTab, string> = {
 	dock: "Shape the taskbar replacement around your workflow.",
 	overlays: "Keep quick controls visible only when you need them.",
 	hime: "Hime Assistant personal AI environment, Core status, and security PEP.",
+	resources: "Pantau RAM, CPU & Mode Hemat daya.",
 	about: "Version, updates and your settings data."
 };
 
@@ -370,6 +373,7 @@ function SettingsApp() {
 						/>
 					)}
 					{activeTab === "hime" && <HimeSettingsTab status={himeStatus} onRefresh={refreshHime} />}
+					{activeTab === "resources" && <ResourcesTab />}
 					{activeTab === "about" && (
 						<AboutTab
 							appVersion={settings.appVersion}
