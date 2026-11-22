@@ -19,7 +19,10 @@ import {
 	RotateCcw,
 	Smartphone,
 	QrCode,
-	Copy
+	Copy,
+	GitBranch,
+	Cloud,
+	ShieldCheck
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
@@ -75,6 +78,14 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 		return localStorage.getItem("hime-mobile-paired") === "true";
 	});
 	const pairingPin = "749-218";
+
+	// External Integrations State
+	const [githubConnected, setGithubConnected] = useState<boolean>(() => {
+		return localStorage.getItem("hime-github-connected") === "true";
+	});
+	const [gdriveConnected, setGdriveConnected] = useState<boolean>(() => {
+		return localStorage.getItem("hime-gdrive-connected") === "true";
+	});
 
 	// Proactive Interaction & Attention Budget State
 	const [proactiveBudget, setProactiveBudget] = useState<AttentionBudget>(() => {
@@ -733,6 +744,113 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					<div style={{ width: "100%", marginTop: "8px" }}>
 						<ExpressionTester />
 					</div>
+				</SettingRow>
+			</div>
+
+			{/* Section: Integrasi Akun */}
+			<div className="setting-group-label">Integrasi</div>
+			<div className="setting-group">
+				<SettingRow
+					icon={GitBranch}
+					label="Akun GitHub"
+					desc="Sinkron repositori & isu"
+				>
+					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+						<span
+							style={{
+								padding: "2px 6px",
+								borderRadius: "4px",
+								fontSize: "10px",
+								background: githubConnected ? "rgba(16, 185, 129, 0.15)" : "rgba(156, 163, 175, 0.15)",
+								color: githubConnected ? "#34d399" : "#9ca3af",
+								border: githubConnected ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(156, 163, 175, 0.3)"
+							}}
+						>
+							{githubConnected ? "repo, read:user" : "Terputus"}
+						</span>
+						<button
+							type="button"
+							onClick={() => {
+								const next = !githubConnected;
+								setGithubConnected(next);
+								localStorage.setItem("hime-github-connected", next ? "true" : "false");
+							}}
+							style={{
+								background: githubConnected ? "rgba(239, 68, 68, 0.15)" : "rgba(139, 92, 246, 0.15)",
+								border: githubConnected ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(139, 92, 246, 0.3)",
+								borderRadius: "6px",
+								padding: "4px 10px",
+								color: githubConnected ? "#f87171" : "#c084fc",
+								fontSize: "11px",
+								fontWeight: 600,
+								cursor: "pointer"
+							}}
+						>
+							{githubConnected ? "Putus" : "Sambung"}
+						</button>
+					</div>
+				</SettingRow>
+
+				<SettingRow
+					icon={Cloud}
+					label="Google Drive"
+					desc="Akses berkas & dokumen cloud"
+				>
+					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+						<span
+							style={{
+								padding: "2px 6px",
+								borderRadius: "4px",
+								fontSize: "10px",
+								background: gdriveConnected ? "rgba(16, 185, 129, 0.15)" : "rgba(156, 163, 175, 0.15)",
+								color: gdriveConnected ? "#34d399" : "#9ca3af",
+								border: gdriveConnected ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(156, 163, 175, 0.3)"
+							}}
+						>
+							{gdriveConnected ? "drive.file" : "Terputus"}
+						</span>
+						<button
+							type="button"
+							onClick={() => {
+								const next = !gdriveConnected;
+								setGdriveConnected(next);
+								localStorage.setItem("hime-gdrive-connected", next ? "true" : "false");
+							}}
+							style={{
+								background: gdriveConnected ? "rgba(239, 68, 68, 0.15)" : "rgba(56, 189, 248, 0.15)",
+								border: gdriveConnected ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(56, 189, 248, 0.3)",
+								borderRadius: "6px",
+								padding: "4px 10px",
+								color: gdriveConnected ? "#f87171" : "#38bdf8",
+								fontSize: "11px",
+								fontWeight: 600,
+								cursor: "pointer"
+							}}
+						>
+							{gdriveConnected ? "Putus" : "Sambung"}
+						</button>
+					</div>
+				</SettingRow>
+
+				<SettingRow
+					icon={ShieldCheck}
+					label="Izin Cloud"
+					desc="Aksi cloud selalu minta izin"
+					divider={false}
+				>
+					<span
+						style={{
+							fontSize: "11px",
+							color: "#10b981",
+							fontWeight: 600,
+							display: "flex",
+							alignItems: "center",
+							gap: "4px"
+						}}
+					>
+						<Check size={12} />
+						{"Wajib Izin"}
+					</span>
 				</SettingRow>
 			</div>
 
