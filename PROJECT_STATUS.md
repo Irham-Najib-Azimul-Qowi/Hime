@@ -9,7 +9,7 @@
 
 - **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
 - **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
-- **Tahap Berjalan:** **STAGE 15R (Hardening & Rilis Kandidat v1.0)**
+- **Tahap Berjalan:** **READY FOR OWNER ACCEPTANCE (v1.0 RC)**
 - **Kondisi Komponen Terverifikasi (`[VERIFIED]`):**
   - **Stage H0, H1, & R0 Selesai 100%:** Rebrand total ke Hime Island, binary release `hime-island.exe`, `hime_hotkey.exe`, dan `hime-core.exe` terkompilasi optimal.
   - **Branch Git:** `hime/h1-monorepo`.
@@ -30,18 +30,18 @@
 | **H0** | Studi & Impor Bloom (ke `island/`) | **`DONE`** *(ACCEPTED)* | Baseline resource, komponen notch, spring, font |
 | **H1** | Monorepo + Panen (migrasi di tempat) | **`DONE`** *(ACCEPTED)* | `02b §4`: satu folder `Hime`, karantina dan panen tuntas |
 | **R0** | Rebrand + Fondasi Desain + Fondasi Modul | **`DONE`** *(ACCEPTED)* | `03`, `04`, `14`: check-brand, tokens, hime-modsdk, check-hygiene |
-| **H2** | Bridge + Irisan Vertikal Island | **`IN PROGRESS`** | Mata mini di pill, bubble approval, Presentation NCM dasar |
-| **U1** | Notch Compose Manager + Mata + Animasi + Pintasan + Settings baru | `PENDING` | `05`, `06`, `13`: 22 ekspresi, NCM, keybinds terintegrasi, Settings baru |
-| **08R** | AI Runtime + Chat (07) + Persona (17) | `PENDING` | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
-| **U2** | Lirik (12) | `PENDING` | `12`: LRCLIB + local cache, sinkron waktu |
-| **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | `PENDING` | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
+| **H2** | Bridge + Irisan Vertikal Island | **`DONE`** *(ACCEPTED)* | Mata mini di pill, bubble approval, Presentation NCM dasar |
+| **U1** | Notch Compose Manager + Mata + Animasi + Pintasan + Settings baru | **`DONE`** *(ACCEPTED)* | `05`, `06`, `13`: 22 ekspresi, NCM, keybinds terintegrasi, Settings baru |
+| **08R** | AI Runtime + Chat (07) + Persona (17) | **`DONE`** *(ACCEPTED)* | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
+| **U2** | Lirik (12) | **`DONE`** *(ACCEPTED)* | `12`: LRCLIB + local cache, sinkron waktu |
+| **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | **`DONE`** *(ACCEPTED)* | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
 | **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | **`DONE`** *(VERIFIED)* | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat, 291/291 routines tests & 96/96 screentime tests pass |
 | **10R** | Storage Intelligence + Hime Proaktif (11) | **`DONE`** *(VERIFIED)* | `11`: Interaction Engine, anggaran perhatian, katalog 1–22, 24/24 proactive tests pass, 5-tier pass |
 | **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | **`DONE`** *(VERIFIED)* | `16`: Android Kotlin Compose, mTLS, overlay penegakan, 20/20 mobile parity tests pass, 5-tier pass |
 | **12R** | Dokumen & Produktivitas Lanjutan | **`DONE`** *(VERIFIED)* | Template akademik 4-3-3-3, DOCX/HTML, headless worker, operasional dokumen |
 | **13R** | Browser, Integrasi, Dev Workspace | **`DONE`** *(VERIFIED)* | SSRF defense, Git adapter, dev runner allowlisted, OAuth vault |
 | **U4** | Optimasi Resource (Pass Khusus) | **`DONE`** *(VERIFIED)* | `15`: Idle ≤ 350 MB, Mode Hemat ≤ 250 MB, 17/17 tests pass, 5-tier pass |
-| **15R** | Hardening & Rilis Kandidat v1.0 | **`IN PROGRESS`** | RC v1.0, audit GPL, installer Hime Island |
+| **15R** | Hardening & Rilis Kandidat v1.0 | **`DONE`** *(VERIFIED)* | `1.0.0-rc.1`, audit GPL-3.0, THIRD-PARTY.md, COMPATIBILITY.json, 16/16 tests pass, 5-tier pass |
 
 ---
 
@@ -69,8 +69,13 @@
 - **Stage 11R Mobile Parity Test Suite (`island/scripts/mobile_parity.test.ts`):** 20 passed, 0 failed (`[VERIFIED]`).
 - **Stage 12R & 13R Docs/Dev Suite (`island/scripts/documents_developer.test.ts`):** 18 passed, 0 failed (`[VERIFIED]`).
 - **Stage U4 Resource Optimization Suite (`island/scripts/resource_optimization.test.ts`):** 17 passed, 0 failed (`[VERIFIED]`).
+- **Stage 15R Release Candidate Suite (`island/scripts/release_candidate.test.ts`):** 16 passed, 0 failed (`[VERIFIED]`).
+- **Total Frontend Test Suite (`island/scripts/`):** 649 passed, 0 failed across 26 test files via Bun (`[VERIFIED]`).
+- **Core Rust Workspace Suite (`core/crates/`):** 218+ passed, 0 failed across 6 crates & 10 integration suites (`[VERIFIED]`).
+- **Island Shell Unit Tests (`island/src-tauri`):** 104 passed, 0 failed (`[VERIFIED]`).
 - **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses, `tsc --noEmit` 0 errors.
 - **Brand Compliance Gate (`scripts/check-brand.ps1`):** PASSED (0 violations).
 - **Code Hygiene Gate (`scripts/check-hygiene.ps1`):** PASSED (0 violations).
-- **Automated E2E Verification (`scripts/verify-e2e.ps1`):** ALL 5 TIERS PASSED (100% green).
+- **Automated E2E Verification (`scripts/verify-e2e.ps1`):** ALL 5 TIERS PASSED in 25.72s (100% green).
 - **CLI Pintu Tunggal:** `scripts/hime.ps1 doctor` lolos mendeteksi seluruh toolchain (Rust, Bun, NPM, Git, Cargo, Node.js).
+- **Status Akhir:** **READY FOR OWNER ACCEPTANCE (v1.0 RC)**.

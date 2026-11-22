@@ -1,4 +1,4 @@
-import { Download, RefreshCw, FileDown, Upload } from "lucide-react";
+import { Download, RefreshCw, FileDown, Upload, Scale, ShieldCheck, FileText, Info } from "lucide-react";
 import { SettingRow } from "./SettingRow";
 
 interface AboutTabProps {
@@ -71,7 +71,7 @@ export function AboutTab({
 			<div className="about-header">
 				<img src="/hime.png" className="about-logo" alt="Hime Island Logo" draggable={false} />
 				<h1 className="about-title">Hime Island</h1>
-				<p className="about-version">Version {appVersion}</p>
+				<p className="about-version">v1.0.0-rc.1</p>
 				<p className="about-credit">
 					Personal AI Dynamic Island for Windows
 				</p>
@@ -115,6 +115,31 @@ export function AboutTab({
 					action
 					divider={false}
 					onClick={handleImportSettings}
+				/>
+			</div>
+
+			<div className="setting-group-label setting-group-label--spaced">License & Open Source Notices</div>
+			<div className="setting-group">
+				<SettingRow
+					icon={Scale}
+					label="GNU General Public License v3.0"
+					desc="Hime Island is free and open-source software (GPL-3.0). You may redistribute and modify it under the terms of the GNU General Public License."
+				/>
+				<SettingRow
+					icon={ShieldCheck}
+					label="Upstream Attribution"
+					desc="Derivative work based upon Bloom (GPL-3.0) by Sehajveer Singh and contributors. Original Bloom source code is licensed under GPL-3.0."
+				/>
+				<SettingRow
+					icon={FileText}
+					label="Open Source Components"
+					desc="Built with Tauri v2 (Apache-2.0/MIT), React 19 (MIT), Framer Motion (MIT), Lucide Icons (ISC), and windows-rs (MIT/Apache-2.0)."
+				/>
+				<SettingRow
+					icon={Info}
+					label="Legal Documentation"
+					desc="Full license text, notices, and component manifests are provided in LICENSE, NOTICE, and docs/legal/THIRD-PARTY.md."
+					divider={false}
 				/>
 			</div>
 		</div>
