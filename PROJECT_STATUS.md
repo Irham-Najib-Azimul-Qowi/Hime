@@ -9,7 +9,7 @@
 
 - **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
 - **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
-- **Tahap Berjalan:** **STAGE H2 (Bridge + Irisan Vertikal Island)**
+- **Tahap Berjalan:** **STAGE 11R (Mobile & Devices + Paritas + Penegakan HP)**
 - **Kondisi Komponen Terverifikasi (`[VERIFIED]`):**
   - **Stage H0, H1, & R0 Selesai 100%:** Rebrand total ke Hime Island, binary release `hime-island.exe`, `hime_hotkey.exe`, dan `hime-core.exe` terkompilasi optimal.
   - **Branch Git:** `hime/h1-monorepo`.
@@ -35,9 +35,9 @@
 | **08R** | AI Runtime + Chat (07) + Persona (17) | `PENDING` | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
 | **U2** | Lirik (12) | `PENDING` | `12`: LRCLIB + local cache, sinkron waktu |
 | **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | `PENDING` | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
-| **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | `PENDING` | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat |
-| **10R** | Storage Intelligence + Hime Proaktif (11) | `PENDING` | `11`: Interaction Engine, anggaran perhatian, katalog 1–22 |
-| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | `PENDING` | `16`: Android Kotlin Compose, mTLS, overlay penegakan |
+| **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | **`DONE`** *(VERIFIED)* | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat, 291/291 routines tests & 96/96 screentime tests pass |
+| **10R** | Storage Intelligence + Hime Proaktif (11) | **`DONE`** *(VERIFIED)* | `11`: Interaction Engine, anggaran perhatian, katalog 1–22, 24/24 proactive tests pass, 5-tier pass |
+| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | **`IN PROGRESS`** | `16`: Android Kotlin Compose, mTLS, overlay penegakan |
 | **12R** | Dokumen & Produktivitas Lanjutan | `PENDING` | Template akademik, DOCX/HTML, headless worker |
 | **13R** | Browser, Integrasi, Dev Workspace | `PENDING` | SSRF defense, Git adapter, dev runner allowlisted |
 | **U4** | Optimasi Resource (Pass Khusus) | `PENDING` | `15`: Idle ≤ 350 MB, WebView2 low-memory/suspend, soak test |
@@ -61,7 +61,13 @@
 
 ## 4. BUKTI AUDIT TERKINI
 
-- **Crate Tests Core (`core/crates/`):** 124 passed, 0 failed (`[VERIFIED]`).
-- **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses (`dist/` dihasilkan dalam 1m 30s), cargo check src-tauri sukses.
+- **Crate Tests Core (`core/crates/`):** 130+ passed, 0 failed (`[VERIFIED]`).
+- **Island Shell Tests (`island/src-tauri`):** 104 passed, 0 failed (`[VERIFIED]`).
+- **Stage U3 Routines Test Suite (`island/scripts/routines.test.ts`):** 291 passed, 0 failed (`[VERIFIED]`).
+- **Stage U3 Screen-Time Test Suite (`island/scripts/screentime.test.ts`):** 96 passed, 0 failed (`[VERIFIED]`).
+- **Stage 10R Proactive Test Suite (`island/scripts/proactive.test.ts`):** 24 passed, 0 failed (`[VERIFIED]`).
+- **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses, `tsc --noEmit` 0 errors.
+- **Brand Compliance Gate (`scripts/check-brand.ps1`):** PASSED (0 violations).
+- **Code Hygiene Gate (`scripts/check-hygiene.ps1`):** PASSED (0 violations).
+- **Automated E2E Verification (`scripts/verify-e2e.ps1`):** ALL 5 TIERS PASSED (100% green).
 - **CLI Pintu Tunggal:** `scripts/hime.ps1 doctor` lolos mendeteksi seluruh toolchain (Rust, Bun, NPM, Git, Cargo, Node.js).
-- **Status Git Monorepo:** Branch `hime/h1-monorepo`, commit `19c3be1`, working tree 100% clean.

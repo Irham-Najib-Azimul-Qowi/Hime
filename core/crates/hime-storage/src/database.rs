@@ -302,9 +302,65 @@ impl Database {
                 window_title TEXT,
                 category TEXT NOT NULL,
                 duration_secs INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL
+                timestamp INTEGER NOT NULL,
+                date_str TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_screen_time_timestamp ON screen_time_sessions(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_screen_time_date ON screen_time_sessions(date_str);
+            CREATE INDEX IF NOT EXISTS idx_screen_time_app ON screen_time_sessions(app_name);
+
+            -- Stage U3: Routines, Commitments, Enforcement & Pauses
+            CREATE TABLE IF NOT EXISTS routines (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                schedule_json TEXT NOT NULL,
+                enforcement TEXT NOT NULL,
+                allowed_apps_json TEXT,
+                distraction_rules_json TEXT,
+                start_grace_min INTEGER NOT NULL DEFAULT 5,
+                escalation_json TEXT,
+                current_streak INTEGER NOT NULL DEFAULT 0,
+                best_streak INTEGER NOT NULL DEFAULT 0,
+                last_completed_date TEXT,
+                frozen_on_date TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_routines_active ON routines(active);
+
+            CREATE TABLE IF NOT EXISTS commitments (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                target_apps_json TEXT NOT NULL,
+                daily_quota_min INTEGER,
+                active INTEGER NOT NULL DEFAULT 1,
+                pending_weakening_until INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_commitments_active ON commitments(active);
+
+            CREATE TABLE IF NOT EXISTS enforcement_history (
+                id TEXT PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                target_app TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                action_taken TEXT NOT NULL,
+                details TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_enforcement_hist_ts ON enforcement_history(timestamp);
+
+            CREATE TABLE IF NOT EXISTS emergency_pauses (
+                id TEXT PRIMARY KEY,
+                started_at INTEGER NOT NULL,
+                duration_min INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                expired_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_emergency_pauses_exp ON emergency_pauses(expired_at);
 
             CREATE TABLE IF NOT EXISTS document_jobs (
                 id TEXT PRIMARY KEY,
@@ -436,7 +492,35 @@ impl Database {
                 cooldown_minutes INTEGER NOT NULL DEFAULT 30,
                 muted_until INTEGER,
                 updated_at INTEGER NOT NULL
-            );",
+            );
+
+            -- Stage 10R: Proactive Interaction Preference Rules
+            CREATE TABLE IF NOT EXISTS interaction_prefs (
+                kind TEXT PRIMARY KEY,
+                decision TEXT NOT NULL DEFAULT 'default',
+                backoff_count INTEGER NOT NULL DEFAULT 0,
+                backoff_until INTEGER,
+                last_shown_at INTEGER,
+                updated_at INTEGER NOT NULL
+            );
+
+            -- Stage U2: Real-Time Lyrics Cache
+            CREATE TABLE IF NOT EXISTS lyrics_cache (
+                cache_key TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT,
+                duration_sec INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                synced_lyrics TEXT,
+                parsed_json TEXT,
+                plain_lyrics TEXT,
+                is_instrumental INTEGER NOT NULL DEFAULT 0,
+                user_offset_ms INTEGER NOT NULL DEFAULT 0,
+                cached_at INTEGER NOT NULL,
+                expires_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_lyrics_expires ON lyrics_cache(expires_at);",
         )?;
 
         // Ensure backward compatibility if audit_events already existed without hash columns
@@ -448,6 +532,14 @@ impl Database {
         }
         if !existing_cols.iter().any(|c| c == "hash") {
             let _ = conn.execute("ALTER TABLE audit_events ADD COLUMN hash TEXT", []);
+        }
+
+        // Ensure backward compatibility if screen_time_sessions already existed without date_str
+        let mut pragma_st_stmt = conn.prepare("PRAGMA table_info(screen_time_sessions)")?;
+        let st_rows = pragma_st_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let existing_st_cols: Vec<String> = st_rows.filter_map(Result::ok).collect();
+        if !existing_st_cols.iter().any(|c| c == "date_str") {
+            let _ = conn.execute("ALTER TABLE screen_time_sessions ADD COLUMN date_str TEXT NOT NULL DEFAULT ''", []);
         }
 
         Ok(())
@@ -1935,6 +2027,15 @@ impl Database {
         Ok(rows > 0)
     }
 
+    pub fn delete_productivity_task(&self, task_id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM productivity_tasks WHERE id = ?1",
+            rusqlite::params![task_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn create_study_schedule(&self, schedule: &StudyScheduleRecord) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1994,17 +2095,20 @@ impl Database {
 
     pub fn record_screen_time_session(&self, session: &ScreenTimeSessionRecord) -> Result<(), StorageError> {
         let conn = self.conn.lock().unwrap();
+        // Sanitize window title to maintain SEC-09 privacy: never store sensitive titles or URLs
+        let sanitized_title: Option<String> = None;
+        let date_str = session.date_str.clone().unwrap_or_else(|| epoch_to_date_str(session.timestamp));
         conn.execute(
-            "INSERT INTO screen_time_sessions (id, app_name, window_title, category, duration_secs, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![session.id, session.app_name, session.window_title, session.category, session.duration_secs, session.timestamp],
+            "INSERT INTO screen_time_sessions (id, app_name, window_title, category, duration_secs, timestamp, date_str)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![session.id, session.app_name, sanitized_title, session.category, session.duration_secs, session.timestamp, date_str],
         )?;
         Ok(())
     }
 
     pub fn list_screen_time_sessions(&self, limit: usize) -> Result<Vec<ScreenTimeSessionRecord>, StorageError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, app_name, window_title, category, duration_secs, timestamp FROM screen_time_sessions ORDER BY timestamp DESC LIMIT ?1")?;
+        let mut stmt = conn.prepare("SELECT id, app_name, window_title, category, duration_secs, timestamp, date_str FROM screen_time_sessions ORDER BY timestamp DESC LIMIT ?1")?;
         let rows = stmt.query_map(rusqlite::params![limit], map_screen_time_session)?;
         let mut sessions = Vec::new();
         for s in rows {
@@ -2016,7 +2120,252 @@ impl Database {
     pub fn clear_screen_time_sessions(&self) -> Result<usize, StorageError> {
         let conn = self.conn.lock().unwrap();
         let count = conn.execute("DELETE FROM screen_time_sessions", [])?;
+        let _ = conn.execute_batch("VACUUM;");
         Ok(count)
+    }
+
+    // ---------------------------------------------------------
+    // Stage U3: Routines, Commitments, Streaks & Enforcement
+    // ---------------------------------------------------------
+
+    pub fn create_routine(&self, routine: &RoutineRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO routines (
+                id, title, category, schedule_json, enforcement, allowed_apps_json,
+                distraction_rules_json, start_grace_min, escalation_json, current_streak,
+                best_streak, last_completed_date, frozen_on_date, active, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            rusqlite::params![
+                routine.id, routine.title, routine.category, routine.schedule_json, routine.enforcement,
+                routine.allowed_apps_json, routine.distraction_rules_json, routine.start_grace_min,
+                routine.escalation_json, routine.current_streak, routine.best_streak,
+                routine.last_completed_date, routine.frozen_on_date, if routine.active { 1 } else { 0 },
+                routine.created_at, routine.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_routine(&self, id: &str) -> Result<Option<RoutineRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, category, schedule_json, enforcement, allowed_apps_json,
+                    distraction_rules_json, start_grace_min, escalation_json, current_streak,
+                    best_streak, last_completed_date, frozen_on_date, active, created_at, updated_at
+             FROM routines WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_routine(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_routines(&self, active_only: bool) -> Result<Vec<RoutineRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if active_only {
+            "SELECT id, title, category, schedule_json, enforcement, allowed_apps_json,
+                    distraction_rules_json, start_grace_min, escalation_json, current_streak,
+                    best_streak, last_completed_date, frozen_on_date, active, created_at, updated_at
+             FROM routines WHERE active = 1 ORDER BY created_at ASC"
+        } else {
+            "SELECT id, title, category, schedule_json, enforcement, allowed_apps_json,
+                    distraction_rules_json, start_grace_min, escalation_json, current_streak,
+                    best_streak, last_completed_date, frozen_on_date, active, created_at, updated_at
+             FROM routines ORDER BY created_at ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], map_routine)?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn update_routine(&self, routine: &RoutineRecord) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE routines SET
+                title = ?2, category = ?3, schedule_json = ?4, enforcement = ?5,
+                allowed_apps_json = ?6, distraction_rules_json = ?7, start_grace_min = ?8,
+                escalation_json = ?9, current_streak = ?10, best_streak = ?11,
+                last_completed_date = ?12, frozen_on_date = ?13, active = ?14, updated_at = ?15
+             WHERE id = ?1",
+            rusqlite::params![
+                routine.id, routine.title, routine.category, routine.schedule_json, routine.enforcement,
+                routine.allowed_apps_json, routine.distraction_rules_json, routine.start_grace_min,
+                routine.escalation_json, routine.current_streak, routine.best_streak,
+                routine.last_completed_date, routine.frozen_on_date, if routine.active { 1 } else { 0 },
+                routine.updated_at
+            ],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn delete_routine(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute("DELETE FROM routines WHERE id = ?1", rusqlite::params![id])?;
+        Ok(count > 0)
+    }
+
+    pub fn update_routine_streak(
+        &self,
+        id: &str,
+        current_streak: i64,
+        best_streak: i64,
+        last_completed_date: Option<&str>,
+        frozen_on_date: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let count = conn.execute(
+            "UPDATE routines SET current_streak = ?2, best_streak = ?3, last_completed_date = ?4, frozen_on_date = ?5, updated_at = ?6 WHERE id = ?1",
+            rusqlite::params![id, current_streak, best_streak, last_completed_date, frozen_on_date, now],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn create_commitment(&self, commitment: &CommitmentRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO commitments (id, name, tier, target_apps_json, daily_quota_min, active, pending_weakening_until, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                commitment.id, commitment.name, commitment.tier, commitment.target_apps_json,
+                commitment.daily_quota_min, if commitment.active { 1 } else { 0 },
+                commitment.pending_weakening_until, commitment.created_at, commitment.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_commitment(&self, id: &str) -> Result<Option<CommitmentRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, tier, target_apps_json, daily_quota_min, active, pending_weakening_until, created_at, updated_at
+             FROM commitments WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_commitment(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_commitments(&self, active_only: bool) -> Result<Vec<CommitmentRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if active_only {
+            "SELECT id, name, tier, target_apps_json, daily_quota_min, active, pending_weakening_until, created_at, updated_at
+             FROM commitments WHERE active = 1 ORDER BY created_at ASC"
+        } else {
+            "SELECT id, name, tier, target_apps_json, daily_quota_min, active, pending_weakening_until, created_at, updated_at
+             FROM commitments ORDER BY created_at ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], map_commitment)?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn update_commitment(&self, commitment: &CommitmentRecord) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE commitments SET
+                name = ?2, tier = ?3, target_apps_json = ?4, daily_quota_min = ?5,
+                active = ?6, pending_weakening_until = ?7, updated_at = ?8
+             WHERE id = ?1",
+            rusqlite::params![
+                commitment.id, commitment.name, commitment.tier, commitment.target_apps_json,
+                commitment.daily_quota_min, if commitment.active { 1 } else { 0 },
+                commitment.pending_weakening_until, commitment.updated_at
+            ],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn delete_commitment(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute("DELETE FROM commitments WHERE id = ?1", rusqlite::params![id])?;
+        Ok(count > 0)
+    }
+
+    pub fn request_commitment_weakening(&self, id: &str, pending_until: i64) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let count = conn.execute(
+            "UPDATE commitments SET pending_weakening_until = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, pending_until, now],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn record_enforcement_event(&self, event: &EnforcementHistoryRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO enforcement_history (id, timestamp, target_app, tier, action_taken, details)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![event.id, event.timestamp, event.target_app, event.tier, event.action_taken, event.details],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_enforcement_history(&self, limit: usize) -> Result<Vec<EnforcementHistoryRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, target_app, tier, action_taken, details
+             FROM enforcement_history ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], map_enforcement_history)?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn record_emergency_pause(&self, pause: &EmergencyPauseRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO emergency_pauses (id, started_at, duration_min, reason, expired_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![pause.id, pause.started_at, pause.duration_min, pause.reason, pause.expired_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_active_emergency_pause(&self, now_secs: i64) -> Result<Option<EmergencyPauseRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, started_at, duration_min, reason, expired_at
+             FROM emergency_pauses WHERE expired_at > ?1 ORDER BY expired_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![now_secs])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_emergency_pause(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_emergency_pauses(&self, limit: usize) -> Result<Vec<EmergencyPauseRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, started_at, duration_min, reason, expired_at
+             FROM emergency_pauses ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], map_emergency_pause)?;
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
     }
 
     pub fn create_document_job(&self, job: &DocumentJobRecord) -> Result<(), StorageError> {
@@ -2647,6 +2996,150 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // =========================================================================
+    // Stage 10R: Interaction Preference Rules & get_proactive_suggestion
+    // =========================================================================
+
+    pub fn get_proactive_suggestion(&self, id: &str) -> Result<Option<ProactiveSuggestionRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, content, category, status, score, created_at, responded_at
+             FROM proactive_suggestions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], map_proactive_suggestion)?;
+        if let Some(r) = rows.next() { Ok(Some(r?)) } else { Ok(None) }
+    }
+
+    pub fn upsert_interaction_pref(&self, pref: &InteractionPrefRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO interaction_prefs (kind, decision, backoff_count, backoff_until, last_shown_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(kind) DO UPDATE SET
+                decision = excluded.decision,
+                backoff_count = excluded.backoff_count,
+                backoff_until = excluded.backoff_until,
+                last_shown_at = excluded.last_shown_at,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                pref.kind,
+                pref.decision,
+                pref.backoff_count,
+                pref.backoff_until,
+                pref.last_shown_at,
+                pref.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_interaction_pref(&self, kind: &str) -> Result<Option<InteractionPrefRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, decision, backoff_count, backoff_until, last_shown_at, updated_at
+             FROM interaction_prefs WHERE kind = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![kind], map_interaction_pref)?;
+        if let Some(r) = rows.next() { Ok(Some(r?)) } else { Ok(None) }
+    }
+
+    pub fn list_interaction_prefs(&self) -> Result<Vec<InteractionPrefRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, decision, backoff_count, backoff_until, last_shown_at, updated_at
+             FROM interaction_prefs ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], map_interaction_pref)?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    // =========================================================================
+    // Stage U2: Lyrics Cache
+    // =========================================================================
+
+    pub fn get_cached_lyrics(&self, cache_key: &str) -> Result<Option<CachedLyricsRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT cache_key, title, artist, album, duration_sec, source,
+                    synced_lyrics, parsed_json, plain_lyrics, is_instrumental,
+                    user_offset_ms, cached_at, expires_at
+             FROM lyrics_cache WHERE cache_key = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![cache_key], map_cached_lyrics)?;
+        if let Some(r) = rows.next() {
+            let record = r?;
+            if let Some(exp) = record.expires_at {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if exp > 0 && now > exp {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn store_cached_lyrics(&self, record: &CachedLyricsRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO lyrics_cache (
+                cache_key, title, artist, album, duration_sec, source,
+                synced_lyrics, parsed_json, plain_lyrics, is_instrumental,
+                user_offset_ms, cached_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                title = excluded.title,
+                artist = excluded.artist,
+                album = excluded.album,
+                duration_sec = excluded.duration_sec,
+                source = excluded.source,
+                synced_lyrics = excluded.synced_lyrics,
+                parsed_json = excluded.parsed_json,
+                plain_lyrics = excluded.plain_lyrics,
+                is_instrumental = excluded.is_instrumental,
+                user_offset_ms = excluded.user_offset_ms,
+                cached_at = excluded.cached_at,
+                expires_at = excluded.expires_at",
+            rusqlite::params![
+                record.cache_key,
+                record.title,
+                record.artist,
+                record.album,
+                record.duration_sec as i64,
+                record.source,
+                record.synced_lyrics,
+                record.parsed_json,
+                record.plain_lyrics,
+                if record.is_instrumental { 1 } else { 0 },
+                record.user_offset_ms,
+                record.cached_at,
+                record.expires_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_lyrics_offset(&self, cache_key: &str, user_offset_ms: i32) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE lyrics_cache SET user_offset_ms = ?1 WHERE cache_key = ?2",
+            rusqlite::params![user_offset_ms, cache_key],
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn clear_lyrics_cache(&self) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute("DELETE FROM lyrics_cache", [])?;
+        Ok(count)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -3097,24 +3590,157 @@ fn map_accountability_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<Acco
     })
 }
 
+pub fn epoch_to_date_str(timestamp: i64) -> String {
+    let days = timestamp / 86400;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ScreenTimeSessionRecord {
     pub id: String,
     pub app_name: String,
+    #[serde(default)]
     pub window_title: Option<String>,
-    pub category: String, // "productive" | "study" | "distracting"
+    pub category: String, // "productive" | "study" | "distracting" / "belajar" | "netral" | "pengalih"
     pub duration_secs: i64,
     pub timestamp: i64,
+    #[serde(default)]
+    pub date_str: Option<String>,
 }
 
 fn map_screen_time_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScreenTimeSessionRecord> {
     Ok(ScreenTimeSessionRecord {
         id: row.get(0)?,
         app_name: row.get(1)?,
-        window_title: row.get(2)?,
+        window_title: None, // sanitized to maintain SEC-09 privacy
         category: row.get(3)?,
         duration_secs: row.get(4)?,
         timestamp: row.get(5)?,
+        date_str: row.get(6).ok(),
+    })
+}
+
+// =========================================================================
+// Stage U3: Routines, Commitments, Enforcement & Emergency Pauses Records
+// =========================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RoutineRecord {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub schedule_json: String,
+    pub enforcement: String,
+    pub allowed_apps_json: Option<String>,
+    pub distraction_rules_json: Option<String>,
+    pub start_grace_min: i64,
+    pub escalation_json: Option<String>,
+    pub current_streak: i64,
+    pub best_streak: i64,
+    pub last_completed_date: Option<String>,
+    pub frozen_on_date: Option<String>,
+    pub active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_routine(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRecord> {
+    let active_int: i64 = row.get(13)?;
+    Ok(RoutineRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        category: row.get(2)?,
+        schedule_json: row.get(3)?,
+        enforcement: row.get(4)?,
+        allowed_apps_json: row.get(5)?,
+        distraction_rules_json: row.get(6)?,
+        start_grace_min: row.get(7)?,
+        escalation_json: row.get(8)?,
+        current_streak: row.get(9)?,
+        best_streak: row.get(10)?,
+        last_completed_date: row.get(11)?,
+        frozen_on_date: row.get(12)?,
+        active: active_int != 0,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CommitmentRecord {
+    pub id: String,
+    pub name: String,
+    pub tier: String, // "ingatkan", "tegas", "paksa"
+    pub target_apps_json: String,
+    pub daily_quota_min: Option<i64>,
+    pub active: bool,
+    pub pending_weakening_until: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_commitment(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitmentRecord> {
+    let active_int: i64 = row.get(5)?;
+    Ok(CommitmentRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        tier: row.get(2)?,
+        target_apps_json: row.get(3)?,
+        daily_quota_min: row.get(4)?,
+        active: active_int != 0,
+        pending_weakening_until: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct EnforcementHistoryRecord {
+    pub id: String,
+    pub timestamp: i64,
+    pub target_app: String,
+    pub tier: String,
+    pub action_taken: String,
+    pub details: Option<String>,
+}
+
+fn map_enforcement_history(row: &rusqlite::Row<'_>) -> rusqlite::Result<EnforcementHistoryRecord> {
+    Ok(EnforcementHistoryRecord {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        target_app: row.get(2)?,
+        tier: row.get(3)?,
+        action_taken: row.get(4)?,
+        details: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct EmergencyPauseRecord {
+    pub id: String,
+    pub started_at: i64,
+    pub duration_min: i64,
+    pub reason: String,
+    pub expired_at: i64,
+}
+
+fn map_emergency_pause(row: &rusqlite::Row<'_>) -> rusqlite::Result<EmergencyPauseRecord> {
+    Ok(EmergencyPauseRecord {
+        id: row.get(0)?,
+        started_at: row.get(1)?,
+        duration_min: row.get(2)?,
+        reason: row.get(3)?,
+        expired_at: row.get(4)?,
     })
 }
 
@@ -3404,6 +4030,64 @@ fn map_proactive_settings(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proactive
         cooldown_minutes: row.get(2)?,
         muted_until: row.get(3)?,
         updated_at: row.get(4)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct InteractionPrefRecord {
+    pub kind: String,
+    pub decision: String,
+    pub backoff_count: i64,
+    pub backoff_until: Option<i64>,
+    pub last_shown_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+fn map_interaction_pref(row: &rusqlite::Row<'_>) -> rusqlite::Result<InteractionPrefRecord> {
+    Ok(InteractionPrefRecord {
+        kind: row.get(0)?,
+        decision: row.get(1)?,
+        backoff_count: row.get(2)?,
+        backoff_until: row.get(3)?,
+        last_shown_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CachedLyricsRecord {
+    pub cache_key: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_sec: u32,
+    pub source: String,
+    pub synced_lyrics: Option<String>,
+    pub parsed_json: Option<String>,
+    pub plain_lyrics: Option<String>,
+    pub is_instrumental: bool,
+    pub user_offset_ms: i32,
+    pub cached_at: i64,
+    pub expires_at: Option<i64>,
+}
+
+fn map_cached_lyrics(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedLyricsRecord> {
+    let dur_i64: i64 = row.get(4)?;
+    let inst_int: i32 = row.get(9)?;
+    Ok(CachedLyricsRecord {
+        cache_key: row.get(0)?,
+        title: row.get(1)?,
+        artist: row.get(2)?,
+        album: row.get(3)?,
+        duration_sec: dur_i64 as u32,
+        source: row.get(5)?,
+        synced_lyrics: row.get(6)?,
+        parsed_json: row.get(7)?,
+        plain_lyrics: row.get(8)?,
+        is_instrumental: inst_int != 0,
+        user_offset_ms: row.get(10)?,
+        cached_at: row.get(11)?,
+        expires_at: row.get(12)?,
     })
 }
 
@@ -3981,6 +4665,7 @@ mod tests {
             category: "productive".to_string(),
             duration_secs: 1800,
             timestamp: 1600,
+            date_str: None,
         };
         db.record_screen_time_session(&session).unwrap();
 
@@ -4232,5 +4917,200 @@ mod tests {
         let fetched_proact = db.get_proactive_settings().unwrap();
         assert_eq!(fetched_proact.cooldown_minutes, 45);
         assert_eq!(fetched_proact.muted_until, Some(1500));
+    }
+
+    #[test]
+    fn test_stage_u2_lyrics_cache() {
+        let db = Database::open_in_memory().unwrap();
+        let record = CachedLyricsRecord {
+            cache_key: "abc123hash".to_string(),
+            title: "Hikaru Nara".to_string(),
+            artist: "Goose house".to_string(),
+            album: Some("Shigatsu wa Kimi no Uso".to_string()),
+            duration_sec: 254,
+            source: "lrclib".to_string(),
+            synced_lyrics: Some("[00:01.00]Niji-iro no fantaji".to_string()),
+            parsed_json: Some("[{\"ms\":1000,\"text\":\"Niji-iro no fantaji\"}]".to_string()),
+            plain_lyrics: Some("Niji-iro no fantaji".to_string()),
+            is_instrumental: false,
+            user_offset_ms: 0,
+            cached_at: 1000,
+            expires_at: Some(2000000000),
+        };
+
+        // 1. Store
+        db.store_cached_lyrics(&record).unwrap();
+
+        // 2. Retrieve
+        let retrieved = db.get_cached_lyrics("abc123hash").unwrap().expect("found cached lyrics");
+        assert_eq!(retrieved.title, "Hikaru Nara");
+        assert_eq!(retrieved.artist, "Goose house");
+        assert_eq!(retrieved.album.as_deref(), Some("Shigatsu wa Kimi no Uso"));
+        assert_eq!(retrieved.duration_sec, 254);
+        assert_eq!(retrieved.user_offset_ms, 0);
+
+        // 3. Update offset
+        let updated = db.update_lyrics_offset("abc123hash", 500).unwrap();
+        assert!(updated);
+        let retrieved2 = db.get_cached_lyrics("abc123hash").unwrap().unwrap();
+        assert_eq!(retrieved2.user_offset_ms, 500);
+
+        // 4. Expiry logic
+        let expired_record = CachedLyricsRecord {
+            cache_key: "expired_key".to_string(),
+            title: "Old Song".to_string(),
+            artist: "Old Artist".to_string(),
+            album: None,
+            duration_sec: 180,
+            source: "not_found".to_string(),
+            synced_lyrics: None,
+            parsed_json: None,
+            plain_lyrics: None,
+            is_instrumental: false,
+            user_offset_ms: 0,
+            cached_at: 10,
+            expires_at: Some(50), // expired in the past relative to unix epoch now
+        };
+        db.store_cached_lyrics(&expired_record).unwrap();
+        assert!(db.get_cached_lyrics("expired_key").unwrap().is_none());
+
+        // 5. Clear cache
+        let count = db.clear_lyrics_cache().unwrap();
+        assert_eq!(count, 2);
+        assert!(db.get_cached_lyrics("abc123hash").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_stage_u3_routines_commitments_and_enforcement_storage() {
+        let db = Database::open_in_memory().unwrap();
+
+        // 1. Routines CRUD & streak
+        let routine = RoutineRecord {
+            id: "rtn-01".to_string(),
+            title: "Belajar Skripsi".to_string(),
+            category: "belajar".to_string(),
+            schedule_json: "{\"days\":[\"Monday\",\"Tuesday\"],\"time\":\"19:00\",\"duration_min\":45}".to_string(),
+            enforcement: "tegas".to_string(),
+            allowed_apps_json: Some("[\"Code.exe\",\"word.exe\"]".to_string()),
+            distraction_rules_json: Some("{\"block_during_routine\":true,\"distraction_apps\":[\"chrome.exe\"]}".to_string()),
+            start_grace_min: 5,
+            escalation_json: Some("{\"enabled\":true,\"missed_threshold\":3}".to_string()),
+            current_streak: 2,
+            best_streak: 5,
+            last_completed_date: Some("2026-11-20".to_string()),
+            frozen_on_date: None,
+            active: true,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.create_routine(&routine).unwrap();
+
+        let fetched = db.get_routine("rtn-01").unwrap().expect("routine found");
+        assert_eq!(fetched.title, "Belajar Skripsi");
+        assert_eq!(fetched.enforcement, "tegas");
+        assert_eq!(fetched.current_streak, 2);
+
+        // Update streak
+        assert!(db.update_routine_streak("rtn-01", 3, 5, Some("2026-11-21"), None).unwrap());
+        let updated = db.get_routine("rtn-01").unwrap().unwrap();
+        assert_eq!(updated.current_streak, 3);
+        assert_eq!(updated.last_completed_date.as_deref(), Some("2026-11-21"));
+
+        let list = db.list_routines(true).unwrap();
+        assert_eq!(list.len(), 1);
+
+        // 2. Commitments CRUD & weakening
+        let commitment = CommitmentRecord {
+            id: "com-01".to_string(),
+            name: "Blokir Game".to_string(),
+            tier: "paksa".to_string(),
+            target_apps_json: "[\"steam.exe\",\"epicgames.exe\"]".to_string(),
+            daily_quota_min: Some(60),
+            active: true,
+            pending_weakening_until: None,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        db.create_commitment(&commitment).unwrap();
+
+        let fetched_com = db.get_commitment("com-01").unwrap().expect("commitment found");
+        assert_eq!(fetched_com.name, "Blokir Game");
+        assert_eq!(fetched_com.tier, "paksa");
+        assert!(fetched_com.pending_weakening_until.is_none());
+
+        assert!(db.request_commitment_weakening("com-01", 1600).unwrap());
+        let weakened = db.get_commitment("com-01").unwrap().unwrap();
+        assert_eq!(weakened.pending_weakening_until, Some(1600));
+
+        let com_list = db.list_commitments(false).unwrap();
+        assert_eq!(com_list.len(), 1);
+
+        // 3. Enforcement history
+        let event = EnforcementHistoryRecord {
+            id: "enf-01".to_string(),
+            timestamp: 1200,
+            target_app: "steam.exe".to_string(),
+            tier: "paksa".to_string(),
+            action_taken: "warned".to_string(),
+            details: Some("Warning countdown started".to_string()),
+        };
+        db.record_enforcement_event(&event).unwrap();
+        let history = db.list_enforcement_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].target_app, "steam.exe");
+
+        // 4. Emergency Pauses
+        let pause = EmergencyPauseRecord {
+            id: "pause-01".to_string(),
+            started_at: 1000,
+            duration_min: 30,
+            reason: "Sakit".to_string(),
+            expired_at: 2800,
+        };
+        db.record_emergency_pause(&pause).unwrap();
+
+        let active_pause = db.get_active_emergency_pause(1500).unwrap().expect("active pause found");
+        assert_eq!(active_pause.reason, "Sakit");
+        assert_eq!(active_pause.duration_min, 30);
+
+        // Check expired pause
+        assert!(db.get_active_emergency_pause(3000).unwrap().is_none());
+
+        // 5. Screen time privacy sanitization verification
+        let st_session = ScreenTimeSessionRecord {
+            id: "st-priv-01".to_string(),
+            app_name: "Chrome.exe".to_string(),
+            window_title: Some("https://mybank.com/sensitive-account-details".to_string()),
+            category: "pengalih".to_string(),
+            duration_secs: 300,
+            timestamp: 1700000000,
+            date_str: None,
+        };
+        db.record_screen_time_session(&st_session).unwrap();
+
+        let st_list = db.list_screen_time_sessions(5).unwrap();
+        assert_eq!(st_list.len(), 1);
+        assert_eq!(st_list[0].app_name, "Chrome.exe");
+        // Crucial SEC-09 assertion: sensitive window title MUST be stripped/sanitized
+        assert!(st_list[0].window_title.is_none());
+        assert_eq!(st_list[0].date_str.as_deref(), Some("2023-11-14"));
+    }
+
+    #[test]
+    fn test_epoch_to_date_str_roundtrip_30000_days() {
+        use super::epoch_to_date_str;
+
+        // Verify across 0..30000 days (1970 to 2052) without any panic or overflow
+        for day in 0..30000 {
+            let ts = day * 86400;
+            let s = epoch_to_date_str(ts);
+            assert_eq!(s.len(), 10, "Formatted date string must be YYYY-MM-DD for day {}", day);
+        }
+
+        // Explicit critical boundary assertions
+        assert_eq!(epoch_to_date_str(20512 * 86400), "2026-02-28");
+        assert_eq!(epoch_to_date_str(20513 * 86400), "2026-03-01");
+        assert_eq!(epoch_to_date_str(19782 * 86400), "2024-02-29");
+        assert_eq!(epoch_to_date_str(11016 * 86400), "2000-02-29");
     }
 }
