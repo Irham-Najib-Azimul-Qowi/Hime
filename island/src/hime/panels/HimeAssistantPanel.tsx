@@ -240,14 +240,18 @@ export const HimeAssistantPanel: React.FC<HimeAssistantPanelProps> = ({
       {/* Messages & Process Cards Scroll Stream */}
       <div
         ref={chatScrollRef}
+        className="hime-scrollbar"
         style={{
           flex: 1,
           minHeight: 0,
           display: "flex",
           flexDirection: "column",
           overflowY: "auto",
+          overflowX: "hidden",
           paddingRight: "4px",
-          marginBottom: "8px"
+          marginBottom: "8px",
+          scrollbarWidth: "thin",
+          scrollbarColor: "rgba(255, 255, 255, 0.2) transparent"
         }}
       >
         {/* Welcome Empty State */}

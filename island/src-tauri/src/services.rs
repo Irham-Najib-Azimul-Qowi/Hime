@@ -1130,6 +1130,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                         if !title.is_empty() {
                                             let artist =
                                                 props.Artist().unwrap_or_default().to_string();
+                                            let album =
+                                                props.AlbumTitle().unwrap_or_default().to_string();
                                             let mut artwork = None;
                                             let mut got_art_from_cache = false;
                                             if let Some((
@@ -1243,6 +1245,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                             let info = MediaInfo {
                                                 title,
                                                 artist,
+                                                album,
                                                 is_playing,
                                                 has_media: true,
                                                 artwork,
@@ -1266,6 +1269,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     let current = best_info.unwrap_or(MediaInfo {
                         title: "".into(),
                         artist: "".into(),
+                        album: "".into(),
                         is_playing: false,
                         has_media: false,
                         artwork: None,
@@ -1440,7 +1444,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     );
                     let class_str = std::str::from_utf8(&class_name[..len as usize]).unwrap_or("");
 
-                    let is_bloom = process_id == my_process_id || class_str.contains("Bloom");
+                    let is_own_window = process_id == my_process_id || class_str.contains("Hime") || class_str.contains("Island");
                     let is_popup_menu = class_str == "#32768";
                     let is_visible = IsWindowVisible(hwnd).as_bool();
                     let is_iconic = IsIconic(hwnd).as_bool();
@@ -1460,7 +1464,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                         && (rect.right - rect.left) > 0
                         && (rect.bottom - rect.top) > 0;
 
-                    if is_bloom
+                    if is_own_window
                         || is_popup_menu
                         || !is_visible
                         || is_iconic
@@ -2437,7 +2441,7 @@ fn run_mouse_hook_thread() {
         // can shut down and detect a hook Windows silently removed on timeout.
         let timer = SetTimer(None, 1, 500, None);
         if timer == 0 {
-            eprintln!("Bloom mouse hook: timer creation failed; retrying");
+            eprintln!("Hime mouse hook: timer creation failed; retrying");
             return;
         }
         let mut hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), None, 0).ok();
@@ -3858,12 +3862,14 @@ fn set_main_appbar_reservation(main_win: tauri::WebviewWindow, reserve: bool) {
                         final_top,
                         final_width,
                         ph,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
                     );
                 }
             }
         }
 
+        let _ = main_win.show();
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE) };
         re_assert_topmost(hwnd);
     }
 }
@@ -4146,7 +4152,7 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
             }
 
             // Filter out system containers and background stuff
-            if title == "Program Manager" || title == "Hime" || title == "Hime Island" || title == "Hime Dock" || title == "Bloom" || title == "Bloom Dock" {
+            if title == "Program Manager" || title == "Hime" || title == "Hime Island" || title == "Hime Dock" {
                 return true.into();
             }
 
@@ -4186,7 +4192,7 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
                         || (window_class == "#32770" && dialog_has_tab_control(hwnd));
 
                     // Filter out Hime Island itself (except the Settings window) and some common background processes
-                    if ((lowercase_path.contains("hime-island.exe") || lowercase_path.contains("hime.exe") || lowercase_path.contains("bloom.exe")) && title != "Settings")
+                    if ((lowercase_path.contains("hime-island.exe") || lowercase_path.contains("hime.exe")) && title != "Settings")
                         || lowercase_path.contains("conhost.exe")
                         || (lowercase_path.contains("explorer.exe") && !is_explorer_window)
                         || lowercase_path.contains("shellexperiencehost.exe")
@@ -4830,7 +4836,8 @@ mod tests {
 
     #[test]
     fn only_fixed_notch_mode_reserves_the_work_area() {
-        assert!(notch_mode_reserves_work_area(Some("fixed")));
+        // In Hime, the floating island overlay never reserves the desktop work area in any mode
+        assert!(!notch_mode_reserves_work_area(Some("fixed")));
         assert!(!notch_mode_reserves_work_area(Some("smart")));
         assert!(!notch_mode_reserves_work_area(Some("peek")));
         // Legacy alias for smart

@@ -51,6 +51,77 @@ fn chrono_local() -> String {
     format!("{}", now)
 }
 
+fn is_island_running() -> bool {
+    unsafe {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
+        let mutex_name: Vec<u16> = "HimeSingleInstance"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // 0x00100000 is SYNCHRONIZE
+        if let Ok(h) = OpenMutexW(
+            SYNCHRONIZATION_ACCESS_RIGHTS(0x00100000),
+            false,
+            windows::core::PCWSTR(mutex_name.as_ptr()),
+        ) {
+            let _ = CloseHandle(h);
+            return true;
+        }
+
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W::default();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                    if name.eq_ignore_ascii_case("hime-island.exe") {
+                        let _ = CloseHandle(snapshot);
+                        return true;
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+        }
+    }
+    false
+}
+
+fn signal_show_island() -> bool {
+    unsafe {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenEventW, SetEvent, SYNCHRONIZATION_ACCESS_RIGHTS};
+        let event_name: Vec<u16> = "HimeShowIsland"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // EVENT_MODIFY_STATE | SYNCHRONIZE = 0x00100002
+        if let Ok(h_event) = OpenEventW(
+            SYNCHRONIZATION_ACCESS_RIGHTS(0x00100002),
+            false,
+            windows::core::PCWSTR(event_name.as_ptr()),
+        ) {
+            let _ = SetEvent(h_event);
+            let _ = CloseHandle(h_event);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn handle_hotkey(id: i32) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,8 +137,23 @@ fn handle_hotkey(id: i32) {
 
     match id {
         HOTKEY_START_CSH | HOTKEY_START_CAS | HOTKEY_START_CWH | HOTKEY_START_CAH => {
-            log("HotKey match -> Spawning start-hime.ps1");
-            let res = Command::new("powershell.exe")
+            if is_island_running() {
+                log("hime-island.exe is running -> Signaling HimeShowIsland named event");
+                if signal_show_island() {
+                    log("HimeShowIsland event signaled successfully");
+                    return;
+                }
+                log("Failed to signal HimeShowIsland event, falling back to powershell");
+            }
+
+            log("HotKey match -> Spawning start-hime.ps1 with CREATE_NO_WINDOW");
+            let mut cmd = Command::new("powershell.exe");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW: prevent console window flash
+            }
+            let res = cmd
                 .args([
                     "-WindowStyle",
                     "Hidden",
@@ -83,8 +169,14 @@ fn handle_hotkey(id: i32) {
             }
         }
         HOTKEY_STOP_CSQ | HOTKEY_STOP_CAQ | HOTKEY_STOP_CWQ => {
-            log("HotKey match -> Spawning stop-hime.ps1");
-            let res = Command::new("powershell.exe")
+            log("HotKey match -> Spawning stop-hime.ps1 with CREATE_NO_WINDOW");
+            let mut cmd = Command::new("powershell.exe");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW: prevent console window flash
+            }
+            let res = cmd
                 .args([
                     "-WindowStyle",
                     "Hidden",

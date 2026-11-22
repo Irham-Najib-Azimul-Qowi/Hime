@@ -16,6 +16,7 @@ if (Test-Path $settingsFile) {
         $json = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json
         $json."bloom-dock-enabled" = "true"
         $json."bloom-dock-mode" = "fixed"
+        $json."bloom-notch-mode" = "fixed"
         $json | ConvertTo-Json -Compress | Set-Content -Path $settingsFile -Force
     } catch {}
 } else {
@@ -39,13 +40,29 @@ if ($Autostart) {
     Set-Content -Path $stateFile -Value ("active=" + (Get-Date).ToString("o")) -Force
 }
 
+# 3. Reset Win32 Named Event HimeQuit so processes start fresh
+try {
+    $quitEvent = [System.Threading.EventWaitHandle]::OpenExisting("HimeQuit")
+    $quitEvent.Reset() | Out-Null
+    $quitEvent.Dispose()
+} catch {
+    try {
+        $quitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "HimeQuit")
+        $quitEvent.Reset() | Out-Null
+        $quitEvent.Dispose()
+    } catch {}
+}
+
 $himeRoot = "X:\folder_ai\Hime"
 
 # Helper to find release or debug executable
 function Find-Bin($subpath, $name) {
     $rel = Join-Path $himeRoot "$subpath\target\release\$name"
-    if (Test-Path $rel) { return $rel }
     $dbg = Join-Path $himeRoot "$subpath\target\debug\$name"
+    if ((Test-Path $rel) -and (Test-Path $dbg)) {
+        if ((Get-Item $rel).LastWriteTime -ge (Get-Item $dbg).LastWriteTime) { return $rel } else { return $dbg }
+    }
+    if (Test-Path $rel) { return $rel }
     if (Test-Path $dbg) { return $dbg }
     return $null
 }
@@ -75,6 +92,13 @@ if (-not $shell) {
     if ($shellExe) {
         Start-Process -FilePath $shellExe -WorkingDirectory "$himeRoot\island"
     }
+} else {
+    # If already running, signal HimeShowIsland to wake / toggle the notch UI
+    try {
+        $evt = [System.Threading.EventWaitHandle]::OpenExisting("HimeShowIsland")
+        $evt.Set() | Out-Null
+        $evt.Dispose()
+    } catch {}
 }
 
 # 6. Start Hotkey Daemon if not running

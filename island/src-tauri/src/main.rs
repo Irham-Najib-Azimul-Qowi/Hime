@@ -22,7 +22,7 @@ mod wifi;
 mod window_region;
 
 use std::sync::atomic::Ordering;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use windows::core::BOOL;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
@@ -242,7 +242,24 @@ fn main() {
             hime::hime_inspect_download,
             hime::hime_replace_and_archive_download,
             hime::hime_create_academic_report,
-            hime::hime_merge_pdfs
+            hime::hime_merge_pdfs,
+            hime::hime_lyrics_get,
+            hime::hime_lyrics_set_offset,
+            hime::hime_lyrics_clear_cache,
+            hime::hime_list_tasks,
+            hime::hime_create_task,
+            hime::hime_update_task,
+            hime::hime_delete_task,
+            hime::hime_parse_task_natural,
+            hime::hime_translate_text,
+            hime::hime_translate_selection,
+            hime::hime_get_translate_opt_in,
+            hime::hime_set_translate_opt_in,
+            hime::hime_get_proactive_settings,
+            hime::hime_set_proactive_settings,
+            hime::hime_list_proactive_suggestions,
+            hime::hime_respond_proactive_suggestion,
+            hime::hime_evaluate_proactive_suggestions
         ])
         .setup(|app| {
             crate::diagnostics::record("debug", "3: inside setup hook");
@@ -448,6 +465,51 @@ fn main() {
                 }
             }
 
+            // Listen for Win32 Named Event HimeShowIsland for instant hotkey wake/toggle
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    // Auto-reset event (bManualReset = false, bInitialState = false)
+                    if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeShowIsland")) } {
+                        loop {
+                            let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                            if res == WAIT_OBJECT_0 {
+                                diagnostics::record("hotkey", "source=hime_show_island_event");
+                                if let Some(main_win) = app_handle.get_webview_window("main") {
+                                    let _ = main_win.show();
+                                    let _ = main_win.unminimize();
+                                    let _ = main_win.set_focus();
+                                    let _ = main_win.emit("hime-show-island", ());
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Listen for Win32 Named Event HimeQuit for synchronized clean shutdown
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    if let Ok(h_event) = unsafe { CreateEventW(None, true, false, w!("HimeQuit")) } {
+                        let _ = unsafe { windows::Win32::System::Threading::ResetEvent(h_event) };
+                        let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                        if res == WAIT_OBJECT_0 {
+                            diagnostics::record("shutdown", "source=hime_quit_event");
+                            crate::commands::restore_taskbar_and_exit(&app_handle);
+                        }
+                    }
+                });
+            }
+
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -464,17 +526,8 @@ fn main() {
                     .menu(&menu)
                     .on_menu_event(move |_, event| match event.id().as_ref() {
                         "quit" => {
-                            if let Some(s) = crate::hime::HimeBridgeService::global() {
-                                s.shutdown();
-                            }
                             diagnostics::record("shutdown", "source=tray");
-                            SHUTTING_DOWN.store(true, Ordering::Relaxed);
-                            crate::commands::release_appbars(&ah);
-                            set_taskbar_visibility(true, true);
-                            NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
-                            set_native_osd_suppressed(false);
-
-                            ah.exit(0);
+                            crate::commands::restore_taskbar_and_exit(&ah);
                         }
                         "restart" => {
                             if let Some(s) = crate::hime::HimeBridgeService::global() {
