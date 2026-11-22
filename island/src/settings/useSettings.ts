@@ -379,8 +379,8 @@ export function useSettings() {
 			.catch(() => {});
 
 		getVersion()
-			.then((ver) => setAppVersion(ver || "3.1.2"))
-			.catch(() => setAppVersion("3.1.2"));
+			.then((ver) => setAppVersion(ver ? `v1.0.0-rc.1` : "v1.0.0-rc.1"))
+			.catch(() => setAppVersion("v1.0.0-rc.1"));
 
 		checkForUpdates(false);
 	}, []);
