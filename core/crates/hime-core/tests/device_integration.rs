@@ -543,3 +543,157 @@ async fn test_concurrent_approval_resolution_race_safety() {
     let err_count = (resp1.error.is_some() as usize) + (resp2.error.is_some() as usize);
     assert_eq!(err_count, 1, "Exactly one approval attempt must fail");
 }
+
+#[tokio::test]
+async fn test_stage11r_mobile_sync_screentime_and_enforcement() {
+    let ctx = setup_test_context();
+    let gw = ctx.device_manager.gateway.clone();
+
+    // 1. Pair a test device
+    let qr = ctx.device_manager.pairing.create_pairing_session(300).unwrap();
+    ctx.device_manager.pairing.complete_pairing(
+        &qr.pairing_token,
+        &qr.confirmation_code,
+        "dev-pixel-sync",
+        "Pixel 9 Pro",
+        "android",
+        "SHA256:SYNC-FP",
+    ).unwrap();
+
+    // 2. Test device.sync / /api/device/sync
+    let sync_req = JsonRpcRequest::new(
+        "sync-1",
+        "device.sync",
+        Some(serde_json::json!({
+            "device_id": "dev-pixel-sync",
+            "timestamp": 1700000000,
+            "tasks": [
+                {
+                    "id": "task-mob-1",
+                    "board_id": "default",
+                    "column_id": "todo",
+                    "title": "Belajar Kotlin Compose",
+                    "priority": "high",
+                    "status": "todo",
+                    "created_at": 1700000000,
+                    "updated_at": 1700000000
+                }
+            ],
+            "routines": [
+                {
+                    "id": "routine-mob-1",
+                    "title": "Sesi Pagi",
+                    "category": "belajar",
+                    "schedule_json": "{}",
+                    "enforcement": "tegas",
+                    "allowed_apps_json": "[]",
+                    "distraction_rules_json": "[]",
+                    "start_grace_min": 5,
+                    "escalation_json": "{}",
+                    "current_streak": 3,
+                    "best_streak": 5,
+                    "active": true,
+                    "created_at": 1700000000,
+                    "updated_at": 1700000000
+                }
+            ],
+            "commitments": [
+                {
+                    "id": "com-mob-1",
+                    "name": "Batas Sosmed",
+                    "tier": "tegas",
+                    "target_apps_json": "[\"com.instagram.android\"]",
+                    "daily_quota_min": 30,
+                    "active": true,
+                    "created_at": 1700000000,
+                    "updated_at": 1700000000
+                }
+            ],
+            "pinned_shelf": [
+                {
+                    "id": "shelf-1",
+                    "title": "Catatan Kuliah",
+                    "content": "https://example.com/notes",
+                    "item_type": "link",
+                    "is_pinned": true,
+                    "source_device": "dev-pixel-sync",
+                    "created_at": 1700000000,
+                    "updated_at": 1700000000
+                }
+            ],
+            "approvals": []
+        })),
+    );
+
+    let sync_resp = gw.dispatch_device_rpc(sync_req, "SHA256:SYNC-FP").await;
+    assert!(sync_resp.error.is_none());
+    let sync_result = sync_resp.result.unwrap();
+    assert_eq!(sync_result["success"], true);
+
+    // Verify tasks and shelf items persisted
+    let shelf_items = ctx.db.list_shelf_items(true, 10).unwrap();
+    assert_eq!(shelf_items.len(), 1);
+    assert_eq!(shelf_items[0].title, "Catatan Kuliah");
+
+    let routines = ctx.db.list_routines(false).unwrap();
+    assert!(routines.iter().any(|r| r.id == "routine-mob-1"));
+
+    // 3. Test device.screentime / /api/device/screentime
+    let st_req = JsonRpcRequest::new(
+        "st-1",
+        "/api/device/screentime",
+        Some(serde_json::json!({
+            "device_id": "dev-pixel-sync",
+            "timestamp": 1700001000,
+            "entries": [
+                {
+                    "package_name": "ai.hime.mobile",
+                    "app_name": "Hime",
+                    "category": "belajar",
+                    "duration_secs": 1800,
+                    "timestamp": 1700001000
+                },
+                {
+                    "package_name": "com.instagram.android",
+                    "app_name": "Instagram",
+                    "category": "pengalih",
+                    "duration_secs": 600,
+                    "timestamp": 1700001000
+                }
+            ]
+        })),
+    );
+
+    let st_resp = gw.dispatch_device_rpc(st_req, "SHA256:SYNC-FP").await;
+    assert!(st_resp.error.is_none());
+    let st_result = st_resp.result.unwrap();
+    assert_eq!(st_result["success"], true);
+    assert_eq!(st_result["entries_recorded"], 2);
+    assert!(st_result["total_today_study_secs"].as_i64().unwrap() >= 1800);
+    assert!(st_result["total_today_distracting_secs"].as_i64().unwrap() >= 600);
+
+    // 4. Test device.enforcement / /api/device/enforcement
+    let enf_req = JsonRpcRequest::new(
+        "enf-1",
+        "/api/device/enforcement",
+        Some(serde_json::json!({
+            "device_id": "dev-pixel-sync",
+            "active_routine_id": "routine-mob-1"
+        })),
+    );
+
+    let enf_resp = gw.dispatch_device_rpc(enf_req, "SHA256:SYNC-FP").await;
+    assert!(enf_resp.error.is_none());
+    let enf_result = enf_resp.result.unwrap();
+    assert_eq!(enf_result["tier"], "tegas");
+    assert_eq!(enf_result["is_study_block_active"], true);
+    assert_eq!(enf_result["emergency_pause_active"], false);
+
+    // Check protected packages list includes phone, dialer, emergency, maps
+    let protected = enf_result["protected_packages"].as_array().unwrap();
+    assert!(protected.iter().any(|p| p == "com.android.phone"));
+    assert!(protected.iter().any(|p| p == "com.android.dialer" || p == "com.google.android.dialer"));
+    assert!(protected.iter().any(|p| p == "com.android.emergency"));
+    assert!(protected.iter().any(|p| p == "com.google.android.apps.maps"));
+    assert!(protected.iter().any(|p| p == "ai.hime.mobile"));
+}

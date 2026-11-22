@@ -9,7 +9,7 @@
 
 - **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
 - **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
-- **Tahap Berjalan:** **STAGE 11R (Mobile & Devices + Paritas + Penegakan HP)**
+- **Tahap Berjalan:** **STAGE 12R (Dokumen & Produktivitas Lanjutan)**
 - **Kondisi Komponen Terverifikasi (`[VERIFIED]`):**
   - **Stage H0, H1, & R0 Selesai 100%:** Rebrand total ke Hime Island, binary release `hime-island.exe`, `hime_hotkey.exe`, dan `hime-core.exe` terkompilasi optimal.
   - **Branch Git:** `hime/h1-monorepo`.
@@ -37,8 +37,8 @@
 | **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | `PENDING` | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
 | **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | **`DONE`** *(VERIFIED)* | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat, 291/291 routines tests & 96/96 screentime tests pass |
 | **10R** | Storage Intelligence + Hime Proaktif (11) | **`DONE`** *(VERIFIED)* | `11`: Interaction Engine, anggaran perhatian, katalog 1–22, 24/24 proactive tests pass, 5-tier pass |
-| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | **`IN PROGRESS`** | `16`: Android Kotlin Compose, mTLS, overlay penegakan |
-| **12R** | Dokumen & Produktivitas Lanjutan | `PENDING` | Template akademik, DOCX/HTML, headless worker |
+| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | **`DONE`** *(VERIFIED)* | `16`: Android Kotlin Compose, mTLS, overlay penegakan, 20/20 mobile parity tests pass, 5-tier pass |
+| **12R** | Dokumen & Produktivitas Lanjutan | **`IN PROGRESS`** | Template akademik, DOCX/HTML, headless worker |
 | **13R** | Browser, Integrasi, Dev Workspace | `PENDING` | SSRF defense, Git adapter, dev runner allowlisted |
 | **U4** | Optimasi Resource (Pass Khusus) | `PENDING` | `15`: Idle ≤ 350 MB, WebView2 low-memory/suspend, soak test |
 | **15R** | Hardening & Rilis Kandidat v1.0 | `PENDING` | RC v1.0, audit GPL, installer Hime Island |
@@ -66,6 +66,7 @@
 - **Stage U3 Routines Test Suite (`island/scripts/routines.test.ts`):** 291 passed, 0 failed (`[VERIFIED]`).
 - **Stage U3 Screen-Time Test Suite (`island/scripts/screentime.test.ts`):** 96 passed, 0 failed (`[VERIFIED]`).
 - **Stage 10R Proactive Test Suite (`island/scripts/proactive.test.ts`):** 24 passed, 0 failed (`[VERIFIED]`).
+- **Stage 11R Mobile Parity Test Suite (`island/scripts/mobile_parity.test.ts`):** 20 passed, 0 failed (`[VERIFIED]`).
 - **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses, `tsc --noEmit` 0 errors.
 - **Brand Compliance Gate (`scripts/check-brand.ps1`):** PASSED (0 violations).
 - **Code Hygiene Gate (`scripts/check-hygiene.ps1`):** PASSED (0 violations).

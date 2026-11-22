@@ -16,7 +16,10 @@ import {
 	HelpCircle,
 	Sparkles,
 	Clock,
-	RotateCcw
+	RotateCcw,
+	Smartphone,
+	QrCode,
+	Copy
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
@@ -65,6 +68,13 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 		const raw = localStorage.getItem("bloom-notch-mode") || "smart";
 		return raw === "auto-hide" ? "smart" : raw;
 	});
+
+	// Mobile Pairing & Devices State
+	const [showQrModal, setShowQrModal] = useState(false);
+	const [isPhonePaired, setIsPhonePaired] = useState<boolean>(() => {
+		return localStorage.getItem("hime-mobile-paired") === "true";
+	});
+	const pairingPin = "749-218";
 
 	// Proactive Interaction & Attention Budget State
 	const [proactiveBudget, setProactiveBudget] = useState<AttentionBudget>(() => {
@@ -606,6 +616,109 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						{"Reset".slice(0, 10)}
 					</button>
 				</SettingRow>
+			</div>
+
+			{/* Section: Perangkat & Sinkronisasi HP */}
+			<div className="setting-group-label">Perangkat & HP</div>
+			<div className="setting-group">
+				<SettingRow
+					icon={Smartphone}
+					label="Pasang HP"
+					desc={isPhonePaired ? "1 ponsel terhubung (Pixel 8)" : "Hubungkan ponsel Android"}
+					action
+					onClick={() => setShowQrModal(!showQrModal)}
+					divider={false}
+				>
+					<button
+						type="button"
+						onClick={(e) => {
+							e.stopPropagation();
+							setShowQrModal(!showQrModal);
+						}}
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: "4px",
+							background: showQrModal ? "#8b5cf6" : "rgba(139, 92, 246, 0.15)",
+							border: "1px solid rgba(139, 92, 246, 0.35)",
+							borderRadius: "6px",
+							padding: "4px 10px",
+							color: showQrModal ? "#ffffff" : "#c4b5fd",
+							fontSize: "11px",
+							fontWeight: 600,
+							cursor: "pointer"
+						}}
+					>
+						<QrCode size={12} />
+						<span>{showQrModal ? "Tutup QR" : "Kode QR"}</span>
+					</button>
+				</SettingRow>
+
+				{showQrModal && (
+					<div
+						style={{
+							padding: "14px 16px",
+							background: "rgba(15, 23, 42, 0.6)",
+							borderTop: "1px solid rgba(255, 255, 255, 0.08)",
+							display: "flex",
+							flexDirection: "column",
+							alignItems: "center",
+							gap: "10px"
+						}}
+					>
+						<div style={{ fontSize: "12px", color: "#e2e8f0", fontWeight: 600 }}>
+							Pindai QR dengan Hime Mobile
+						</div>
+						<div
+							style={{
+								width: "140px",
+								height: "140px",
+								background: "#ffffff",
+								padding: "8px",
+								borderRadius: "10px",
+								display: "flex",
+								flexDirection: "column",
+								alignItems: "center",
+								justifyContent: "center",
+								boxShadow: "0 4px 16px rgba(0, 0, 0, 0.4)"
+							}}
+						>
+							<QrCode size={120} color="#0f172a" strokeWidth={2} />
+						</div>
+
+						<div style={{ textAlign: "center" }}>
+							<div style={{ fontSize: "10px", color: "#94a3b8" }}>Kode Verifikasi Manual:</div>
+							<div style={{ fontSize: "15px", fontFamily: "monospace", fontWeight: 700, color: "#38bdf8", letterSpacing: "2px" }}>
+								{pairingPin}
+							</div>
+							<div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
+								Host: 192.168.1.100:20130 • mTLS
+							</div>
+						</div>
+
+						<div style={{ display: "flex", gap: "6px" }}>
+							<button
+								type="button"
+								onClick={() => {
+									setIsPhonePaired(!isPhonePaired);
+									localStorage.setItem("hime-mobile-paired", !isPhonePaired ? "true" : "false");
+								}}
+								style={{
+									background: isPhonePaired ? "rgba(239, 68, 68, 0.15)" : "rgba(16, 185, 129, 0.15)",
+									border: isPhonePaired ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(16, 185, 129, 0.3)",
+									color: isPhonePaired ? "#f87171" : "#34d399",
+									borderRadius: "6px",
+									padding: "4px 10px",
+									fontSize: "10px",
+									fontWeight: 600,
+									cursor: "pointer"
+								}}
+							>
+								{isPhonePaired ? "Putuskan" : "Simulasi Pasang"}
+							</button>
+						</div>
+					</div>
+				)}
 			</div>
 
 			{/* Section: Maskot & Mata */}

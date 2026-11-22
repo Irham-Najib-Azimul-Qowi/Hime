@@ -32,10 +32,16 @@ class MainActivity : ComponentActivity() {
         val auditor = SecurityPostureAuditor(this)
         val posture = auditor.auditPosture()
 
+        // Handle incoming Android Share Target ("Bagikan ke Hime")
+        var sharedText: String? = null
+        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+        }
+
         setContent {
             HimeTheme {
                 var isPaired by remember { mutableStateOf(false) }
-                var currentTab by remember { mutableStateOf(0) }
+                var currentTab by remember { mutableStateOf(if (sharedText != null) 3 else 0) }
 
                 val pendingApprovals = remember {
                     mutableStateListOf(
@@ -43,7 +49,7 @@ class MainActivity : ComponentActivity() {
                             id = "ticket-001",
                             actionType = "storage.delete_file",
                             path = "C:/Users/User/Downloads/large_dump.zip",
-                            description = "Delete obsolete 4GB archive",
+                            description = "Hapus file arsip usang 4GB",
                             expiresAt = System.currentTimeMillis() + 300_000
                         )
                     )
@@ -65,32 +71,32 @@ class MainActivity : ComponentActivity() {
                                 NavigationBarItem(
                                     selected = currentTab == 0,
                                     onClick = { currentTab = 0 },
-                                    icon = { Icon(Icons.Default.Chat, contentDescription = "Chat") },
-                                    label = { Text("Chat") }
+                                    icon = { Icon(Icons.Default.Chat, contentDescription = "Hime") },
+                                    label = { Text("Hime") }
                                 )
                                 NavigationBarItem(
                                     selected = currentTab == 1,
                                     onClick = { currentTab = 1 },
-                                    icon = { Icon(Icons.Default.Assignment, contentDescription = "Tasks") },
-                                    label = { Text("Tasks") }
+                                    icon = { Icon(Icons.Default.Assignment, contentDescription = "Tugas") },
+                                    label = { Text("Tugas") }
                                 )
                                 NavigationBarItem(
                                     selected = currentTab == 2,
                                     onClick = { currentTab = 2 },
-                                    icon = { Icon(Icons.Default.Storage, contentDescription = "Storage") },
-                                    label = { Text("Storage") }
+                                    icon = { Icon(Icons.Default.Timer, contentDescription = "Fokus") },
+                                    label = { Text("Fokus") }
                                 )
                                 NavigationBarItem(
                                     selected = currentTab == 3,
                                     onClick = { currentTab = 3 },
-                                    icon = { Icon(Icons.Default.Security, contentDescription = "Security") },
-                                    label = { Text("Security") }
+                                    icon = { Icon(Icons.Default.Bookmark, contentDescription = "Simpanan") },
+                                    label = { Text("Simpanan") }
                                 )
                                 NavigationBarItem(
                                     selected = currentTab == 4,
                                     onClick = { currentTab = 4 },
-                                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                                    label = { Text("Settings") }
+                                    icon = { Icon(Icons.Default.MoreHoriz, contentDescription = "Lainnya") },
+                                    label = { Text("Lainnya") }
                                 )
                             }
                         }
@@ -109,9 +115,17 @@ class MainActivity : ComponentActivity() {
                                         // Resolution handled by server
                                     }
                                 )
-                                2 -> StorageScreen()
-                                3 -> SecurityScreen(posture = posture)
-                                4 -> SettingsScreen(onDisconnect = { isPaired = false })
+                                2 -> FocusScreen()
+                                3 -> ShelfScreen(
+                                    initialSharedText = sharedText,
+                                    onSendToLaptop = { item ->
+                                        // Dispatched via MtlsClient / WebSocket
+                                    }
+                                )
+                                4 -> MoreScreen(
+                                    posture = posture,
+                                    onDisconnect = { isPaired = false }
+                                )
                             }
                         }
                     }

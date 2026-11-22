@@ -10,7 +10,7 @@ pub use database::{
     KanbanBoardRecord,
     KanbanColumnRecord, MemoryRecord, MessageRecord, PairedDeviceRecord, PairingTokenRecord,
     ProactiveSettingsRecord, ProactiveSuggestionRecord, ProductivityTaskRecord, RoutineRecord,
-    ScreenTimeSessionRecord, SpecialistDelegationRecord, SpecialistRecord, StorageAnalysisReport,
+    ScreenTimeSessionRecord, ShelfItemRecord, SpecialistDelegationRecord, SpecialistRecord, StorageAnalysisReport,
     StorageBackupRecord, StorageError, StudyScheduleRecord, TaskRecord, TokenValidationResult,
     ToolExecutionRecord,
 };

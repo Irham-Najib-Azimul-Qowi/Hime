@@ -107,9 +107,9 @@ impl DeviceGatewayServer {
 
         // All other device methods require valid client_cert_fingerprint
         let params = req.params.unwrap_or_default();
-        let device_id = params.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
+        let device_id = params.get("device_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        match self.pairing.verify_device_active(device_id, client_cert_fingerprint) {
+        match self.pairing.verify_device_active(&device_id, client_cert_fingerprint) {
             Ok(true) => {}
             Ok(false) => {
                 return JsonRpcResponse::error(
@@ -193,7 +193,7 @@ impl DeviceGatewayServer {
                 let file_size = params.get("file_size").and_then(|v| v.as_i64()).unwrap_or(0);
                 let sha256 = params.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
 
-                match self.transfer.init_incoming_transfer(transfer_id, device_id, file_name, file_size, sha256) {
+                match self.transfer.init_incoming_transfer(transfer_id, &device_id, file_name, file_size, sha256) {
                     Ok(rec) => JsonRpcResponse::success(req_id, serde_json::to_value(rec).unwrap_or_default()),
                     Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
                 }
@@ -224,6 +224,208 @@ impl DeviceGatewayServer {
                     Ok(op_res) => JsonRpcResponse::success(req_id, serde_json::to_value(op_res).unwrap_or_default()),
                     Err(e) => JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e.to_string(), None),
                 }
+            }
+
+            // -----------------------------------------------------------------
+            // Stage 11R: Two-Way Device Sync, Screen-Time & Mobile Enforcement
+            // -----------------------------------------------------------------
+
+            "device.sync" | "/api/device/sync" => {
+                match serde_json::from_value::<crate::device::protocol::DeviceSyncPayload>(params) {
+                    Ok(payload) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                        // 1. Ingest incoming mobile tasks
+                        for task in &payload.tasks {
+                            let _ = self.db.upsert_productivity_task(task);
+                        }
+
+                        // 2. Ingest incoming mobile routines
+                        for routine in &payload.routines {
+                            let _ = self.db.upsert_routine(routine);
+                        }
+
+                        // 3. Ingest incoming mobile commitments
+                        for commitment in &payload.commitments {
+                            let _ = self.db.upsert_commitment(commitment);
+                        }
+
+                        // 4. Ingest incoming mobile pinned shelf items
+                        for shelf in &payload.pinned_shelf {
+                            let rec: hime_storage::ShelfItemRecord = shelf.clone().into();
+                            let _ = self.db.upsert_shelf_item(&rec);
+                        }
+
+                        // 5. Ingest incoming mobile approvals
+                        if !payload.approvals.is_empty() {
+                            let mut map = self.approvals.lock().await;
+                            for app in payload.approvals {
+                                if let Some(rec) = map.get_mut(&app.request_id) {
+                                    if !rec.consumed && app.consumed {
+                                        rec.consumed = true;
+                                        rec.status = app.status.clone();
+                                        self.event_bus.publish(SystemEvent::ApprovalResolved {
+                                            request_id: app.request_id.clone(),
+                                            decision: app.status.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // 6. Gather current server state for two-way synchronization
+                        let server_tasks = self.db.list_productivity_tasks("default").unwrap_or_default();
+                        let server_routines = self.db.list_routines(false).unwrap_or_default();
+                        let server_commitments = self.db.list_commitments(false).unwrap_or_default();
+                        let server_pinned_shelf: Vec<crate::device::protocol::ShelfItemSync> = self.db
+                            .list_shelf_items(true, 100)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(Into::into)
+                            .collect();
+
+                        let map = self.approvals.lock().await;
+                        let server_approvals: Vec<ApprovalRecord> = map
+                            .values()
+                            .filter(|a| a.status == "pending" && !a.consumed)
+                            .cloned()
+                            .collect();
+
+                        let resp = crate::device::protocol::DeviceSyncResponse {
+                            success: true,
+                            timestamp: now,
+                            server_tasks,
+                            server_routines,
+                            server_commitments,
+                            server_pinned_shelf,
+                            server_approvals,
+                        };
+                        JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+                    }
+                    Err(e) => JsonRpcResponse::error(req_id, INVALID_REQUEST, format!("Invalid sync payload: {}", e), None),
+                }
+            }
+
+            "device.screentime" | "/api/device/screentime" => {
+                match serde_json::from_value::<crate::device::protocol::ScreenTimeSyncPayload>(params) {
+                    Ok(payload) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let today_str = hime_storage::epoch_to_date_str(now);
+
+                        let mut recorded_count = 0;
+                        for entry in payload.entries {
+                            let session_id = format!("mob-st-{}-{:x}", entry.package_name, entry.timestamp);
+                            let rec = hime_storage::ScreenTimeSessionRecord {
+                                id: session_id,
+                                app_name: entry.app_name,
+                                window_title: Some(entry.package_name),
+                                category: entry.category,
+                                duration_secs: entry.duration_secs,
+                                timestamp: entry.timestamp,
+                                date_str: entry.date_str.or_else(|| Some(today_str.clone())),
+                            };
+                            if self.db.record_screen_time_session(&rec).is_ok() {
+                                recorded_count += 1;
+                            }
+                        }
+
+                        // Compute aggregated today screen time totals
+                        let sessions = self.db.list_screen_time_sessions(500).unwrap_or_default();
+                        let mut study_secs = 0i64;
+                        let mut distracting_secs = 0i64;
+                        for s in sessions {
+                            if s.date_str.as_deref() == Some(&today_str) {
+                                match s.category.to_lowercase().as_str() {
+                                    "belajar" | "study" | "productive" => study_secs += s.duration_secs,
+                                    "pengalih" | "distracting" => distracting_secs += s.duration_secs,
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        let resp = crate::device::protocol::ScreenTimeSyncResponse {
+                            success: true,
+                            entries_recorded: recorded_count,
+                            total_today_study_secs: study_secs,
+                            total_today_distracting_secs: distracting_secs,
+                        };
+                        JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+                    }
+                    Err(e) => JsonRpcResponse::error(req_id, INVALID_REQUEST, format!("Invalid screentime payload: {}", e), None),
+                }
+            }
+
+            "device.enforcement" | "/api/device/enforcement" => {
+                let _req: crate::device::protocol::DeviceEnforcementRequest =
+                    serde_json::from_value(params).unwrap_or(crate::device::protocol::DeviceEnforcementRequest {
+                        device_id: device_id.to_string(),
+                        active_routine_id: None,
+                        reported_action: None,
+                        app_package: None,
+                    });
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                // Check emergency pause
+                let pause = self.db.get_active_emergency_pause(now).unwrap_or(None);
+                let emergency_pause_active = pause.is_some();
+                let remaining_pause = pause
+                    .map(|p| (p.expired_at - now).max(0) as u64)
+                    .unwrap_or(0);
+
+                // Check commitments and active tier
+                let commitments = self.db.list_commitments(true).unwrap_or_default();
+                let highest_tier = commitments
+                    .iter()
+                    .map(|c| c.tier.to_lowercase())
+                    .fold("ingatkan".to_string(), |acc, tier| {
+                        if tier == "paksa" || acc == "paksa" {
+                            "paksa".to_string()
+                        } else if tier == "tegas" || acc == "tegas" {
+                            "tegas".to_string()
+                        } else {
+                            "ingatkan".to_string()
+                        }
+                    });
+
+                let protected_packages = vec![
+                    "com.android.phone".to_string(),
+                    "com.android.dialer".to_string(),
+                    "com.google.android.dialer".to_string(),
+                    "com.android.emergency".to_string(),
+                    "com.google.android.apps.maps".to_string(),
+                    "com.android.settings".to_string(),
+                    "ai.hime.mobile".to_string(),
+                ];
+
+                let distracting_packages = vec![
+                    "com.google.android.youtube".to_string(),
+                    "com.instagram.android".to_string(),
+                    "com.zhiliaoapp.musically".to_string(),
+                    "com.tiktok.android".to_string(),
+                    "com.twitter.android".to_string(),
+                    "com.discord".to_string(),
+                ];
+
+                let resp = crate::device::protocol::DeviceEnforcementResponse {
+                    tier: highest_tier,
+                    is_study_block_active: !commitments.is_empty(),
+                    emergency_pause_active,
+                    emergency_pause_remaining_secs: remaining_pause,
+                    protected_packages,
+                    distracting_packages,
+                    daily_quota_remaining_mins: Some(60),
+                };
+                JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
             }
 
             other => JsonRpcResponse::error(req_id, METHOD_NOT_FOUND, format!("Device method '{}' not found", other), None),

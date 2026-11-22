@@ -5,5 +5,6 @@
     <string name="storage_title">Phone Storage Intelligence</string>
     <string name="chat_title">Conversation</string>
     <string name="tasks_title">Task Board &amp; Approvals</string>
+    <string name="accessibility_service_description">Layanan penegakan fokus Hime untuk mengembalikan ke Beranda saat membuka aplikasi pengalih di jam belajar.</string>
 </resources>
 

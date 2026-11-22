@@ -504,6 +504,19 @@ impl Database {
                 updated_at INTEGER NOT NULL
             );
 
+            -- Stage 11R: Pinned Shelf Items for Mobile & Device Sync
+            CREATE TABLE IF NOT EXISTS shelf_items (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 1,
+                source_device TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shelf_pinned ON shelf_items(is_pinned);
+
             -- Stage U2: Real-Time Lyrics Cache
             CREATE TABLE IF NOT EXISTS lyrics_cache (
                 cache_key TEXT PRIMARY KEY,
@@ -3057,6 +3070,137 @@ impl Database {
     }
 
     // =========================================================================
+    // Stage 11R: Pinned Shelf Items & Upserts for Mobile Sync
+    // =========================================================================
+
+    pub fn upsert_shelf_item(&self, item: &ShelfItemRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO shelf_items (id, title, content, item_type, is_pinned, source_device, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                content = excluded.content,
+                item_type = excluded.item_type,
+                is_pinned = excluded.is_pinned,
+                source_device = excluded.source_device,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                item.id,
+                item.title,
+                item.content,
+                item.item_type,
+                if item.is_pinned { 1 } else { 0 },
+                item.source_device,
+                item.created_at,
+                item.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_shelf_item(&self, id: &str) -> Result<Option<ShelfItemRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, content, item_type, is_pinned, source_device, created_at, updated_at
+             FROM shelf_items WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(map_shelf_item(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_shelf_items(&self, pinned_only: bool, limit: usize) -> Result<Vec<ShelfItemRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let mut items = Vec::new();
+        if pinned_only {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, content, item_type, is_pinned, source_device, created_at, updated_at
+                 FROM shelf_items WHERE is_pinned = 1 ORDER BY updated_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit], map_shelf_item)?;
+            for r in rows { items.push(r?); }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, content, item_type, is_pinned, source_device, created_at, updated_at
+                 FROM shelf_items ORDER BY updated_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit], map_shelf_item)?;
+            for r in rows { items.push(r?); }
+        }
+        Ok(items)
+    }
+
+    pub fn delete_shelf_item(&self, id: &str) -> Result<bool, StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute("DELETE FROM shelf_items WHERE id = ?1", rusqlite::params![id])?;
+        Ok(rows > 0)
+    }
+
+    pub fn upsert_routine(&self, routine: &RoutineRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO routines (
+                id, title, category, schedule_json, enforcement, allowed_apps_json,
+                distraction_rules_json, start_grace_min, escalation_json, current_streak,
+                best_streak, last_completed_date, frozen_on_date, active, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                category = excluded.category,
+                schedule_json = excluded.schedule_json,
+                enforcement = excluded.enforcement,
+                allowed_apps_json = excluded.allowed_apps_json,
+                distraction_rules_json = excluded.distraction_rules_json,
+                start_grace_min = excluded.start_grace_min,
+                escalation_json = excluded.escalation_json,
+                current_streak = excluded.current_streak,
+                best_streak = excluded.best_streak,
+                last_completed_date = excluded.last_completed_date,
+                frozen_on_date = excluded.frozen_on_date,
+                active = excluded.active,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                routine.id, routine.title, routine.category, routine.schedule_json, routine.enforcement,
+                routine.allowed_apps_json, routine.distraction_rules_json, routine.start_grace_min,
+                routine.escalation_json, routine.current_streak, routine.best_streak,
+                routine.last_completed_date, routine.frozen_on_date, if routine.active { 1 } else { 0 },
+                routine.created_at, routine.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_commitment(&self, commitment: &CommitmentRecord) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO commitments (id, name, tier, target_apps_json, daily_quota_min, active, pending_weakening_until, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                tier = excluded.tier,
+                target_apps_json = excluded.target_apps_json,
+                daily_quota_min = excluded.daily_quota_min,
+                active = excluded.active,
+                pending_weakening_until = excluded.pending_weakening_until,
+                updated_at = excluded.updated_at",
+            rusqlite::params![
+                commitment.id, commitment.name, commitment.tier, commitment.target_apps_json,
+                commitment.daily_quota_min, if commitment.active { 1 } else { 0 },
+                commitment.pending_weakening_until, commitment.created_at, commitment.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_productivity_task(&self, task: &ProductivityTaskRecord) -> Result<(), StorageError> {
+        self.create_productivity_task(task)
+    }
+
+    // =========================================================================
     // Stage U2: Lyrics Cache
     // =========================================================================
 
@@ -4051,6 +4195,32 @@ fn map_interaction_pref(row: &rusqlite::Row<'_>) -> rusqlite::Result<Interaction
         backoff_until: row.get(3)?,
         last_shown_at: row.get(4)?,
         updated_at: row.get(5)?,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ShelfItemRecord {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    pub item_type: String, // "text" | "file" | "link"
+    pub is_pinned: bool,
+    pub source_device: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn map_shelf_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItemRecord> {
+    let pinned_int: i32 = row.get(4)?;
+    Ok(ShelfItemRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        content: row.get(2)?,
+        item_type: row.get(3)?,
+        is_pinned: pinned_int != 0,
+        source_device: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 

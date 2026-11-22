@@ -6,7 +6,12 @@ pub mod transfer;
 
 pub use pairing::{PairingError, PairingManager, QrPairingPayload};
 pub use pki::{IssuedCertificate, LocalPkiAuthority, PkiError};
-pub use protocol::{MobileDeviceStatus, RemoteApprovalSubmission, RemoteChatSubmission, SecurityPosture, TransferChunkPayload};
+pub use protocol::{
+    DeviceEnforcementRequest, DeviceEnforcementResponse, DeviceSyncPayload, DeviceSyncResponse,
+    MobileDeviceStatus, MobileScreenTimeEntry, RemoteApprovalSubmission, RemoteChatSubmission,
+    ScreenTimeSyncPayload, ScreenTimeSyncResponse, SecurityPosture, ShelfItemSync,
+    TransferChunkPayload,
+};
 pub use server::DeviceGatewayServer;
 pub use transfer::{TransferEngine, TransferError};
 
