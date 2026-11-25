@@ -151,7 +151,7 @@ describe("worker-ui-lyrics: KeyboardShortcutsModal, LyricsView, and handleWheel 
 			expect(appSrc).toContain("{showSideMusicIcons && settingsVisualizerEnabled ?");
 			expect(appSrc).toContain("{showSideMusicIcons &&");
 			expect(appSrc).toContain("showMusicBubble = musicActivity && (timerActive || isVerticalCollapsed)");
-			expect(appSrc).toContain('bloomMode === "music" && settingsMusicModeEnabled && isOpen');
+			expect(appSrc).toContain('const isMusicPanelOpen = isOpen && bloomMode === "music";');
 			expect(appSrc).toContain("Tidak ada media yang sedang diputar");
 		});
 
@@ -166,6 +166,21 @@ describe("worker-ui-lyrics: KeyboardShortcutsModal, LyricsView, and handleWheel 
 			expect(appSrc).toContain("wakeNotchForHotkey();");
 			expect(useLyricsSrc).toContain("const isNewTrack = trackKey !== lastTrackRef.current;");
 			expect(cmpSrc).toContain("Math.abs(drift) > 850");
+		});
+
+		it("enforces expanded music safe padding (>= 20px horizontal), unconditional music panel sizing, and NotchErrorBoundary", () => {
+			const appCssSrc = readFileSync(join(__dirname, "../src/App.css"), "utf-8");
+			const expandedMatch = appCssSrc.match(/\.expanded-music-container\s*\{[^}]*padding:\s*(\d+)px\s+(\d+)px\s+(\d+)px\s+(\d+)px/);
+			expect(expandedMatch).toBeTruthy();
+			expect(Number(expandedMatch![1])).toBeGreaterThanOrEqual(10);
+			expect(Number(expandedMatch![2])).toBeGreaterThanOrEqual(24);
+			expect(Number(expandedMatch![3])).toBeGreaterThanOrEqual(12);
+			expect(Number(expandedMatch![4])).toBeGreaterThanOrEqual(24);
+
+			expect(appSrc).toContain("if (isMusicPanelOpen)");
+			expect(appSrc).toContain("return mediaLayout === \"compact\" ? 396 : 360;");
+			expect(appSrc).toContain("class NotchErrorBoundary extends Component");
+			expect(appSrc).toContain("<NotchErrorBoundary");
 		});
 	});
 });

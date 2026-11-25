@@ -1,5 +1,5 @@
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
-import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, memo } from "react";
+import { Component, type ReactNode, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, memo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -631,6 +631,51 @@ const TitleMarquee = ({ title }: { title: string }) => {
 		</div>
 	);
 };
+
+class NotchErrorBoundary extends Component<
+	{ resetKey: string; onReset: () => void; children: ReactNode },
+	{ hasError: boolean }
+> {
+	constructor(props: { resetKey: string; onReset: () => void; children: ReactNode }) {
+		super(props);
+		this.state = { hasError: false };
+	}
+
+	static getDerivedStateFromError(): { hasError: boolean } {
+		return { hasError: true };
+	}
+
+	componentDidCatch(error: unknown) {
+		console.error("[NotchErrorBoundary] Caught panel render error:", error);
+	}
+
+	componentDidUpdate(prevProps: { resetKey: string }) {
+		if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+			this.setState({ hasError: false });
+		}
+	}
+
+	render() {
+		if (this.state.hasError) {
+			return (
+				<div className="notch-error-fallback" onClick={(e) => e.stopPropagation()}>
+					<span>Panel gagal dimuat</span>
+					<button
+						type="button"
+						className="notch-error-reset-btn"
+						onClick={() => {
+							this.setState({ hasError: false });
+							this.props.onReset();
+						}}
+					>
+						Kembali
+					</button>
+				</div>
+			);
+		}
+		return this.props.children;
+	}
+}
 
 function App() {
 	useEffect(() => {
@@ -2949,13 +2994,13 @@ function App() {
 		isOpen
 	]);
 
-	// Leave the music view when music is turned off, or when collapsed with no media session.
-	// When explicitly opened (Ctrl+Shift+M), keep the panel open so the empty-media prompt stays visible.
+	// Leave the music view when collapsed with no media session.
+	// When explicitly opened (Ctrl+Shift+M / click), keep the panel open regardless of has_media fluctuations.
 	useEffect(() => {
-		if (bloomMode === "music" && (!settingsMusicModeEnabled || (!isOpen && !mediaInfo.has_media))) {
-			setBloomMode(isOpen ? openingPanel() : collapsedMode);
+		if (bloomMode === "music" && !isOpen && !mediaInfo.has_media) {
+			setBloomMode(collapsedMode);
 		}
-	}, [settingsMusicModeEnabled, mediaInfo.has_media, bloomMode, isOpen]);
+	}, [mediaInfo.has_media, bloomMode, isOpen]);
 
 	// A device connecting or disconnecting takes the pill for a few seconds,
 	// like the Dynamic Island: its drawing, name and battery. It never takes
@@ -3937,6 +3982,7 @@ function App() {
 
 	// Music mode shows any time we have media info (playing or paused) and music mode setting is enabled
 	const isMusicMode = mediaInfo.has_media && bloomMode === "music" && settingsMusicModeEnabled;
+	const isMusicPanelOpen = isOpen && bloomMode === "music";
 	// A media session remains reachable on hover after its activity fades, or
 	// whenever the compact music display is disabled.
 	const showMusicOnStatusHover =
@@ -3977,10 +4023,9 @@ function App() {
 			const hoverWidth = Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
 			return hasCenterAlert ? Math.max(hoverWidth, centerAlertWidth) : hoverWidth;
 		}
-		if (bloomMode === "music" && settingsMusicModeEnabled && isOpen) {
-			if (!mediaInfo.has_media) return 340;
+		if (isMusicPanelOpen) {
 			if (isLyricsExpanded) return 460;
-			return mediaLayout === "compact" ? 360 : 340;
+			return mediaLayout === "compact" ? 396 : 360;
 		}
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
 
@@ -4027,14 +4072,13 @@ function App() {
 		}
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
 		if (bloomMode === "status") return 36;
-		if (bloomMode === "music" && settingsMusicModeEnabled && isOpen) {
-			if (!mediaInfo.has_media) return 156;
+		if (isMusicPanelOpen) {
 			if (isLyricsExpanded) {
-				return compactVolumeExpanded ? 375 : 340;
+				return compactVolumeExpanded ? 395 : 360;
 			}
-			let h = mediaLayout === "compact" ? 236 : 190;
+			let h = mediaLayout === "compact" ? 252 : 204;
 			if (mediaLayout === "compact") {
-				if (compactVolumeExpanded) h = 272;
+				if (compactVolumeExpanded) h = 288;
 			}
 			return h;
 		}
@@ -4571,7 +4615,7 @@ function App() {
 						/>
 					)}
 					<AnimatePresence>
-						{isMusicMode && settingsAmbienceEnabled && albumArtUrl && isOpen && !isCalendarMode && (
+						{(isMusicMode || isMusicPanelOpen) && settingsAmbienceEnabled && albumArtUrl && isOpen && !isCalendarMode && (
 							<motion.div
 								className="notch-ambient-glow"
 								initial={{ opacity: 0 }}
@@ -4612,9 +4656,20 @@ function App() {
 									borderRadius: "inherit"
 								}}
 							>
+								<NotchErrorBoundary
+									resetKey={`${bloomMode}:${isOpen}`}
+									onReset={() => {
+										setIsOpen(false);
+										setBloomMode("status");
+										setIsHovered(false);
+										setIsNotchHovered(false);
+										notchPinnedRef.current = false;
+										releaseDeferredRef.current = false;
+									}}
+								>
 								{/* Faster Waiting Transition Area */}
 								<AnimatePresence mode="wait">
-									{isOpen && bloomMode === "music" && settingsMusicModeEnabled && !isCalendarMode ? (
+									{isMusicPanelOpen ? (
 										<motion.div
 											key="expanded-music"
 											className="expanded-music-container"
@@ -6387,6 +6442,7 @@ function App() {
 										</motion.div>
 									)}
 								</AnimatePresence>
+								</NotchErrorBoundary>
 							</motion.div>
 						)}
 					</AnimatePresence>

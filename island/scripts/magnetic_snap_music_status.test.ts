@@ -77,10 +77,10 @@ describe("Magnetic Edge Snap, Compact Music Player, and Notch Status Widgets", (
 	});
 
 	describe("2. Music Player Compact Layout Dimensions & Controls", () => {
-		it("provides compact layout height (236px / 272px) and width (360px)", () => {
-			expect(appTsx).toContain('let h = mediaLayout === "compact" ? 236 : 190;');
-			expect(appTsx).toContain("if (compactVolumeExpanded) h = 272;");
-			expect(appTsx).toContain('return mediaLayout === "compact" ? 360 : 340;');
+		it("provides compact layout height (252px / 288px) and width (396px)", () => {
+			expect(appTsx).toContain('let h = mediaLayout === "compact" ? 252 : 204;');
+			expect(appTsx).toContain("if (compactVolumeExpanded) h = 288;");
+			expect(appTsx).toContain('return mediaLayout === "compact" ? 396 : 360;');
 		});
 
 		it("provides ample room for .cmp-row-controls and buttons without cutoff in App.css", () => {
