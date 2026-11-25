@@ -520,11 +520,13 @@ img {
 
 .side-content.left {
 	left: 14px;
+	padding-left: 4px;
 	justify-content: flex-start;
 }
 
 .side-content.right {
 	right: 14px;
+	padding-right: 4px;
 	justify-content: flex-end;
 }
 
@@ -596,14 +598,14 @@ img {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	gap: 2.5px;
+	gap: 2px;
 	height: 20px;
-	width: 28px;
+	width: 20px;
 	position: relative;
 }
 
 .visualizer-horizontal .bar-horizontal {
-	width: 3px;
+	width: 2.5px;
 	height: 100%;
 	background: linear-gradient(180deg, var(--hime-crimson, #E50914) 0%, var(--hime-cyan, #38D6F5) 100%);
 	box-shadow: 0 0 8px rgba(229, 9, 20, 0.4);
@@ -620,15 +622,15 @@ img {
 
 	background: rgba(255, 255, 255, 0.15);
 	border: none;
-	border-radius: 6px;
+	border-radius: 9999px;
 	padding: 0;
 
 	cursor: pointer;
 	flex-shrink: 0;
 	overflow: hidden;
 
-	width: 24px;
-	height: 24px;
+	width: 20px;
+	height: 20px;
 	transition:
 		width 0.2s ease,
 		height 0.2s ease,
@@ -644,6 +646,9 @@ img {
 
 .album-art-glow-wrapper {
 	position: relative;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	flex-shrink: 0;
 }
 
@@ -653,7 +658,7 @@ img {
 	width: calc(100% + 8px);
 	height: calc(100% + 8px);
 	object-fit: cover;
-	border-radius: 10px;
+	border-radius: 9999px;
 	filter: blur(6px) saturate(2.5) brightness(0.8);
 	opacity: 0.6;
 	pointer-events: none;

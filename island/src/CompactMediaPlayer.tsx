@@ -144,22 +144,45 @@ export function CompactMediaPlayer({
 
 	// Single source of truth: last known backend position + when it was received
 	const backendPosRef = useRef(positionMs);
-	const backendTimeRef = useRef(positionUpdatedAt || Date.now());
+	const backendTimeRef = useRef(positionUpdatedAt > 0 ? positionUpdatedAt : Date.now());
 	const isSeekingRef = useRef(false);
-
-	// Update refs when backend sends new position (ignore during seek)
-	useEffect(() => {
-		if (!isSeekingRef.current) {
-			backendPosRef.current = positionMs;
-			backendTimeRef.current = positionUpdatedAt || Date.now();
-		}
-	}, [positionMs, positionUpdatedAt]);
+	const lastTrackKeyRef = useRef(`${mediaInfo.artist}:${mediaInfo.title}`);
 
 	// displayPosition is the live, extrapolated position
 	const [displayPosition, setDisplayPosition] = useState(() => {
-		const elapsed = Date.now() - (positionUpdatedAt || Date.now());
-		return Math.min(positionMs + (isPlaying ? elapsed : 0), durationMs || Infinity);
+		const updatedAt = positionUpdatedAt > 0 ? positionUpdatedAt : Date.now();
+		const elapsed = isPlaying ? Math.max(0, Date.now() - updatedAt) : 0;
+		return Math.max(0, Math.min(positionMs + elapsed, durationMs || Infinity));
 	});
+
+	// Update refs when backend sends new position (ignore during seek, avoid jitter on 1s polls)
+	useEffect(() => {
+		if (isSeekingRef.current) return;
+		const now = Date.now();
+		const updatedAt = positionUpdatedAt > 0 ? positionUpdatedAt : now;
+		const incomingLivePos = Math.max(
+			0,
+			Math.min(positionMs + (isPlaying ? Math.max(0, now - updatedAt) : 0), durationMs || Infinity)
+		);
+		const trackKey = `${mediaInfo.artist}:${mediaInfo.title}`;
+		const trackChanged = trackKey !== lastTrackKeyRef.current;
+		lastTrackKeyRef.current = trackKey;
+
+		const currentLivePos = Math.max(
+			0,
+			Math.min(
+				backendPosRef.current + (isPlaying ? Math.max(0, now - backendTimeRef.current) : 0),
+				durationMs || Infinity
+			)
+		);
+		const drift = incomingLivePos - currentLivePos;
+
+		if (trackChanged || !isPlaying || Math.abs(drift) > 850 || drift > 250) {
+			backendPosRef.current = positionMs;
+			backendTimeRef.current = updatedAt;
+			setDisplayPosition(incomingLivePos);
+		}
+	}, [positionMs, positionUpdatedAt, isPlaying, durationMs, mediaInfo.artist, mediaInfo.title]);
 
 	const [localShowLyrics, setLocalShowLyrics] = useState(false);
 	const showLyrics = lyricsExpanded !== undefined ? lyricsExpanded : localShowLyrics;
@@ -288,13 +311,13 @@ export function CompactMediaPlayer({
 						className="cmp-lyrics-stream cmp-lyrics-stream--expanded"
 						onClick={(e) => e.stopPropagation()}
 					>
-						<AnimatePresence mode="wait">
+						<AnimatePresence>
 							<motion.div
 								key={currentActiveText || `active-${activeIdx}`}
-								initial={{ opacity: 0, y: 5 }}
+								initial={{ opacity: 0, y: 4 }}
 								animate={{ opacity: 1, y: 0 }}
-								exit={{ opacity: 0, y: -5 }}
-								transition={{ duration: 0.22, ease: "easeOut" }}
+								exit={{ opacity: 0, y: -4 }}
+								transition={{ duration: 0.12, ease: "easeOut" }}
 								className="cmp-lyrics-active-line"
 							>
 								{currentActiveText ? (
@@ -490,13 +513,13 @@ export function CompactMediaPlayer({
 						}}
 						title="Klik untuk membuka lirik lengkap (Ctrl+Alt+L)"
 					>
-						<AnimatePresence mode="wait">
+						<AnimatePresence>
 							<motion.div
 								key={currentActiveText || `status-${lyricsHook.status}`}
-								initial={{ opacity: 0, y: 5 }}
+								initial={{ opacity: 0, y: 4 }}
 								animate={{ opacity: 1, y: 0 }}
-								exit={{ opacity: 0, y: -5 }}
-								transition={{ duration: 0.22, ease: "easeOut" }}
+								exit={{ opacity: 0, y: -4 }}
+								transition={{ duration: 0.12, ease: "easeOut" }}
 								className="cmp-lyrics-active-line"
 							>
 								{currentActiveText ? (

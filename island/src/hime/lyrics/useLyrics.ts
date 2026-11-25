@@ -48,6 +48,8 @@ export function useLyrics({
     const lastTrackRef = useRef<string>("");
     const isPlayingRef = useRef<boolean>(isPlaying);
     isPlayingRef.current = isPlaying;
+    const activeLineIndexRef = useRef<number>(-1);
+    const activeLineTextRef = useRef<string>("");
 
     const clearScheduledTimer = useCallback(() => {
         if (timerRef.current !== null) {
@@ -89,9 +91,17 @@ export function useLyrics({
         if (trackKey === lastTrackRef.current && lyrics) {
             return;
         }
+        const isNewTrack = trackKey !== lastTrackRef.current;
         lastTrackRef.current = trackKey;
 
         let cancelled = false;
+        if (isNewTrack) {
+            setLyrics(null);
+            activeLineIndexRef.current = -1;
+            activeLineTextRef.current = "";
+            setActiveLineIndex(-1);
+            setActiveLineText("");
+        }
         setStatus("loading");
         clearScheduledTimer();
 
@@ -125,6 +135,8 @@ export function useLyrics({
                     res.lines = parsed.lines;
                     res.is_synced = parsed.hasSync;
                     res.is_instrumental = res.is_instrumental || parsed.isInstrumental;
+                } else if (res.lines && res.lines.length > 1) {
+                    res.lines = [...res.lines].sort((a, b) => a.ms - b.ms);
                 }
 
                 setLyrics(res);
@@ -182,10 +194,16 @@ export function useLyrics({
 
             const lookupPos = targetPos + DEFAULT_LATENCY_OFFSET_MS;
             const activeIdx = findActiveLyricIndex(lyrics.lines, lookupPos);
-            setActiveLineIndex(activeIdx);
+            if (activeIdx !== activeLineIndexRef.current) {
+                activeLineIndexRef.current = activeIdx;
+                setActiveLineIndex(activeIdx);
+            }
 
             const activeText = activeIdx >= 0 ? lyrics.lines[activeIdx].text : "";
-            setActiveLineText(activeText);
+            if (activeText !== activeLineTextRef.current) {
+                activeLineTextRef.current = activeText;
+                setActiveLineText(activeText);
+            }
 
             if (showInPill) {
                 emitToNcm(activeText);
@@ -219,9 +237,15 @@ export function useLyrics({
         if (!isPlaying) {
             clearScheduledTimer();
             const activeIdx = findActiveLyricIndex(lyrics.lines, currentPos + DEFAULT_LATENCY_OFFSET_MS);
-            setActiveLineIndex(activeIdx);
+            if (activeIdx !== activeLineIndexRef.current) {
+                activeLineIndexRef.current = activeIdx;
+                setActiveLineIndex(activeIdx);
+            }
             const activeText = activeIdx >= 0 ? lyrics.lines[activeIdx].text : "";
-            setActiveLineText(activeText);
+            if (activeText !== activeLineTextRef.current) {
+                activeLineTextRef.current = activeText;
+                setActiveLineText(activeText);
+            }
             return;
         }
 

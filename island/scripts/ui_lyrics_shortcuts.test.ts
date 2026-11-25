@@ -160,5 +160,12 @@ describe("worker-ui-lyrics: KeyboardShortcutsModal, LyricsView, and handleWheel 
 			expect(appSrc).toContain('aria-label="Daftar Pintasan Keyboard"');
 			expect(appSrc).toContain('setBloomMode("shortcuts")');
 		});
+
+		it("wakes hidden/unvisible notch for hotkeys including hime-toggle-assistant and prevents stale lyrics on track change", () => {
+			expect(appSrc).toContain("const wakeNotchForHotkey = () => {");
+			expect(appSrc).toContain("wakeNotchForHotkey();");
+			expect(useLyricsSrc).toContain("const isNewTrack = trackKey !== lastTrackRef.current;");
+			expect(cmpSrc).toContain("Math.abs(drift) > 850");
+		});
 	});
 });

@@ -27,8 +27,9 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
 }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const activeLineRef = useRef<HTMLDivElement>(null);
+    const hasMountedScrollRef = useRef(false);
 
-    // Smooth spring auto-scroll centering the active line
+    // Snap immediately on first mount, then smooth auto-scroll centering the active line
     useEffect(() => {
         if (!containerRef.current || !activeLineRef.current) return;
         const container = containerRef.current;
@@ -39,8 +40,9 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
 
         container.scrollTo({
             top: Math.max(0, targetScroll),
-            behavior: "smooth",
+            behavior: hasMountedScrollRef.current ? "smooth" : "auto",
         });
+        hasMountedScrollRef.current = true;
     }, [activeLineIndex]);
 
     if (status === "loading") {
@@ -238,7 +240,6 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                                     boxShadow: isActive
                                         ? "0 0 18px rgba(0, 210, 255, 0.2)"
                                         : "none",
-                                    transition: "all 0.25s ease",
                                 }}
                             >
                                 {line.text || "♪ ♪ ♪"}

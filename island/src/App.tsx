@@ -693,12 +693,16 @@ function App() {
 		if (eventPeekTimeoutRef.current) clearTimeout(eventPeekTimeoutRef.current);
 		eventPeekTimeoutRef.current = setTimeout(() => setEventPeek(false), duration);
 	}, []);
+	const triggerEventPeekRef = useRef(triggerEventPeek);
+	triggerEventPeekRef.current = triggerEventPeek;
 
 	const [notchMode, setNotchMode] = useState(() => {
 		const raw = localStorage.getItem("bloom-notch-mode");
 		if (raw === "fixed" || raw === "peek") return raw;
 		return "fixed";
 	});
+	const notchModeRef = useRef(notchMode);
+	notchModeRef.current = notchMode;
 
 	useEffect(() => {
 		if (isReady && prevChargingRef.current !== null && prevChargingRef.current !== isCharging) {
@@ -1343,15 +1347,32 @@ function App() {
 			notchPinnedRef.current = false;
 		});
 
+		const wakeNotchForHotkey = () => {
+			cancelPointerLeftRef.current();
+			releaseDeferredRef.current = false;
+			setIsVisible(true);
+			setIsExpanded(true);
+			setIsOverlapped(false);
+			setIsForegroundFullscreen(false);
+			setIsHovered(true);
+			setInteractionState("active");
+			if (notchModeRef.current === "peek") {
+				triggerEventPeekRef.current(8000);
+			}
+		};
+
 		const unlistenShowIsland = listen("hime-show-island", () => {
 			if (isOpenRef.current) {
 				setIsOpen(false);
 				setBloomMode(restingModeRef.current);
 				setIsHovered(false);
 				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
-				setBloomMode(openingPanel());
+				setBloomMode(openingPanelRef.current());
 			}
 		});
 
@@ -1364,22 +1385,29 @@ function App() {
 				notchPinnedRef.current = false;
 				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
 				setBloomMode("shortcuts");
 				notchPinnedRef.current = true;
-				releaseDeferredRef.current = false;
 			}
 		});
 
 		const unlistenToggleAssistant = listen("hime-toggle-assistant", () => {
-			if (!settingsAssistantEnabledRef.current) return;
+			if (!settingsAssistantEnabledRef.current) {
+				wakeNotchForHotkey();
+				setIsOpen(true);
+				setBloomMode(openingPanelRef.current());
+				return;
+			}
 			if (isOpenRef.current && bloomModeRef.current === "hime") {
 				setIsOpen(false);
 				setBloomMode(restingModeRef.current);
 				setIsHovered(false);
 				setIsNotchHovered(false);
 				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
 				setBloomMode("hime");
 				notchPinnedRef.current = true;
@@ -1395,6 +1423,7 @@ function App() {
 				notchPinnedRef.current = false;
 				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
 				setBloomMode("music");
 			}
@@ -1403,6 +1432,7 @@ function App() {
 		const unlistenToggleCalendar = listen("hime-toggle-calendar", () => {
 			if (windowLabel !== "main") return;
 			if (!settingsCalendarEnabledRef.current) {
+				wakeNotchForHotkey();
 				toggleCalendarModeRef.current?.();
 				return;
 			}
@@ -1412,7 +1442,9 @@ function App() {
 				setIsHovered(false);
 				setIsNotchHovered(false);
 				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
 				setBloomMode("calendar");
 				notchPinnedRef.current = true;
@@ -1428,7 +1460,9 @@ function App() {
 				setIsHovered(false);
 				setIsNotchHovered(false);
 				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
 			} else {
+				wakeNotchForHotkey();
 				setIsOpen(true);
 				setBloomMode(targetPanel);
 				notchPinnedRef.current = true;
@@ -2224,6 +2258,8 @@ function App() {
 			pointerLeftTimer.current = null;
 		}
 	}, []);
+	const cancelPointerLeftRef = useRef(cancelPointerLeft);
+	cancelPointerLeftRef.current = cancelPointerLeft;
 	const handlePointerLeft = useCallback(() => {
 		cancelPointerLeft();
 		// Unhover auto-hide countdown: 2.5 seconds before hiding
@@ -2853,6 +2889,8 @@ function App() {
 		if (panelAvailable(preferred)) return preferred;
 		return NOTCH_PANELS.find(panelAvailable) ?? "command-center";
 	};
+	const openingPanelRef = useRef(openingPanel);
+	openingPanelRef.current = openingPanel;
 
 	// Expands the notch into a panel, or into an activity's own view.
 	const openNotch = (view: NotchPanel | "music" | "shelf" | "hime-approval") => {

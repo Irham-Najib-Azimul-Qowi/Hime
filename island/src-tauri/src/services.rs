@@ -1324,6 +1324,13 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                 }
 
                                                 // Extract timeline properties for progress bar
+                                                let now_unix_ms = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_millis() as i64)
+                                                    .unwrap_or(0);
+                                                let now_100ns = now_unix_ms
+                                                    .saturating_mul(10_000)
+                                                    .saturating_add(116_444_736_000_000_000);
                                                 let (position_ms, duration_ms, seek_enabled) = {
                                                     let defaults = (0i64, 0i64, false);
                                                     match session.GetTimelineProperties() {
@@ -1336,13 +1343,23 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                                 .EndTime()
                                                                 .map(|t| t.Duration / 10_000)
                                                                 .unwrap_or(0);
-                                                            let pos = timeline
+                                                            let raw_pos = timeline
                                                                 .Position()
                                                                 .map(|t| t.Duration / 10_000)
                                                                 .unwrap_or(0);
-                                                            let dur = (end - start).max(0);
-                                                            let effective_dur =
-                                                                if dur > 0 { dur } else { 0 };
+                                                            let last_updated_100ns = timeline
+                                                                .LastUpdatedTime()
+                                                                .ok()
+                                                                .map(|dt| dt.UniversalTime);
+                                                            let (pos, effective_dur) =
+                                                                compute_smtc_position_ms(
+                                                                    raw_pos,
+                                                                    start,
+                                                                    end,
+                                                                    last_updated_100ns,
+                                                                    now_100ns,
+                                                                    is_playing,
+                                                                );
                                                             let seek = session
                                                                 .GetPlaybackInfo()
                                                                 .ok()
@@ -1358,10 +1375,6 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                     }
                                                 };
 
-                                                let now_ms = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .map(|d| d.as_millis() as u64)
-                                                    .unwrap_or(0);
                                                 let info = MediaInfo {
                                                     title,
                                                     artist,
@@ -1372,7 +1385,7 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                                                     position_ms,
                                                     duration_ms,
                                                     seek_enabled,
-                                                    position_updated_at: now_ms,
+                                                    position_updated_at: now_unix_ms.max(0) as u64,
                                                 };
                                                 if is_playing {
                                                     best_info = Some(info);
@@ -1410,8 +1423,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                     if heartbeat_due
                         || last_emitted_info.as_ref().is_none_or(|(t, a, p, h, art, pos, _dur)| {
                             t != &current.title || a != &current.artist || p != &current.is_playing || h != &current.has_media || art != &art_str ||
-                            // For position: emit if >1s difference (avoid spamming on every poll)
-                            (*pos - current.position_ms).abs() > 1000
+                            // For position: emit when >=900ms changed so 1s polls keep lyrics synced
+                            (*pos - current.position_ms).abs() >= 900
                         })
                     {
                         let _ = handle_system.emit("media-update", current.clone());
@@ -1895,6 +1908,53 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
     });
 
     tx
+}
+
+/// Computes live SMTC playback `(position_ms, duration_ms)` by extrapolating from
+/// `Position()` + `(now - LastUpdatedTime())` when playing, because Windows SMTC
+/// only updates `Position()` as a snapshot at `LastUpdatedTime()`.
+pub(crate) fn compute_smtc_position_ms(
+    raw_pos_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+    last_updated_100ns: Option<i64>,
+    now_100ns: i64,
+    is_playing: bool,
+) -> (i64, i64) {
+    const WIN32_UNIX_EPOCH_100NS: i64 = 116_444_736_000_000_000;
+    const MAX_EXTRAPOLATION_100NS: i64 = 86_400 * 10_000_000;
+
+    let duration_ms = (end_ms - start_ms).max(0);
+    let base_pos_ms = if start_ms > 0 && raw_pos_ms >= start_ms {
+        raw_pos_ms - start_ms
+    } else {
+        raw_pos_ms.max(0)
+    };
+
+    let extrapolated = if is_playing {
+        if let Some(updated_100ns) = last_updated_100ns {
+            let delta_100ns = now_100ns - updated_100ns;
+            if updated_100ns > WIN32_UNIX_EPOCH_100NS
+                && delta_100ns > 0
+                && delta_100ns <= MAX_EXTRAPOLATION_100NS
+            {
+                base_pos_ms.saturating_add(delta_100ns / 10_000)
+            } else {
+                base_pos_ms
+            }
+        } else {
+            base_pos_ms
+        }
+    } else {
+        base_pos_ms
+    };
+
+    let clamped = if duration_ms > 0 {
+        extrapolated.clamp(0, duration_ms)
+    } else {
+        extrapolated.max(0)
+    };
+    (clamped, duration_ms)
 }
 
 fn dock_span_px(dock: IntRect, scale: f64) -> (i32, i32) {
@@ -6797,5 +6857,33 @@ mod tests {
         assert!(!should_intercept_win_n(true, 0x4E, true, true, false));
         assert!(!should_intercept_win_n(true, 0x4E, false, false, false));
         assert!(!should_intercept_win_n(true, 0x4E, false, true, true));
+    }
+
+    #[test]
+    fn smtc_position_extrapolates_from_last_updated_time_when_playing() {
+        use super::compute_smtc_position_ms;
+
+        let base_100ns = 134_000_000_000_000_000i64;
+        // Playing: raw snapshot 10_000ms recorded 15s ago -> 25_000ms
+        let now_100ns = base_100ns + 15_000 * 10_000;
+        assert_eq!(
+            compute_smtc_position_ms(10_000, 0, 180_000, Some(base_100ns), now_100ns, true),
+            (25_000, 180_000)
+        );
+        // Paused: does not extrapolate
+        assert_eq!(
+            compute_smtc_position_ms(10_000, 0, 180_000, Some(base_100ns), now_100ns, false),
+            (10_000, 180_000)
+        );
+        // Clamps to track duration
+        assert_eq!(
+            compute_smtc_position_ms(175_000, 0, 180_000, Some(base_100ns), now_100ns, true),
+            (180_000, 180_000)
+        );
+        // Ignores unset LastUpdatedTime (0)
+        assert_eq!(
+            compute_smtc_position_ms(10_000, 0, 180_000, Some(0), now_100ns, true),
+            (10_000, 180_000)
+        );
     }
 }
