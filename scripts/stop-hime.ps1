@@ -1,4 +1,6 @@
 # stop-hime.ps1 - Cleanly stop Hime Ecosystem and restore Windows taskbar
+param([switch]$IncludeHotkey)
+
 $ErrorActionPreference = "SilentlyContinue"
 
 $stateFile = "$env:APPDATA\ai.hime.desktop\hime.active"
@@ -38,11 +40,12 @@ while ($elapsed -lt $timeoutMs) {
 Get-Process -Name "hime-core" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Get-Process -Name "hime-island" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-# 5a. Kill hotkey daemon(s) so the next start-hime.ps1 can re-register all hotkeys cleanly.
-#     All hime_hotkey instances must exit before start-hime spawns a new one, otherwise
-#     RegisterHotKey returns ERROR_HOTKEY_ALREADY_REGISTERED (0x581) for every key and
-#     the new daemon is permanently deaf.
-Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# 5a. Only kill hotkey daemon when -IncludeHotkey is explicitly passed (e.g. before rebuilding).
+#     On normal stop / Ctrl+Shift+Q, hime_hotkey stays alive so Ctrl+Shift+H / Ctrl+Shift+Space
+#     can restart Hime anytime. Single-instance mutex + start-hime.ps1 prevent duplicates.
+if ($IncludeHotkey) {
+    Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
 
 # 5. Safely restore Windows native taskbars & work area
 $restoreScript = "X:\folder_ai\Hime\island\scripts\restore-taskbar.ps1"
@@ -53,5 +56,10 @@ if (Test-Path $restoreScript) {
     & $restoreScript
 }
 
-Write-Host "Hime Ecosystem Stopped (including hotkey daemon) and Taskbar Restored." -ForegroundColor Green
-Write-Host "Use start-hime.ps1 or HimeLaunchTask to start Hime again." -ForegroundColor Cyan
+if ($IncludeHotkey) {
+    Write-Host "Hime Ecosystem Stopped (including hotkey daemon) and Taskbar Restored." -ForegroundColor Green
+    Write-Host "Use start-hime.ps1 or HimeLaunchTask to start Hime again." -ForegroundColor Cyan
+} else {
+    Write-Host "Hime Ecosystem Stopped and Taskbar Restored." -ForegroundColor Green
+    Write-Host "Hotkey daemon remains active: Press Ctrl+Shift+H, Ctrl+Alt+Space, or Ctrl+Shift+Space to start Hime anytime." -ForegroundColor Cyan
+}
