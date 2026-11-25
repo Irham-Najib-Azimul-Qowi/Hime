@@ -27,6 +27,9 @@ static WIN_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 /// Digit (1-9) of the currently held Win+Number combo, 0 when none. Key
 /// auto-repeat re-fires the keydown; only the first press may toggle an app.
 static WIN_NUMBER_HELD: AtomicU8 = AtomicU8::new(0);
+/// Whether `Win + N` is currently held, to suppress key auto-repeat toggles.
+static WIN_N_HELD: AtomicBool = AtomicBool::new(false);
+const VK_N_CODE: u16 = 0x4E;
 /// Virtual key Microsoft documents as "unassigned", used as the mask key.
 /// See `send_start_menu_mask`.
 const MASK_VK: u16 = 0xE8;
@@ -34,18 +37,18 @@ const MASK_VK: u16 = 0xE8;
 /// Raw handle of the installed keyboard hook, 0 while none is installed.
 static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
 
-/// Win+1-9 is the only feature that needs a global keyboard hook: Explorer
-/// already registers those hotkeys, so `RegisterHotKey` can't claim them.
-/// Volume and brightness keys are left to Windows, and Bloom's overlays follow
-/// the resulting changes instead. The hook only exists while Win+1-9 is in use
-/// (the dock replaces the taskbar and the setting is on); the rest of the time
-/// Bloom doesn't see the keyboard at all.
+/// Win+1-9 and Win+N use a global low-level keyboard hook because Explorer
+/// already registers those hotkeys, so `RegisterHotKey` cannot claim them.
+/// The hook is active whenever Win+1-9 dock switching OR native notification /
+/// calendar suppression is enabled.
 pub fn setup_keyboard_hook(app_handle: AppHandle) {
     let _ = KEYBOARD_HOOK_APP_HANDLE.set(app_handle.clone());
     std::thread::spawn(move || {
         // Exiting removes the hook with the process; never touch it mid-shutdown.
         while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-            let wanted = NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled();
+            let wanted = !SHUTTING_DOWN.load(Ordering::Relaxed)
+                && ((NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) && dock_win_number_enabled())
+                    || crate::utils::suppress_native_notifications_enabled());
             if wanted != (KEYBOARD_HOOK.load(Ordering::Relaxed) != 0) {
                 // A low-level hook runs on the thread that installed it, which
                 // needs a message loop, so install and remove it on the main thread.
@@ -69,6 +72,7 @@ fn set_keyboard_hook(enabled: bool) {
             KEYBOARD_HOOK.store(0, Ordering::Relaxed);
             WIN_KEY_DOWN.store(false, Ordering::Relaxed);
             WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+            WIN_N_HELD.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -163,6 +167,40 @@ fn emit_dock_win_number(index: u8) {
     });
 }
 
+fn modifier_keys_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT,
+    };
+    unsafe {
+        (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0
+    }
+}
+
+pub(crate) fn should_intercept_win_n(
+    win_down: bool,
+    vk: u16,
+    modifiers_down: bool,
+    suppress_enabled: bool,
+    shutting_down: bool,
+) -> bool {
+    win_down && vk == VK_N_CODE && !modifiers_down && suppress_enabled && !shutting_down
+}
+
+/// Routes `Win + N` exclusively to the Main Notch window to toggle Calendar.
+fn emit_main_toggle_calendar() {
+    let Some(app) = KEYBOARD_HOOK_APP_HANDLE.get().cloned() else {
+        return;
+    };
+    // Never block the input pipeline on WebView IPC.
+    tauri::async_runtime::spawn(async move {
+        if !SHUTTING_DOWN.load(Ordering::Relaxed) {
+            let _ = app.emit_to("main", "hime-toggle-calendar", ());
+        }
+    });
+}
+
 unsafe extern "system" fn keyboard_hook_proc(
     code: i32,
     wparam: windows::Win32::Foundation::WPARAM,
@@ -178,21 +216,27 @@ unsafe extern "system" fn keyboard_hook_proc(
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
-        // Only physical presses drive the Win+Number replacement; injected
-        // events (our own Start taps and mask key) must not re-enter it.
+        // Only physical presses drive Win+Number / Win+N; injected events
+        // (our own Start taps and mask key) must not re-enter it.
         if (kb.flags.0 & LLKHF_INJECTED.0) == 0 {
             if vk_code == VK_LWIN || vk_code == VK_RWIN {
                 if is_down {
                     WIN_KEY_DOWN.store(true, Ordering::Relaxed);
                     // A fresh Win press always starts a fresh combo, even if the
-                    // previous digit's keyup was missed.
+                    // previous keyup was missed.
                     WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+                    WIN_N_HELD.store(false, Ordering::Relaxed);
                 } else if is_up {
                     WIN_KEY_DOWN.store(false, Ordering::Relaxed);
                     WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+                    WIN_N_HELD.store(false, Ordering::Relaxed);
                 }
             } else if WIN_KEY_DOWN.load(Ordering::Relaxed) {
-                if let Some(index) = win_number_index(vk_code.0) {
+                if !win_key_physically_down() {
+                    WIN_KEY_DOWN.store(false, Ordering::Relaxed);
+                    WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
+                    WIN_N_HELD.store(false, Ordering::Relaxed);
+                } else if let Some(index) = win_number_index(vk_code.0) {
                     let slot = index + 1;
                     if is_up {
                         let _ = WIN_NUMBER_HELD.compare_exchange(
@@ -201,19 +245,35 @@ unsafe extern "system" fn keyboard_hook_proc(
                             Ordering::Relaxed,
                             Ordering::Relaxed,
                         );
-                    } else if is_down {
-                        if !win_key_physically_down() {
-                            WIN_KEY_DOWN.store(false, Ordering::Relaxed);
-                            WIN_NUMBER_HELD.store(0, Ordering::Relaxed);
-                        } else if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
-                            && dock_win_number_enabled()
-                        {
-                            if WIN_NUMBER_HELD.swap(slot, Ordering::Relaxed) != slot {
-                                send_start_menu_mask();
-                                emit_dock_win_number(index);
-                            }
+                    } else if is_down
+                        && NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
+                        && dock_win_number_enabled()
+                    {
+                        if WIN_NUMBER_HELD.swap(slot, Ordering::Relaxed) != slot {
+                            send_start_menu_mask();
+                            emit_dock_win_number(index);
+                        }
+                        return windows::Win32::Foundation::LRESULT(1);
+                    }
+                } else if vk_code.0 == VK_N_CODE {
+                    if is_up {
+                        if WIN_N_HELD.swap(false, Ordering::Relaxed) {
                             return windows::Win32::Foundation::LRESULT(1);
                         }
+                    } else if is_down
+                        && should_intercept_win_n(
+                            true,
+                            vk_code.0,
+                            modifier_keys_down(),
+                            crate::utils::suppress_native_notifications_enabled(),
+                            SHUTTING_DOWN.load(Ordering::Relaxed),
+                        )
+                    {
+                        if !WIN_N_HELD.swap(true, Ordering::Relaxed) {
+                            send_start_menu_mask();
+                            emit_main_toggle_calendar();
+                        }
+                        return windows::Win32::Foundation::LRESULT(1);
                     }
                 }
             }
@@ -230,10 +290,22 @@ pub fn setup_taskbar_hook() {
     unsafe {
         use windows::Win32::UI::Accessibility::SetWinEventHook;
         use windows::Win32::UI::WindowsAndMessaging::{
-            EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, WINEVENT_OUTOFCONTEXT,
+            EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
+            WINEVENT_OUTOFCONTEXT,
         };
+        const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
 
-        // Hook both "Show" and "Location Change" (happen when maximizing/switching apps)
+        // Hook Create, Show, LocationChange, and Uncloaked so Explorer or Windows 11
+        // cannot silently bring back Shell_TrayWnd or Shell_SecondaryTrayWnd.
+        let _create_hook = SetWinEventHook(
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_CREATE,
+            None,
+            Some(taskbar_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
         let _show_hook = SetWinEventHook(
             EVENT_OBJECT_SHOW,
             EVENT_OBJECT_SHOW,
@@ -246,6 +318,15 @@ pub fn setup_taskbar_hook() {
         let _loc_hook = SetWinEventHook(
             EVENT_OBJECT_LOCATIONCHANGE,
             EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(taskbar_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        let _uncloak_hook = SetWinEventHook(
+            EVENT_OBJECT_UNCLOAKED,
+            EVENT_OBJECT_UNCLOAKED,
             None,
             Some(taskbar_event_proc),
             0,
@@ -636,21 +717,44 @@ unsafe extern "system" fn thumbnail_capture_proc(
 
 unsafe extern "system" fn taskbar_event_proc(
     _h_win_event_hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
-    _event: u32,
+    event: u32,
     hwnd: HWND,
-    _id_object: i32,
-    _id_child: i32,
+    id_object: i32,
+    id_child: i32,
     _dw_event_thread: u32,
     _dwms_event_time: u32,
 ) {
-    if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) {
-        let mut class_name = [0u8; 256];
-        let len = windows::Win32::UI::WindowsAndMessaging::GetClassNameA(hwnd, &mut class_name);
-        let class_str = std::str::from_utf8(&class_name[..len as usize]).unwrap_or("");
+    if hwnd.0.is_null() || id_object != 0 || id_child != 0 {
+        return;
+    }
+    if SHUTTING_DOWN.load(Ordering::Relaxed) || TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let dock_active = NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
+        || (crate::utils::dock_enabled()
+            && WINDOW_CHANGE_APP_HANDLE
+                .get()
+                .and_then(|a| a.get_webview_window("dock"))
+                .is_some_and(|w| w.is_visible().unwrap_or(false)));
+    if !dock_active {
+        return;
+    }
 
-        if class_str == "Shell_TrayWnd" || class_str == "Shell_SecondaryTrayWnd" {
-            // Taskbar is trying to show or move: slap it back down.
-            set_taskbar_visibility(false, false);
+    let mut class_name = [0u8; 256];
+    let len = windows::Win32::UI::WindowsAndMessaging::GetClassNameA(hwnd, &mut class_name);
+    let class_str = std::str::from_utf8(&class_name[..len as usize]).unwrap_or("");
+
+    if class_str == "Shell_TrayWnd" || class_str == "Shell_SecondaryTrayWnd" {
+        use windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_CREATE;
+        const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
+        // Avoid self-triggering on our own SetWindowPos(-10000, -10000) LOCATIONCHANGE:
+        // only re-hide when the taskbar was created/uncloaked or is actually visible/on-screen.
+        let exposed = event == EVENT_OBJECT_CREATE
+            || event == EVENT_OBJECT_UNCLOAKED
+            || IsWindowVisible(hwnd).as_bool()
+            || placed_taskbar_rect(hwnd).is_some();
+        if exposed && set_taskbar_visibility(false, false) {
+            NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -977,7 +1081,8 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
             let mut manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
                 .and_then(|op| op.get())
                 .ok();
-            let mut last_processed_media = std::time::Instant::now();
+            let mut last_processed_media = std::time::Instant::now() - std::time::Duration::from_millis(1000);
+            let mut last_media_heartbeat = std::time::Instant::now();
             let mut last_device_check = std::time::Instant::now();
             #[allow(clippy::type_complexity)]
             let mut last_emitted_info: Option<(
@@ -1005,6 +1110,9 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
             };
 
             loop {
+                if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
                 // Check for device change
                 if last_device_check.elapsed().as_secs() >= 2 {
                     last_device_check = std::time::Instant::now();
@@ -1111,160 +1219,179 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                         }
                     }
                 }
-                if last_processed_media.elapsed().as_millis() >= 2000 {
+                if last_processed_media.elapsed().as_millis() >= 1000 {
                     last_processed_media = std::time::Instant::now();
                     let mut best_info: Option<MediaInfo> = None;
+                    let mut reset_manager = false;
                     if let Some(ref mgr) = manager {
-                        if let Ok(sessions) = mgr.GetSessions() {
-                            for i in 0..sessions.Size().unwrap_or(0) {
-                                if let Ok(session) = sessions.GetAt(i) {
-                                    let is_playing = session
-										.GetPlaybackInfo()
-										.ok()
-										.and_then(|p| p.PlaybackStatus().ok())
-										== Some(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
-                                    if let Ok(props) =
-                                        session.TryGetMediaPropertiesAsync().and_then(|op| op.get())
-                                    {
-                                        let title = props.Title().unwrap_or_default().to_string();
-                                        if !title.is_empty() {
-                                            let artist =
-                                                props.Artist().unwrap_or_default().to_string();
-                                            let album =
-                                                props.AlbumTitle().unwrap_or_default().to_string();
-                                            let mut artwork = None;
-                                            let mut got_art_from_cache = false;
-                                            if let Some((
-                                                ref last_title,
-                                                ref last_artist,
-                                                _,
-                                                _,
-                                                ref last_art,
-                                                _,
-                                                _,
-                                            )) = last_emitted_info
-                                            {
-                                                if last_title == &title && last_artist == &artist {
-                                                    artwork = last_art
-                                                        .as_ref()
-                                                        .map(|art| vec![art.clone()]);
-                                                    got_art_from_cache = true;
+                        match mgr.GetSessions() {
+                            Ok(sessions) => {
+                                for i in 0..sessions.Size().unwrap_or(0) {
+                                    if let Ok(session) = sessions.GetAt(i) {
+                                        let playback_status = session
+                                            .GetPlaybackInfo()
+                                            .ok()
+                                            .and_then(|p| p.PlaybackStatus().ok());
+                                        if playback_status
+                                            == Some(
+                                                GlobalSystemMediaTransportControlsSessionPlaybackStatus::Closed,
+                                            )
+                                        {
+                                            continue;
+                                        }
+                                        let is_playing = playback_status
+                                            == Some(
+                                                GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing,
+                                            );
+                                        if let Ok(props) =
+                                            session.TryGetMediaPropertiesAsync().and_then(|op| op.get())
+                                        {
+                                            let title = props.Title().unwrap_or_default().to_string();
+                                            if !title.is_empty() {
+                                                let artist =
+                                                    props.Artist().unwrap_or_default().to_string();
+                                                let album =
+                                                    props.AlbumTitle().unwrap_or_default().to_string();
+                                                let mut artwork = None;
+                                                let mut got_art_from_cache = false;
+                                                if let Some((
+                                                    ref last_title,
+                                                    ref last_artist,
+                                                    _,
+                                                    _,
+                                                    ref last_art,
+                                                    _,
+                                                    _,
+                                                )) = last_emitted_info
+                                                {
+                                                    if last_title == &title
+                                                        && last_artist == &artist
+                                                        && last_art.is_some()
+                                                    {
+                                                        artwork = last_art
+                                                            .as_ref()
+                                                            .map(|art| vec![art.clone()]);
+                                                        got_art_from_cache = true;
+                                                    }
                                                 }
-                                            }
 
-                                            if !got_art_from_cache {
-                                                artwork = (|| -> Option<Vec<String>> {
-                                                    let stream = props
-                                                        .Thumbnail()
-                                                        .ok()?
-                                                        .OpenReadAsync()
-                                                        .ok()?
-                                                        .get()
-                                                        .ok()?;
-                                                    let content_type = stream
-                                                        .ContentType()
-                                                        .ok()?
-                                                        .to_string()
-                                                        .split(',')
-                                                        .next()
-                                                        .unwrap_or("image/jpeg")
-                                                        .trim()
-                                                        .to_string();
-                                                    let reader =
-                                                        DataReader::CreateDataReader(&stream)
-                                                            .ok()?;
-                                                    let mut all_bytes = Vec::new();
-                                                    let chunk_size = 65536u32;
-                                                    loop {
-                                                        let loaded = reader
-                                                            .LoadAsync(chunk_size)
+                                                if !got_art_from_cache {
+                                                    artwork = (|| -> Option<Vec<String>> {
+                                                        let stream = props
+                                                            .Thumbnail()
+                                                            .ok()?
+                                                            .OpenReadAsync()
                                                             .ok()?
                                                             .get()
                                                             .ok()?;
-                                                        if loaded == 0 {
-                                                            break;
+                                                        let content_type = stream
+                                                            .ContentType()
+                                                            .ok()?
+                                                            .to_string()
+                                                            .split(',')
+                                                            .next()
+                                                            .unwrap_or("image/jpeg")
+                                                            .trim()
+                                                            .to_string();
+                                                        let reader =
+                                                            DataReader::CreateDataReader(&stream)
+                                                                .ok()?;
+                                                        let mut all_bytes = Vec::new();
+                                                        let chunk_size = 65536u32;
+                                                        loop {
+                                                            let loaded = reader
+                                                                .LoadAsync(chunk_size)
+                                                                .ok()?
+                                                                .get()
+                                                                .ok()?;
+                                                            if loaded == 0 {
+                                                                break;
+                                                            }
+                                                            let mut chunk = vec![0u8; loaded as usize];
+                                                            reader.ReadBytes(&mut chunk).ok()?;
+                                                            all_bytes.extend_from_slice(&chunk);
                                                         }
-                                                        let mut chunk = vec![0u8; loaded as usize];
-                                                        reader.ReadBytes(&mut chunk).ok()?;
-                                                        all_bytes.extend_from_slice(&chunk);
-                                                    }
-                                                    if all_bytes.is_empty() {
-                                                        return None;
-                                                    }
-                                                    Some(vec![format!(
-                                                        "data:{};base64,{}",
-                                                        content_type,
-                                                        general_purpose::STANDARD.encode(all_bytes)
-                                                    )])
-                                                })(
-                                                );
-                                            }
-
-                                            // Extract timeline properties for progress bar
-                                            let (position_ms, duration_ms, seek_enabled) = {
-                                                let defaults = (0i64, 0i64, false);
-                                                match session.GetTimelineProperties() {
-                                                    Ok(timeline) => {
-                                                        let start = timeline
-                                                            .StartTime()
-                                                            .map(|t| t.Duration / 10_000)
-                                                            .unwrap_or(0);
-                                                        let end = timeline
-                                                            .EndTime()
-                                                            .map(|t| t.Duration / 10_000)
-                                                            .unwrap_or(0);
-                                                        let pos = timeline
-                                                            .Position()
-                                                            .map(|t| t.Duration / 10_000)
-                                                            .unwrap_or(0);
-                                                        let dur = (end - start).max(0);
-                                                        // If duration is 0 but position > 0, some players don't report start/end
-                                                        // but still track position — use position as fallback duration indicator
-                                                        let effective_dur =
-                                                            if dur > 0 { dur } else { 0 };
-                                                        // Check if seeking is supported
-                                                        let seek = session
-                                                            .GetPlaybackInfo()
-                                                            .ok()
-                                                            .and_then(|pi| pi.Controls().ok())
-                                                            .map(|c| {
-                                                                c.IsPlaybackPositionEnabled()
-                                                                    .unwrap_or(false)
-                                                            })
-                                                            .unwrap_or(false);
-                                                        (pos, effective_dur, seek)
-                                                    }
-                                                    Err(_) => defaults,
+                                                        if all_bytes.is_empty() {
+                                                            return None;
+                                                        }
+                                                        Some(vec![format!(
+                                                            "data:{};base64,{}",
+                                                            content_type,
+                                                            general_purpose::STANDARD.encode(all_bytes)
+                                                        )])
+                                                    })(
+                                                    );
                                                 }
-                                            };
 
-                                            let now_ms = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_millis() as u64)
-                                                .unwrap_or(0);
-                                            let info = MediaInfo {
-                                                title,
-                                                artist,
-                                                album,
-                                                is_playing,
-                                                has_media: true,
-                                                artwork,
-                                                position_ms,
-                                                duration_ms,
-                                                seek_enabled,
-                                                position_updated_at: now_ms,
-                                            };
-                                            if is_playing {
-                                                best_info = Some(info);
-                                                break;
-                                            } else if best_info.is_none() {
-                                                best_info = Some(info);
+                                                // Extract timeline properties for progress bar
+                                                let (position_ms, duration_ms, seek_enabled) = {
+                                                    let defaults = (0i64, 0i64, false);
+                                                    match session.GetTimelineProperties() {
+                                                        Ok(timeline) => {
+                                                            let start = timeline
+                                                                .StartTime()
+                                                                .map(|t| t.Duration / 10_000)
+                                                                .unwrap_or(0);
+                                                            let end = timeline
+                                                                .EndTime()
+                                                                .map(|t| t.Duration / 10_000)
+                                                                .unwrap_or(0);
+                                                            let pos = timeline
+                                                                .Position()
+                                                                .map(|t| t.Duration / 10_000)
+                                                                .unwrap_or(0);
+                                                            let dur = (end - start).max(0);
+                                                            let effective_dur =
+                                                                if dur > 0 { dur } else { 0 };
+                                                            let seek = session
+                                                                .GetPlaybackInfo()
+                                                                .ok()
+                                                                .and_then(|pi| pi.Controls().ok())
+                                                                .map(|c| {
+                                                                    c.IsPlaybackPositionEnabled()
+                                                                        .unwrap_or(false)
+                                                                })
+                                                                .unwrap_or(false);
+                                                            (pos, effective_dur, seek)
+                                                        }
+                                                        Err(_) => defaults,
+                                                    }
+                                                };
+
+                                                let now_ms = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .map(|d| d.as_millis() as u64)
+                                                    .unwrap_or(0);
+                                                let info = MediaInfo {
+                                                    title,
+                                                    artist,
+                                                    album,
+                                                    is_playing,
+                                                    has_media: true,
+                                                    artwork,
+                                                    position_ms,
+                                                    duration_ms,
+                                                    seek_enabled,
+                                                    position_updated_at: now_ms,
+                                                };
+                                                if is_playing {
+                                                    best_info = Some(info);
+                                                    break;
+                                                } else if best_info.is_none() {
+                                                    best_info = Some(info);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            Err(_) => {
+                                reset_manager = true;
+                            }
                         }
+                    }
+                    if reset_manager {
+                        manager = None;
                     }
                     let current = best_info.unwrap_or(MediaInfo {
                         title: "".into(),
@@ -1279,14 +1406,18 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                         position_updated_at: 0,
                     });
                     let art_str = current.artwork.as_ref().and_then(|a| a.first()).cloned();
-                    if last_emitted_info.as_ref().is_none_or(|(t, a, p, h, art, pos, _dur)| {
-                        t != &current.title || a != &current.artist || p != &current.is_playing || h != &current.has_media || art != &art_str ||
-                        // For position: emit if >1s difference (avoid spamming on every poll)
-                        (*pos - current.position_ms).abs() > 1000
-                    }) {
+                    let heartbeat_due = last_media_heartbeat.elapsed().as_secs() >= 6;
+                    if heartbeat_due
+                        || last_emitted_info.as_ref().is_none_or(|(t, a, p, h, art, pos, _dur)| {
+                            t != &current.title || a != &current.artist || p != &current.is_playing || h != &current.has_media || art != &art_str ||
+                            // For position: emit if >1s difference (avoid spamming on every poll)
+                            (*pos - current.position_ms).abs() > 1000
+                        })
+                    {
                         let _ = handle_system.emit("media-update", current.clone());
                         ANY_MEDIA_PLAYING.store(current.is_playing, Ordering::Relaxed);
                         last_emitted_info = Some((current.title, current.artist, current.is_playing, current.has_media, art_str, current.position_ms, current.duration_ms));
+                        last_media_heartbeat = std::time::Instant::now();
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(64));
@@ -1627,17 +1758,27 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
 
                                         if let Ok(notch_rect_lock) = NOTCH_RECT.lock() {
                                             if let Some(nr) = *notch_rect_lock {
-                                                let scale = cached_scale;
-                                                let n_left = (nr.x as f64 * scale) as i32;
-                                                let n_right =
-                                                    n_left + (nr.width as f64 * scale) as i32;
-                                                let res_h = (36.0 * scale) as i32;
-                                                let trigger_y = screen_rect.top + res_h;
-
-                                                if rect.left < n_right - 4
-                                                    && rect.right > n_left + 4
-                                                    && rect.top < trigger_y - 4
-                                                {
+                                                let (win_x, win_y) = MAIN_WINDOW_RECT
+                                                    .try_lock()
+                                                    .ok()
+                                                    .and_then(|g| *g)
+                                                    .map(|(p, _)| (p.x, p.y))
+                                                    .unwrap_or((screen_rect.left, screen_rect.top));
+                                                let saved_edge = saved_notch_edge_try();
+                                                if notch_overlap_rect_intersects(
+                                                    nr,
+                                                    saved_edge,
+                                                    win_x,
+                                                    win_y,
+                                                    (
+                                                        screen_rect.left,
+                                                        screen_rect.top,
+                                                        screen_rect.right,
+                                                        screen_rect.bottom,
+                                                    ),
+                                                    (rect.left, rect.top, rect.right, rect.bottom),
+                                                    cached_scale,
+                                                ) {
                                                     should_notch_overlap = true;
                                                 }
                                             }
@@ -1722,10 +1863,14 @@ pub fn setup_system_worker(app_handle: AppHandle) -> Sender<SystemCommand> {
                 }
 
                 // Enforce native taskbar hiding (periodic check)
-                if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
-                    && (refresh_taskbar_owner() || any_native_taskbar_visible())
+                if !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+                    && (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
+                        || (crate::utils::dock_enabled() && dock_visible))
+                    && (refresh_taskbar_owner() || any_native_taskbar_exposed())
                 {
-                    set_taskbar_visibility(false, false);
+                    if set_taskbar_visibility(false, false) {
+                        NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                    }
                 }
             }
 
@@ -1920,6 +2065,673 @@ fn sync_native_osd(app_handle: &AppHandle) {
     );
 }
 
+// ── Reversible Native Windows Notification & Calendar Suppression ───────────
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SystemNotificationPayload {
+    pub id: String,
+    pub app: String,
+    pub title: String,
+    pub body: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeShellPopupKind {
+    NotificationToast,
+    CalendarOrActionCenter,
+}
+
+static NATIVE_NOTIF_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+static SUPPRESSED_POPUP_HWNDS: OnceLock<Mutex<std::collections::HashSet<isize>>> = OnceLock::new();
+static TOAST_CAPTURE_SENDER: OnceLock<SyncSender<isize>> = OnceLock::new();
+static TOAST_HWND_RECENT: OnceLock<Mutex<std::collections::HashMap<isize, i64>>> = OnceLock::new();
+static NOTIF_DEDUP: OnceLock<Mutex<NotificationDeduplicator>> = OnceLock::new();
+static NOTIF_SEQ: AtomicU64 = AtomicU64::new(1);
+static SUPPRESSION_HOOKS_STARTED: AtomicBool = AtomicBool::new(false);
+static WAS_SUPPRESSING_NATIVE_NOTIFS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) struct NotificationDeduplicator {
+    seen: std::collections::HashMap<(String, String), i64>,
+    cooldown_ms: i64,
+}
+
+impl NotificationDeduplicator {
+    pub(crate) fn new(cooldown_ms: i64) -> Self {
+        Self {
+            seen: std::collections::HashMap::new(),
+            cooldown_ms,
+        }
+    }
+
+    pub(crate) fn should_emit(&mut self, title: &str, body: &str, now_ms: i64) -> bool {
+        let key = (title.trim().to_lowercase(), body.trim().to_lowercase());
+        if key.0.is_empty() && key.1.is_empty() {
+            return false;
+        }
+        let cooldown = self.cooldown_ms;
+        self.seen.retain(|_, ts| now_ms - *ts < cooldown);
+        if let Some(&prev) = self.seen.get(&key) {
+            if now_ms - prev < cooldown {
+                return false;
+            }
+        }
+        self.seen.insert(key, now_ms);
+        true
+    }
+}
+
+pub(crate) fn classify_native_popup_window(
+    process_name_lower: &str,
+    class_name: &str,
+    title: &str,
+) -> Option<NativeShellPopupKind> {
+    let is_shell_host =
+        process_name_lower == "shellexperiencehost.exe" || process_name_lower == "shellhost.exe";
+    let is_explorer = process_name_lower == "explorer.exe";
+    if !is_shell_host && !is_explorer {
+        return None;
+    }
+
+    if class_name != "Windows.UI.Core.CoreWindow" && class_name != "ClockFlyoutWindow" {
+        return None;
+    }
+
+    let title_lower = title.trim().to_lowercase();
+    if title_lower.is_empty() {
+        return None;
+    }
+
+    // Calendar / Notification Center flyouts (English + Indonesian Windows locales)
+    let is_calendar_or_center = matches!(
+        title_lower.as_str(),
+        "notification center"
+            | "pusat pemberitahuan"
+            | "action center"
+            | "pusat tindakan"
+            | "date and time information"
+            | "informasi tanggal dan waktu"
+            | "calendar"
+            | "kalender"
+            | "clock flyout"
+            | "notification and calendar"
+            | "notifications"
+    );
+    if is_calendar_or_center {
+        return Some(NativeShellPopupKind::CalendarOrActionCenter);
+    }
+
+    // Native toast notification banners owned by ShellExperienceHost / ShellHost
+    if is_shell_host
+        && (title_lower == "new notification"
+            || title_lower == "pemberitahuan baru"
+            || title_lower == "notification"
+            || title_lower == "pemberitahuan"
+            || title_lower.starts_with("new notification")
+            || title_lower.starts_with("pemberitahuan baru"))
+    {
+        return Some(NativeShellPopupKind::NotificationToast);
+    }
+
+    None
+}
+
+fn is_toast_boilerplate(text_lower: &str) -> bool {
+    matches!(
+        text_lower,
+        "new notification"
+            | "pemberitahuan baru"
+            | "notification"
+            | "pemberitahuan"
+            | "close"
+            | "tutup"
+            | "dismiss"
+            | "tutup pemberitahuan"
+            | "settings"
+            | "pengaturan"
+            | "notification settings"
+            | "pengaturan pemberitahuan"
+            | "more options"
+            | "opsi lainnya"
+            | "see more"
+            | "lihat lainnya"
+    )
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+pub(crate) fn parse_toast_texts(texts: &[String]) -> Option<(String, String, String)> {
+    let mut cleaned: Vec<String> = Vec::new();
+    for raw in texts {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if is_toast_boilerplate(&lower) {
+            continue;
+        }
+        if cleaned
+            .last()
+            .is_some_and(|prev| prev.eq_ignore_ascii_case(trimmed))
+        {
+            continue;
+        }
+        cleaned.push(trimmed.to_string());
+    }
+
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    // Strip "New notification from <App>" / "Pemberitahuan baru dari <App>" if present
+    let first_lower = cleaned[0].to_lowercase();
+    if let Some(rest) = first_lower.strip_prefix("new notification from ") {
+        let offset = cleaned[0].len() - rest.len();
+        let app_part = cleaned[0][offset..].trim().to_string();
+        if !app_part.is_empty() {
+            cleaned[0] = app_part;
+        }
+    } else if let Some(rest) = first_lower.strip_prefix("pemberitahuan baru dari ") {
+        let offset = cleaned[0].len() - rest.len();
+        let app_part = cleaned[0][offset..].trim().to_string();
+        if !app_part.is_empty() {
+            cleaned[0] = app_part;
+        }
+    }
+
+    match cleaned.len() {
+        1 => Some(("Windows".to_string(), truncate_chars(&cleaned[0], 120), String::new())),
+        2 => Some((
+            truncate_chars(&cleaned[0], 64),
+            truncate_chars(&cleaned[1], 120),
+            String::new(),
+        )),
+        _ => {
+            let app = truncate_chars(&cleaned[0], 64);
+            let title = truncate_chars(&cleaned[1], 120);
+            let body_joined = cleaned[2..cleaned.len().min(4)].join(" — ");
+            let body = truncate_chars(&body_joined, 240);
+            Some((app, title, body))
+        }
+    }
+}
+
+unsafe fn process_file_name_lower(process_id: u32) -> Option<String> {
+    if process_id == 0 || process_id == std::process::id() {
+        return None;
+    }
+    if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) {
+        let mut buffer = [0u16; 512];
+        let mut length = buffer.len() as u32;
+        let name = if QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+        .is_ok()
+        {
+            let full = String::from_utf16_lossy(&buffer[..length as usize]);
+            Path::new(&full)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_lowercase())
+        } else {
+            None
+        };
+        let _ = CloseHandle(process);
+        if name.is_some() {
+            return name;
+        }
+    }
+    process_exe_name(process_id).map(|s| s.to_lowercase())
+}
+
+fn record_suppressed_hwnd(hwnd: HWND) {
+    let raw = hwnd.0 as isize;
+    if raw == 0 {
+        return;
+    }
+    let set = SUPPRESSED_POPUP_HWNDS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut guard) = set.lock() {
+        if guard.insert(raw) {
+            let all: Vec<isize> = guard.iter().copied().collect();
+            drop(guard);
+            crate::utils::write_native_notif_marker(&all);
+        }
+    }
+}
+
+/// Visually suppresses a native ShellExperienceHost/Explorer popup window.
+/// When `hide_completely` is false (used briefly while reading UIA from a toast),
+/// alpha is set to `1` so the XAML UI Automation tree remains accessible while
+/// the window is click-through and imperceptible.
+unsafe fn suppress_popup_hwnd(hwnd: HWND, hide_completely: bool) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetLayeredWindowAttributes, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow,
+        LWA_ALPHA, SW_HIDE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    };
+
+    record_suppressed_hwnd(hwnd);
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    let target_style = ex_style | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0;
+    if target_style != ex_style {
+        SetWindowLongW(hwnd, GWL_EXSTYLE, target_style as i32);
+    }
+    let target_alpha = if hide_completely { 0u8 } else { 1u8 };
+    let mut current_alpha = 255u8;
+    let has_alpha =
+        GetLayeredWindowAttributes(hwnd, None, Some(&mut current_alpha), None).is_ok();
+    if !has_alpha || current_alpha != target_alpha {
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), target_alpha, LWA_ALPHA);
+    }
+    if hide_completely {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+unsafe fn is_popup_already_hidden(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetLayeredWindowAttributes, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    if !IsWindowVisible(hwnd).as_bool() {
+        return true;
+    }
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if (ex_style & (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0))
+        == (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0)
+    {
+        let mut alpha = 255u8;
+        if GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), None).is_ok() && alpha == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn restore_popup_hwnd(hwnd: HWND) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetLayeredWindowAttributes, IsWindow, SetLayeredWindowAttributes, SetWindowLongW,
+        LWA_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
+    };
+    if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    if (ex_style & WS_EX_LAYERED.0) != 0 {
+        let mut alpha = 255u8;
+        let is_ours = GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), None).is_ok()
+            && alpha <= 1;
+        if is_ours {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            SetWindowLongW(
+                hwnd,
+                GWL_EXSTYLE,
+                (ex_style & !(WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0))
+                    as i32,
+            );
+        }
+    }
+}
+
+unsafe fn find_native_popup_hwnds() -> Vec<(HWND, NativeShellPopupKind)> {
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameA, GetWindowTextW};
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let out = &mut *(lparam.0 as *mut Vec<(HWND, NativeShellPopupKind)>);
+        let mut class_buf = [0u8; 128];
+        let class_len = GetClassNameA(hwnd, &mut class_buf);
+        let class_str = std::str::from_utf8(&class_buf[..class_len as usize]).unwrap_or("");
+        if class_str != "Windows.UI.Core.CoreWindow" && class_str != "ClockFlyoutWindow" {
+            return BOOL(1);
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let Some(exe_lower) = process_file_name_lower(pid) else {
+            return BOOL(1);
+        };
+        let mut title_buf = [0u16; 256];
+        let title_len = GetWindowTextW(hwnd, &mut title_buf);
+        let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+        if let Some(kind) = classify_native_popup_window(&exe_lower, class_str, &title) {
+            out.push((hwnd, kind));
+        }
+        BOOL(1)
+    }
+
+    let mut found = Vec::new();
+    let _ = EnumWindows(
+        Some(collect),
+        LPARAM(&mut found as *mut Vec<(HWND, NativeShellPopupKind)> as isize),
+    );
+    found
+}
+
+pub fn restore_native_notifications_with_hwnds(extra_hwnds: &[isize]) {
+    let mut to_restore: Vec<isize> = extra_hwnds.to_vec();
+    if let Some(set) = SUPPRESSED_POPUP_HWNDS.get() {
+        if let Ok(mut guard) = set.lock() {
+            to_restore.extend(guard.drain());
+        }
+    }
+    unsafe {
+        for (hwnd, _) in find_native_popup_hwnds() {
+            let raw = hwnd.0 as isize;
+            if !to_restore.contains(&raw) {
+                to_restore.push(raw);
+            }
+        }
+        for raw in to_restore {
+            if raw != 0 {
+                restore_popup_hwnd(HWND(raw as *mut _));
+            }
+        }
+    }
+    WAS_SUPPRESSING_NATIVE_NOTIFS.store(false, Ordering::Relaxed);
+    crate::utils::remove_native_notif_marker();
+}
+
+pub fn restore_native_notifications() {
+    restore_native_notifications_with_hwnds(&[]);
+}
+
+fn queue_toast_capture(hwnd: HWND) {
+    let raw = hwnd.0 as isize;
+    let now = crate::utils::get_now_ms();
+    let recent = TOAST_HWND_RECENT.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut guard) = recent.lock() {
+        guard.retain(|_, ts| now - *ts < 5_000);
+        if let Some(&prev) = guard.get(&raw) {
+            if now - prev < 400 {
+                return;
+            }
+        }
+        guard.insert(raw, now);
+    }
+    if let Some(sender) = TOAST_CAPTURE_SENDER.get() {
+        let _ = sender.try_send(raw);
+    }
+}
+
+unsafe fn handle_native_popup_candidate(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameA, GetWindowTextW, IsWindow};
+    if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    let mut class_buf = [0u8; 128];
+    let class_len = GetClassNameA(hwnd, &mut class_buf);
+    let class_str = std::str::from_utf8(&class_buf[..class_len as usize]).unwrap_or("");
+    if class_str != "Windows.UI.Core.CoreWindow" && class_str != "ClockFlyoutWindow" {
+        return;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let Some(exe_lower) = process_file_name_lower(pid) else {
+        return;
+    };
+    let mut title_buf = [0u16; 256];
+    let title_len = GetWindowTextW(hwnd, &mut title_buf);
+    let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+    let Some(kind) = classify_native_popup_window(&exe_lower, class_str, &title) else {
+        return;
+    };
+
+    WAS_SUPPRESSING_NATIVE_NOTIFS.store(true, Ordering::Relaxed);
+    match kind {
+        NativeShellPopupKind::CalendarOrActionCenter => {
+            if !is_popup_already_hidden(hwnd) {
+                suppress_popup_hwnd(hwnd, true);
+            }
+        }
+        NativeShellPopupKind::NotificationToast => {
+            if !is_popup_already_hidden(hwnd) {
+                // Keep alpha=1 & UIA tree alive until toast_capture_worker reads it,
+                // then worker sets alpha=0 + SW_HIDE.
+                suppress_popup_hwnd(hwnd, false);
+                queue_toast_capture(hwnd);
+            }
+        }
+    }
+}
+
+fn scan_and_suppress_native_popups() {
+    if SHUTTING_DOWN.load(Ordering::Relaxed)
+        || !crate::utils::suppress_native_notifications_enabled()
+    {
+        return;
+    }
+    unsafe {
+        for (hwnd, kind) in find_native_popup_hwnds() {
+            WAS_SUPPRESSING_NATIVE_NOTIFS.store(true, Ordering::Relaxed);
+            match kind {
+                NativeShellPopupKind::CalendarOrActionCenter => {
+                    if !is_popup_already_hidden(hwnd) {
+                        suppress_popup_hwnd(hwnd, true);
+                    }
+                }
+                NativeShellPopupKind::NotificationToast => {
+                    if !is_popup_already_hidden(hwnd) {
+                        suppress_popup_hwnd(hwnd, false);
+                        queue_toast_capture(hwnd);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn sync_native_notifications_suppression(_app_handle: &AppHandle) {
+    if SHUTTING_DOWN.load(Ordering::Relaxed)
+        || !crate::utils::suppress_native_notifications_enabled()
+    {
+        restore_native_notifications();
+    } else {
+        scan_and_suppress_native_popups();
+    }
+}
+
+unsafe fn read_toast_texts_uia(
+    automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+    hwnd: HWND,
+) -> Vec<String> {
+    use windows::Win32::UI::Accessibility::{TreeScope_Descendants, UIA_TextControlTypeId};
+
+    let Ok(root) = automation.ElementFromHandle(hwnd) else {
+        return Vec::new();
+    };
+    let Ok(condition) = automation.CreateTrueCondition() else {
+        return Vec::new();
+    };
+    let Ok(elements) = root.FindAll(TreeScope_Descendants, &condition) else {
+        return Vec::new();
+    };
+    let mut texts = Vec::new();
+    let len = elements.Length().unwrap_or(0);
+    for index in 0..len {
+        let Ok(element) = elements.GetElement(index) else {
+            continue;
+        };
+        if element.CurrentControlType().ok() == Some(UIA_TextControlTypeId) {
+            if let Ok(name) = element.CurrentName() {
+                let text = name.to_string();
+                if !text.trim().is_empty() {
+                    texts.push(text);
+                }
+            }
+        }
+    }
+    texts
+}
+
+fn spawn_toast_capture_worker(app_handle: AppHandle) {
+    let (tx, rx) = sync_channel::<isize>(32);
+    if TOAST_CAPTURE_SENDER.set(tx).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("hime-toast-capture".into())
+        .spawn(move || unsafe {
+            use windows::core::Interface;
+            use windows::Win32::System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_MULTITHREADED,
+            };
+            use windows::Win32::UI::Accessibility::{CUIAutomation8, IUIAutomation, IUIAutomation2};
+            use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+            let com_ok = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+            let automation: Option<IUIAutomation> =
+                CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER).ok();
+            if let Some(ref auto) = automation {
+                if let Ok(options) = auto.cast::<IUIAutomation2>() {
+                    let _ = options.SetConnectionTimeout(400);
+                    let _ = options.SetTransactionTimeout(800);
+                }
+            }
+
+            while let Ok(hwnd_raw) = rx.recv() {
+                if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                if !crate::utils::suppress_native_notifications_enabled() {
+                    continue;
+                }
+                let hwnd = HWND(hwnd_raw as *mut _);
+                let mut extracted: Option<(String, String, String)> = None;
+
+                for delay_ms in [45u64, 55, 80] {
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    if SHUTTING_DOWN.load(Ordering::Relaxed)
+                        || !crate::utils::suppress_native_notifications_enabled()
+                        || !IsWindow(Some(hwnd)).as_bool()
+                    {
+                        break;
+                    }
+                    if let Some(ref auto) = automation {
+                        let texts = read_toast_texts_uia(auto, hwnd);
+                        if let Some(parsed) = parse_toast_texts(&texts) {
+                            extracted = Some(parsed);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some((app_name, title, body)) = extracted {
+                    let now_ms = crate::utils::get_now_ms();
+                    let dedup =
+                        NOTIF_DEDUP.get_or_init(|| Mutex::new(NotificationDeduplicator::new(3000)));
+                    let should_emit = dedup
+                        .lock()
+                        .map(|mut d| d.should_emit(&title, &body, now_ms))
+                        .unwrap_or(true);
+                    if should_emit && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                        let seq = NOTIF_SEQ.fetch_add(1, Ordering::Relaxed);
+                        let payload = SystemNotificationPayload {
+                            id: format!("win-notif-{now_ms}-{seq}"),
+                            app: app_name,
+                            title,
+                            body,
+                            timestamp: now_ms,
+                        };
+                        // Strictly route system notifications to Main Notch only (never dock/overlay).
+                        let _ = app_handle.emit_to("main", "hime-system-notification", payload);
+                    }
+                }
+
+                if !SHUTTING_DOWN.load(Ordering::Relaxed)
+                    && crate::utils::suppress_native_notifications_enabled()
+                    && IsWindow(Some(hwnd)).as_bool()
+                {
+                    suppress_popup_hwnd(hwnd, true);
+                }
+            }
+
+            drop(automation);
+            if com_ok {
+                CoUninitialize();
+            }
+        })
+        .expect("Failed to start hime-toast-capture thread");
+}
+
+unsafe extern "system" fn native_notif_event_proc(
+    _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _event_thread: u32,
+    _ms_event_time: u32,
+) {
+    if hwnd.0.is_null() || id_object != 0 || id_child != 0 {
+        return;
+    }
+    if SHUTTING_DOWN.load(Ordering::Relaxed)
+        || !crate::utils::suppress_native_notifications_enabled()
+    {
+        return;
+    }
+    handle_native_popup_candidate(hwnd);
+}
+
+pub fn setup_native_notification_suppression(app_handle: AppHandle) {
+    let _ = NATIVE_NOTIF_APP_HANDLE.set(app_handle.clone());
+    if SUPPRESSION_HOOKS_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    spawn_toast_capture_worker(app_handle);
+
+    unsafe {
+        use windows::Win32::UI::Accessibility::SetWinEventHook;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EVENT_OBJECT_CREATE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW,
+            WINEVENT_OUTOFCONTEXT,
+        };
+        const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
+
+        for event in [
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_NAMECHANGE,
+            EVENT_OBJECT_UNCLOAKED,
+        ] {
+            let _ = SetWinEventHook(
+                event,
+                event,
+                None,
+                Some(native_notif_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+        }
+    }
+
+    std::thread::Builder::new()
+        .name("hime-notif-watchdog".into())
+        .spawn(|| {
+            while !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                if crate::utils::suppress_native_notifications_enabled() {
+                    scan_and_suppress_native_popups();
+                } else if WAS_SUPPRESSING_NATIVE_NOTIFS.load(Ordering::Relaxed) {
+                    restore_native_notifications();
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+        .expect("Failed to start hime-notif-watchdog thread");
+}
+
 pub fn setup_brightness_worker() {
     let (tx, rx) = channel::<u32>();
     let _ = BRIGHTNESS_SENDER.set(tx);
@@ -2093,6 +2905,7 @@ static MH_LEFT_EXPIRY_MS: AtomicI64 = AtomicI64::new(0);
 static MH_RIGHT_EXPIRY_MS: AtomicI64 = AtomicI64::new(0);
 static MH_LAST_MONITOR_UPDATE_MS: AtomicI64 = AtomicI64::new(0);
 static MH_CACHED_SCALE: AtomicU64 = AtomicU64::new(f64::to_bits(1.0));
+static MH_CACHED_BLOOM_SCALE: AtomicU64 = AtomicU64::new(f64::to_bits(1.0));
 static MH_CACHED_MON_POS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 static MH_CACHED_MON_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 static CAPTURE_UI_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -2161,8 +2974,8 @@ static MH_TOP_EDGE_ARMED: AtomicBool = AtomicBool::new(false);
 /// after the cursor has rested in the band for the configured delay. A
 /// pass-through along the bottom strip never arms it. The delay is user-tunable
 /// via `bloom-dock-edge-delay` (ms); `0` restores the old instant behavior.
-const BOTTOM_EDGE_BAND_PX: f64 = 10.0;
-const BOTTOM_EDGE_DWELL_MS: i64 = 200;
+const BOTTOM_EDGE_BAND_PX: f64 = 16.0;
+const BOTTOM_EDGE_DWELL_MS: i64 = 120;
 /// The mouse hook only fires on WM_MOUSEMOVE, so a pending dwell is completed
 /// by a watchdog that re-checks at this cadence.
 const BOTTOM_EDGE_POLL_MS: u64 = 40;
@@ -2207,16 +3020,43 @@ fn setup_volume_mixer_watchdog(app_handle: AppHandle) {
         if inside {
             continue;
         }
-        let at_left_edge = app_handle
+        let on_volume_dock_edge = app_handle
             .primary_monitor()
             .ok()
             .flatten()
             .is_some_and(|m| {
                 let pos = m.position();
                 let size = m.size();
-                pt.x <= pos.x + 8 && pt.y >= pos.y && pt.y <= pos.y + size.height as i32
+                let dpi_scale = m.scale_factor();
+                let bloom_scale = crate::utils::get_bloom_scale(&app_handle);
+                let free_drag = is_free_drag_enabled(&app_handle);
+                let reported = VOLUME_OVERLAY_RECT.lock().ok().and_then(|g| g.clone());
+                let saved = saved_setting_value_try("bloom-volume-overlay-position");
+                let vol_box = resolve_overlay_box(
+                    reported.as_ref(),
+                    saved.as_ref(),
+                    free_drag,
+                    DockEdge::Left,
+                    pos.x,
+                    pos.y,
+                    size.width as i32,
+                    size.height as i32,
+                    dpi_scale,
+                    bloom_scale,
+                );
+                point_on_overlay_edge_strip(
+                    pt.x,
+                    pt.y,
+                    vol_box,
+                    free_drag,
+                    pos.x,
+                    pos.y,
+                    size.width as i32,
+                    size.height as i32,
+                    dpi_scale,
+                )
             });
-        if !at_left_edge && MH_LAST_LEFT_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
+        if !on_volume_dock_edge && MH_LAST_LEFT_EDGE_HOVER.swap(0, Ordering::Relaxed) != 0 {
             MH_LEFT_EXPIRY_MS.store(0, Ordering::Relaxed);
             let _ = app_handle.emit("volume-edge-hover", false);
         }
@@ -2511,64 +3351,505 @@ fn top_edge_dwell_ms(app_handle: &AppHandle, is_hidden: bool) -> i64 {
         .clamp(0, 2000)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockEdge {
+    Top,
+    Left,
+    Right,
+}
+
+impl DockEdge {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "top" => Some(Self::Top),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PhysicalOverlayBox {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    edge: DockEdge,
+    is_custom_docked: bool,
+}
+
+pub fn is_free_drag_enabled(_app: &AppHandle) -> bool {
+    let Some(cache) = SETTINGS_CACHE.get() else {
+        return false;
+    };
+    let Ok(guard) = cache.lock() else {
+        return false;
+    };
+    guard
+        .get("bloom-free-drag-enabled")
+        .is_some_and(|v| v.as_str() == Some("true") || v.as_bool() == Some(true))
+}
+
+fn is_free_drag_enabled_try() -> bool {
+    let Some(cache) = SETTINGS_CACHE.get() else {
+        return false;
+    };
+    let Ok(guard) = cache.try_lock() else {
+        return false;
+    };
+    guard
+        .get("bloom-free-drag-enabled")
+        .is_some_and(|v| v.as_str() == Some("true") || v.as_bool() == Some(true))
+}
+
+fn saved_setting_value_try(key: &str) -> Option<serde_json::Value> {
+    let cache = SETTINGS_CACHE.get()?;
+    let guard = cache.try_lock().ok()?;
+    guard.get(key).cloned()
+}
+
+fn parse_saved_position(val: &serde_json::Value) -> Option<(f64, f64, Option<DockEdge>)> {
+    let parsed_owned;
+    let obj = match val {
+        serde_json::Value::String(s) => {
+            parsed_owned = serde_json::from_str::<serde_json::Value>(s).ok()?;
+            &parsed_owned
+        }
+        other => other,
+    };
+    let x = obj.get("x")?.as_f64()?;
+    let y = obj.get("y")?.as_f64()?;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let edge = obj
+        .get("edge")
+        .and_then(|v| v.as_str())
+        .and_then(DockEdge::from_str);
+    Some((x, y, edge))
+}
+
+fn saved_notch_edge_try() -> Option<DockEdge> {
+    if !is_free_drag_enabled_try() {
+        return None;
+    }
+    let val = saved_setting_value_try("bloom-notch-position")?;
+    parse_saved_position(&val).and_then(|(_, _, edge)| edge)
+}
+
+fn infer_overlay_edge(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    mon_w_unzoomed: f64,
+    default_edge: DockEdge,
+) -> DockEdge {
+    if y <= 16.0 && width > height {
+        DockEdge::Top
+    } else if x <= 16.0 {
+        DockEdge::Left
+    } else if x + width >= mon_w_unzoomed - 16.0 {
+        DockEdge::Right
+    } else if y <= 40.0 {
+        DockEdge::Top
+    } else {
+        default_edge
+    }
+}
+
+fn infer_saved_overlay_edge(
+    x: f64,
+    y: f64,
+    mon_w_unzoomed: f64,
+    default_edge: DockEdge,
+) -> DockEdge {
+    if y <= 40.0 {
+        DockEdge::Top
+    } else if x <= 40.0 {
+        DockEdge::Left
+    } else if x >= mon_w_unzoomed - 82.0 {
+        DockEdge::Right
+    } else {
+        default_edge
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_overlay_box(
+    reported: Option<&OverlayRect>,
+    saved_pos: Option<&serde_json::Value>,
+    free_drag: bool,
+    default_edge: DockEdge,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: i32,
+    mon_h: i32,
+    dpi_scale: f64,
+    bloom_scale: f64,
+) -> PhysicalOverlayBox {
+    let sc = (dpi_scale * bloom_scale).max(0.25);
+    let default_box = || {
+        let nw = (42.0 * sc).round() as i32;
+        let nh = (196.0 * sc).round() as i32;
+        let ny = mon_y + (mon_h / 2) - (nh / 2);
+        let nx = if default_edge == DockEdge::Left {
+            mon_x
+        } else {
+            mon_x + mon_w - nw
+        };
+        PhysicalOverlayBox {
+            x: nx,
+            y: ny,
+            width: nw,
+            height: nh,
+            edge: default_edge,
+            is_custom_docked: false,
+        }
+    };
+
+    if !free_drag {
+        return default_box();
+    }
+
+    if let Some(rect) = reported {
+        if rect.width > 0.0 && rect.height > 0.0 {
+            let mon_w_unzoomed = mon_w as f64 / sc;
+            let edge = rect
+                .edge
+                .as_deref()
+                .and_then(DockEdge::from_str)
+                .unwrap_or_else(|| {
+                    infer_overlay_edge(
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        mon_w_unzoomed,
+                        default_edge,
+                    )
+                });
+            return PhysicalOverlayBox {
+                x: mon_x + (rect.x * sc).round() as i32,
+                y: mon_y + (rect.y * sc).round() as i32,
+                width: (rect.width * sc).round().max(1.0) as i32,
+                height: (rect.height * sc).round().max(1.0) as i32,
+                edge,
+                is_custom_docked: true,
+            };
+        }
+    }
+
+    if let Some((px, py, opt_edge)) = saved_pos.and_then(parse_saved_position) {
+        let mon_w_unzoomed = mon_w as f64 / sc;
+        let edge = opt_edge
+            .unwrap_or_else(|| infer_saved_overlay_edge(px, py, mon_w_unzoomed, default_edge));
+        let (w_css, h_css) = match edge {
+            DockEdge::Top => (196.0, 42.0),
+            DockEdge::Left | DockEdge::Right => (42.0, 196.0),
+        };
+        let w_px = (w_css * sc).round() as i32;
+        let h_px = (h_css * sc).round() as i32;
+        let raw_x = match edge {
+            DockEdge::Left => mon_x,
+            DockEdge::Right => mon_x + mon_w - w_px,
+            DockEdge::Top => mon_x + (px * sc).round() as i32,
+        };
+        let raw_y = match edge {
+            DockEdge::Top => mon_y,
+            DockEdge::Left | DockEdge::Right => mon_y + (py * sc).round() as i32,
+        };
+        let x = raw_x.clamp(mon_x, (mon_x + mon_w - w_px).max(mon_x));
+        let y = raw_y.clamp(mon_y, (mon_y + mon_h - h_px).max(mon_y));
+        return PhysicalOverlayBox {
+            x,
+            y,
+            width: w_px,
+            height: h_px,
+            edge,
+            is_custom_docked: true,
+        };
+    }
+
+    default_box()
+}
+
+fn point_in_box(px: i32, py: i32, b: PhysicalOverlayBox, pad: i32) -> bool {
+    px >= b.x - pad && px <= b.x + b.width + pad && py >= b.y - pad && py <= b.y + b.height + pad
+}
+
+#[allow(clippy::too_many_arguments)]
+fn point_on_overlay_edge_strip(
+    px: i32,
+    py: i32,
+    b: PhysicalOverlayBox,
+    free_drag: bool,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: i32,
+    mon_h: i32,
+    dpi_scale: f64,
+) -> bool {
+    let edge_thickness = (8.0 * dpi_scale).round().max(6.0) as i32;
+    let strip_pad = (16.0 * dpi_scale).round() as i32;
+    match b.edge {
+        DockEdge::Top => {
+            py >= mon_y
+                && py <= mon_y + edge_thickness
+                && px >= b.x - strip_pad
+                && px <= b.x + b.width + strip_pad
+        }
+        DockEdge::Left => {
+            let in_x = px >= mon_x && px <= mon_x + edge_thickness;
+            let in_y = if free_drag || b.is_custom_docked {
+                py >= b.y - strip_pad && py <= b.y + b.height + strip_pad
+            } else {
+                py >= mon_y && py <= mon_y + mon_h
+            };
+            in_x && in_y
+        }
+        DockEdge::Right => {
+            let in_x = px <= mon_x + mon_w && px >= mon_x + mon_w - edge_thickness;
+            let in_y = if free_drag || b.is_custom_docked {
+                py >= b.y - strip_pad && py <= b.y + b.height + strip_pad
+            } else {
+                py >= mon_y && py <= mon_y + mon_h
+            };
+            in_x && in_y
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_main_notch_edge(
+    nr: IntRect,
+    saved_edge: Option<DockEdge>,
+    win_x: i32,
+    win_y: i32,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: i32,
+    scale: f64,
+) -> DockEdge {
+    let rx = win_x + (nr.x as f64 * scale) as i32;
+    let ry = win_y + (nr.y as f64 * scale) as i32;
+    let rw = (nr.width as f64 * scale) as i32;
+    let edge_tol = (24.0 * scale) as i32;
+    let top_tol = (24.0 * scale) as i32;
+    let strict_edge_tol = (8.0 * scale) as i32;
+
+    if saved_edge == Some(DockEdge::Left) && rx <= mon_x + edge_tol {
+        return DockEdge::Left;
+    }
+    if saved_edge == Some(DockEdge::Right) && rx + rw >= mon_x + mon_w - edge_tol {
+        return DockEdge::Right;
+    }
+    if saved_edge == Some(DockEdge::Top) && ry <= mon_y + top_tol {
+        return DockEdge::Top;
+    }
+
+    if ry > mon_y + (16.0 * scale) as i32 || (nr.width <= 48 && nr.height > nr.width) {
+        if rx <= mon_x + strict_edge_tol {
+            return DockEdge::Left;
+        }
+        if rx + rw >= mon_x + mon_w - strict_edge_tol {
+            return DockEdge::Right;
+        }
+    }
+    DockEdge::Top
+}
+
+fn notch_overlap_rect_intersects(
+    nr: IntRect,
+    saved_edge: Option<DockEdge>,
+    win_x: i32,
+    win_y: i32,
+    screen_rect: (i32, i32, i32, i32),
+    fg_rect: (i32, i32, i32, i32),
+    scale: f64,
+) -> bool {
+    let (s_left, s_top, s_right, _) = screen_rect;
+    let (f_left, f_top, f_right, f_bottom) = fg_rect;
+    let edge = resolve_main_notch_edge(
+        nr,
+        saved_edge,
+        win_x,
+        win_y,
+        s_left,
+        s_top,
+        s_right - s_left,
+        scale,
+    );
+    let n_left = win_x + (nr.x as f64 * scale) as i32;
+    let n_top = win_y + (nr.y as f64 * scale) as i32;
+    let n_right = n_left + (nr.width as f64 * scale) as i32;
+    let n_bottom = n_top + (nr.height as f64 * scale) as i32;
+    let min_depth = (36.0 * scale) as i32;
+    let (eff_left, eff_top, eff_right, eff_bottom) = match edge {
+        DockEdge::Top => (n_left, n_top, n_right, n_bottom.max(s_top + min_depth)),
+        DockEdge::Left => (
+            n_left,
+            n_top,
+            n_right.max(s_left + min_depth),
+            n_bottom.max(n_top + min_depth),
+        ),
+        DockEdge::Right => (
+            n_left.min(s_right - min_depth),
+            n_top,
+            n_right,
+            n_bottom.max(n_top + min_depth),
+        ),
+    };
+    f_left < eff_right - 4
+        && f_right > eff_left + 4
+        && f_top < eff_bottom - 4
+        && f_bottom > eff_top + 4
+}
+
+#[allow(clippy::too_many_arguments)]
+fn in_notch_edge_band_geom(
+    cursor_x: i32,
+    cursor_y: i32,
+    notch_rect: Option<IntRect>,
+    saved_edge: Option<DockEdge>,
+    win_x: i32,
+    win_y: i32,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: i32,
+    _mon_h: i32,
+    scale: f64,
+    is_hidden: bool,
+) -> (bool, DockEdge) {
+    let pad = if is_hidden {
+        (12.0 * scale) as i32
+    } else {
+        (20.0 * scale) as i32
+    };
+    if let Some(r) = notch_rect {
+        let edge = resolve_main_notch_edge(r, saved_edge, win_x, win_y, mon_x, mon_y, mon_w, scale);
+        let rx = win_x + (r.x as f64 * scale) as i32;
+        let ry = win_y + (r.y as f64 * scale) as i32;
+        let rw = (r.width as f64 * scale) as i32;
+        let rh = (r.height as f64 * scale) as i32;
+        return match edge {
+            DockEdge::Top => {
+                let band_h = if is_hidden { 8.0 } else { 34.0 };
+                let in_y = cursor_y >= mon_y && cursor_y <= mon_y + (band_h * scale) as i32;
+                let in_x = cursor_x >= rx - pad && cursor_x <= rx + rw + pad;
+                (in_x && in_y, DockEdge::Top)
+            }
+            DockEdge::Left => {
+                let band_w = if is_hidden { 8.0 } else { 42.0 };
+                let in_x = cursor_x >= mon_x && cursor_x <= mon_x + (band_w * scale) as i32;
+                let in_y = cursor_y >= ry - pad && cursor_y <= ry + rh + pad;
+                (in_x && in_y, DockEdge::Left)
+            }
+            DockEdge::Right => {
+                let band_w = if is_hidden { 8.0 } else { 42.0 };
+                let in_x =
+                    cursor_x <= mon_x + mon_w && cursor_x >= mon_x + mon_w - (band_w * scale) as i32;
+                let in_y = cursor_y >= ry - pad && cursor_y <= ry + rh + pad;
+                (in_x && in_y, DockEdge::Right)
+            }
+        };
+    }
+
+    let band_h = if is_hidden { 8.0 } else { 34.0 };
+    let in_y = cursor_y >= mon_y && cursor_y <= mon_y + (band_h * scale) as i32;
+    let center = mon_x + (mon_w / 2);
+    let half = if is_hidden {
+        (36.0 * scale) as i32
+    } else {
+        (160.0 * scale) as i32
+    };
+    (
+        in_y && cursor_x >= center - half && cursor_x <= center + half,
+        DockEdge::Top,
+    )
+}
+
+fn cached_monitor_and_main_origin() -> ((i32, i32, i32, i32), (i32, i32)) {
+    let (mon_x, mon_y) = MH_CACHED_MON_POS
+        .try_lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or((0, 0));
+    let (mon_w, mon_h) = MH_CACHED_MON_SIZE
+        .try_lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|s| (s.0 as i32, s.1 as i32))
+        .unwrap_or((1920, 1080));
+    let (win_x, win_y) = MAIN_WINDOW_RECT
+        .try_lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|(pos, _)| (pos.x, pos.y))
+        .unwrap_or((mon_x, mon_y));
+    ((mon_x, mon_y, mon_w, mon_h), (win_x, win_y))
+}
+
+fn in_notch_edge_band(cursor: windows::Win32::Foundation::POINT, scale: f64) -> (bool, DockEdge) {
+    let ((mon_x, mon_y, mon_w, mon_h), (win_x, win_y)) = cached_monitor_and_main_origin();
+    let is_hidden = NOTCH_IS_HIDDEN.load(Ordering::Relaxed);
+    let notch_rect = NOTCH_RECT.try_lock().ok().and_then(|r| *r);
+    let saved_edge = saved_notch_edge_try();
+    in_notch_edge_band_geom(
+        cursor.x,
+        cursor.y,
+        notch_rect,
+        saved_edge,
+        win_x,
+        win_y,
+        mon_x,
+        mon_y,
+        mon_w,
+        mon_h,
+        scale,
+        is_hidden,
+    )
+}
+
+fn cursor_conflicts_with_main_notch(
+    cursor: windows::Win32::Foundation::POINT,
+    scale: f64,
+) -> bool {
+    let (in_band, _) = in_notch_edge_band(cursor, scale);
+    in_band || cursor_strictly_inside_main_notch(cursor, scale)
+}
+
+fn cursor_strictly_inside_main_notch(
+    cursor: windows::Win32::Foundation::POINT,
+    scale: f64,
+) -> bool {
+    if NOTCH_IS_HIDDEN.load(Ordering::Relaxed) && !NOTCH_IS_OPEN.load(Ordering::Relaxed) {
+        return false;
+    }
+    let (_, (win_x, win_y)) = cached_monitor_and_main_origin();
+    let Some(r) = NOTCH_RECT.try_lock().ok().and_then(|g| *g) else {
+        return false;
+    };
+    let rx = win_x + (r.x as f64 * scale) as i32;
+    let ry = win_y + (r.y as f64 * scale) as i32;
+    let rw = (r.width as f64 * scale) as i32;
+    let rh = (r.height as f64 * scale) as i32;
+    cursor.x >= rx && cursor.x <= rx + rw && cursor.y >= ry && cursor.y <= ry + rh
+}
+
 /// True when the cursor sits inside the top-edge hot band directly above the
 /// notch on the primary monitor. Shared by the dwell gate and top-edge hit-testing continuity.
 /// Crucially, this must NEVER span the whole monitor, otherwise it hijacks browser tabs
 /// and window titlebar buttons (close/minimize/maximize).
+#[allow(dead_code)]
 fn in_top_edge_band(cursor: windows::Win32::Foundation::POINT, scale: f64) -> bool {
-    let (mon_x, mon_y) = MH_CACHED_MON_POS
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .unwrap_or((0, 0));
-    let mon_w = MH_CACHED_MON_SIZE
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .map(|s| s.0 as i32)
-        .unwrap_or(1920);
-
-    let is_hidden = NOTCH_IS_HIDDEN.load(Ordering::Relaxed);
-    let band_h = if is_hidden { 8.0 } else { 34.0 };
-
-    let in_y = cursor.y <= (mon_y + (band_h * scale) as i32) && cursor.y >= mon_y;
-    if !in_y {
-        return false;
-    }
-
-    let win_x = MAIN_WINDOW_RECT
-        .lock()
-        .ok()
-        .and_then(|g| *g)
-        .map(|(pos, _)| pos.x)
-        .unwrap_or(mon_x);
-
-    let (notch_left, notch_right) = if let Ok(region) = NOTCH_RECT.try_lock() {
-        if let Some(r) = *region {
-            let pad = if is_hidden {
-                (12.0 * scale) as i32
-            } else {
-                (20.0 * scale) as i32
-            };
-            let rx = win_x + (r.x as f64 * scale) as i32;
-            let rw = (r.width as f64 * scale) as i32;
-            (rx - pad, rx + rw + pad)
-        } else {
-            let center = mon_x + (mon_w / 2);
-            let half = if is_hidden { (36.0 * scale) as i32 } else { (160.0 * scale) as i32 };
-            (center - half, center + half)
-        }
-    } else {
-        let center = mon_x + (mon_w / 2);
-        let half = if is_hidden { (36.0 * scale) as i32 } else { (160.0 * scale) as i32 };
-        (center - half, center + half)
-    };
-
-    cursor.x >= notch_left && cursor.x <= notch_right
+    let (in_band, edge) = in_notch_edge_band(cursor, scale);
+    in_band && edge == DockEdge::Top
 }
 
-/// True once the cursor has stayed inside the top band long enough to count as
-/// a deliberate reveal. Mere contact does not arm: a pass through the top strip
+/// True once the cursor has stayed inside the active edge band long enough to count as
+/// a deliberate reveal. Mere contact does not arm: a pass through the edge strip
 /// on the way to a maximized window's tab/title-bar controls must not peek the
 /// notch. Leaving the band disarms and restarts the clock.
 ///
@@ -2582,7 +3863,8 @@ fn top_edge_armed_for(
     scale: f64,
     is_hidden: bool,
 ) -> bool {
-    if !in_top_edge_band(cursor, scale) {
+    let (in_band, _) = in_notch_edge_band(cursor, scale);
+    if !in_band {
         MH_TOP_EDGE_ENTER_MS.store(0, Ordering::Relaxed);
         MH_TOP_EDGE_ARMED.store(false, Ordering::Relaxed);
         return false;
@@ -2679,7 +3961,8 @@ fn update_main_interaction(
     // window is not click-through: WS_EX_TRANSPARENT hides the entire window
     // (and its webview children) from OLE hit-testing, which shows the
     // no-drop cursor and never emits drag events. Detect a held left button
-    // so a drag over the notch can force interactivity.
+    // so a drag near or already started on the notch forces interactivity
+    // without hijacking unrelated drags across the full-screen free-drag window.
     let drag_held = unsafe {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
         (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0
@@ -2691,7 +3974,23 @@ fn update_main_interaction(
     if let Some((win_pos, _)) = main_rect_val {
         if let Ok(region) = NOTCH_RECT.try_lock() {
             if let Some(r) = *region {
+                let ((mon_x, mon_y, mon_w, _), _) = cached_monitor_and_main_origin();
+                let notch_edge = resolve_main_notch_edge(
+                    r,
+                    saved_notch_edge_try(),
+                    win_pos.x,
+                    win_pos.y,
+                    mon_x,
+                    mon_y,
+                    mon_w,
+                    scale,
+                );
                 let pad_x = if is_hidden { (2.0 * scale) as i32 } else { (20.0 * scale) as i32 };
+                let pad_y_top = if is_hidden || notch_edge == DockEdge::Top {
+                    0
+                } else {
+                    (16.0 * scale) as i32
+                };
                 let pad_y_bottom = if is_hidden { (2.0 * scale) as i32 } else { (16.0 * scale) as i32 };
                 // Hysteresis keeps the notch interactive a little past its
                 // bounds once grabbed, so removing the edge-forced
@@ -2705,22 +4004,36 @@ fn update_main_interaction(
                 };
                 let rx = win_pos.x + (r.x as f64 * scale) as i32 - pad_x - hyst;
                 let rw = (r.width as f64 * scale) as i32 + (pad_x * 2) + (hyst * 2);
-                let ry_top = win_pos.y;
-                let ry_bottom = win_pos.y + (r.height as f64 * scale) as i32 + pad_y_bottom + hyst;
+                let ry_top = win_pos.y + (r.y as f64 * scale) as i32 - pad_y_top - hyst;
+                let ry_bottom = win_pos.y + ((r.y + r.height) as f64 * scale) as i32 + pad_y_bottom + hyst;
 
                 let in_notch_rect = cursor.x >= rx
                     && cursor.x <= (rx + rw)
                     && cursor.y >= ry_top
                     && cursor.y <= ry_bottom;
 
-                // Approaching along the top edge keeps the window interactive
-                // while near the notch's horizontal span.
+                // Approaching along the docked edge keeps the window interactive
+                // while near the notch's active span.
                 let edge_pad = if is_hidden { (12.0 * scale) as i32 } else { (30.0 * scale) as i32 };
-                let in_top_span = in_top_edge_band(cursor, scale)
-                    && cursor.x >= rx - edge_pad
-                    && cursor.x <= rx + rw + edge_pad;
+                let (in_band, band_edge) = in_notch_edge_band(cursor, scale);
+                let in_edge_span = in_band
+                    && match band_edge {
+                        DockEdge::Top => cursor.x >= rx - edge_pad && cursor.x <= rx + rw + edge_pad,
+                        DockEdge::Left | DockEdge::Right => {
+                            cursor.y >= ry_top - edge_pad && cursor.y <= ry_bottom + edge_pad
+                        }
+                    };
 
-                if in_notch_rect || in_top_span || edge_armed || drag_held {
+                let drop_pad = (64.0 * scale) as i32;
+                let in_drag_approach = cursor.x >= rx - drop_pad
+                    && cursor.x <= (rx + rw) + drop_pad
+                    && cursor.y >= ry_top - drop_pad
+                    && cursor.y <= ry_bottom + drop_pad;
+                let drag_for_main = drag_held
+                    && (MH_LAST_MAIN_IGNORE.load(Ordering::Relaxed) == 0
+                        || (in_drag_approach && MH_LAST_OV_IGNORE.load(Ordering::Relaxed) != 0));
+
+                if in_notch_rect || in_edge_span || edge_armed || drag_for_main {
                     is_click_interactive = true;
                 }
             }
@@ -3042,6 +4355,103 @@ fn setup_dock_edge_watchdog(app_handle: AppHandle) {
     });
 }
 
+fn try_overlay_press_inside(
+    point: windows::Win32::Foundation::POINT,
+    left_active: bool,
+    right_active: bool,
+) -> bool {
+    let dpi_scale = f64::from_bits(MH_CACHED_SCALE.load(Ordering::Relaxed)).max(0.5);
+    let bloom_scale = f64::from_bits(MH_CACHED_BLOOM_SCALE.load(Ordering::Relaxed)).max(0.25);
+    let (mon_x, mon_y) = MH_CACHED_MON_POS
+        .try_lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or((0, 0));
+    let (mon_w, mon_h) = MH_CACHED_MON_SIZE
+        .try_lock()
+        .ok()
+        .and_then(|g| *g)
+        .map(|s| (s.0 as i32, s.1 as i32))
+        .unwrap_or_else(|| unsafe {
+            (
+                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
+                ),
+                windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+                    windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
+                ),
+            )
+        });
+    let pad = (14.0 * dpi_scale).round() as i32;
+    let free_drag = is_free_drag_enabled_try();
+
+    if left_active {
+        let Ok(mixer_guard) = VOLUME_MIXER_RECT.try_lock() else {
+            return true;
+        };
+        if let Some((mx, my, mw, mh)) = *mixer_guard {
+            let rx = mon_x + (mx * dpi_scale) as i32 - pad;
+            let ry = mon_y + (my * dpi_scale) as i32 - pad;
+            let rw = (mw * dpi_scale) as i32 + pad * 2;
+            let rh = (mh * dpi_scale) as i32 + pad * 2;
+            if point.x >= rx && point.x <= rx + rw && point.y >= ry && point.y <= ry + rh {
+                return true;
+            }
+        }
+        let Ok(vol_guard) = VOLUME_OVERLAY_RECT.try_lock() else {
+            return true;
+        };
+        let saved_vol = saved_setting_value_try("bloom-volume-overlay-position");
+        let vol_box = resolve_overlay_box(
+            vol_guard.as_ref(),
+            saved_vol.as_ref(),
+            free_drag,
+            DockEdge::Left,
+            mon_x,
+            mon_y,
+            mon_w,
+            mon_h,
+            dpi_scale,
+            bloom_scale,
+        );
+        if vol_guard.is_some() || vol_box.is_custom_docked {
+            if point_in_box(point.x, point.y, vol_box, pad) {
+                return true;
+            }
+        } else if point.x <= mon_x + (100.0 * dpi_scale) as i32 {
+            return true;
+        }
+    }
+
+    if right_active {
+        let Ok(bright_guard) = BRIGHTNESS_OVERLAY_RECT.try_lock() else {
+            return true;
+        };
+        let saved_bright = saved_setting_value_try("bloom-brightness-overlay-position");
+        let bright_box = resolve_overlay_box(
+            bright_guard.as_ref(),
+            saved_bright.as_ref(),
+            free_drag,
+            DockEdge::Right,
+            mon_x,
+            mon_y,
+            mon_w,
+            mon_h,
+            dpi_scale,
+            bloom_scale,
+        );
+        if bright_guard.is_some() || bright_box.is_custom_docked {
+            if point_in_box(point.x, point.y, bright_box, pad) {
+                return true;
+            }
+        } else if point.x >= mon_x + mon_w - (100.0 * dpi_scale) as i32 {
+            return true;
+        }
+    }
+
+    false
+}
+
 unsafe extern "system" fn mouse_hook_proc(
     code: i32,
     wparam: WPARAM,
@@ -3064,13 +4474,12 @@ unsafe extern "system" fn mouse_hook_proc(
         let start_press = dock_takes_press(point) && crate::commands::is_start_menu_open();
         DOCK_START_PRESS_MS.store(if start_press { now_ms() } else { 0 }, Ordering::Relaxed);
     }
-    // A dock menu or the Add App popup closes when you press outside it. The
-    // dock window's region keeps it from catching that press, so the dock
-    // can't see it; tell it here. The flag is cleared now, so it can't be left
-    // set even if the dock webview never answers.
+    // A dock menu or the Add App popup closes when you press outside it.
+    // Also, when the dock is open/visible, a press outside dismisses the dock immediately.
+    let dock_is_open = !crate::state::DOCK_IS_HIDDEN.load(Ordering::Relaxed);
     if code >= 0
         && (wparam.0 == WM_LBUTTONDOWN as usize || wparam.0 == WM_RBUTTONDOWN as usize)
-        && MENU_IS_OPEN.load(Ordering::Relaxed)
+        && (MENU_IS_OPEN.load(Ordering::Relaxed) || dock_is_open)
     {
         let point = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
         if !dock_takes_press(point) {
@@ -3079,6 +4488,29 @@ unsafe extern "system" fn mouse_hook_proc(
                 // Off the hook thread: a low-level hook must return quickly.
                 std::thread::spawn(move || {
                     let _ = app.emit("dock-dismiss-menu", ());
+                    let _ = app.emit("dock-dismiss", ());
+                });
+            }
+        }
+    }
+    // A press outside the volume or brightness slider dismisses the overlay.
+    let left_active = MH_LAST_LEFT_EDGE_HOVER.load(Ordering::Relaxed) != 0;
+    let right_active = MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed) != 0;
+    if code >= 0
+        && (wparam.0 == WM_LBUTTONDOWN as usize || wparam.0 == WM_RBUTTONDOWN as usize)
+        && (left_active || right_active)
+    {
+        let point = (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt;
+        if !try_overlay_press_inside(point, left_active, right_active) {
+            MH_LEFT_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_RIGHT_EXPIRY_MS.store(0, Ordering::Relaxed);
+            MH_LAST_LEFT_EDGE_HOVER.store(0, Ordering::Relaxed);
+            MH_LAST_RIGHT_EDGE_HOVER.store(0, Ordering::Relaxed);
+            if let Some(app) = WINDOW_CHANGE_APP_HANDLE.get().cloned() {
+                std::thread::spawn(move || {
+                    let _ = app.emit("volume-edge-hover", false);
+                    let _ = app.emit("brightness-edge-hover", false);
+                    let _ = app.emit("overlay-dismiss", ());
                 });
             }
         }
@@ -3111,8 +4543,8 @@ fn notch_takes_press(point: windows::Win32::Foundation::POINT) -> bool {
             if let Some(r) = *region {
                 let rx = win_pos.x + (r.x as f64 * scale) as i32;
                 let rw = (r.width as f64 * scale) as i32;
-                let ry_top = win_pos.y;
-                let ry_bottom = win_pos.y + (r.height as f64 * scale) as i32;
+                let ry_top = win_pos.y + (r.y as f64 * scale) as i32;
+                let ry_bottom = win_pos.y + ((r.y + r.height) as f64 * scale) as i32;
                 return point.x >= rx && point.x <= (rx + rw) && point.y >= ry_top && point.y <= ry_bottom;
             }
         }
@@ -3224,38 +4656,83 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             cursor.x >= rx && cursor.x <= rx + rw && cursor.y >= ry && cursor.y <= ry + rh
         });
 
-        // --- Left Edge (Volume) ---
-        if !fg_fs {
-            let at_left_edge =
-                cursor.x <= (mon_x + 8) && cursor.y >= mon_y && cursor.y <= (mon_y + mon_h);
+        let dpi_scale = app_handle
+            .get_webview_window("overlay")
+            .and_then(|w| w.scale_factor().ok())
+            .unwrap_or_else(|| f64::from_bits(MH_CACHED_SCALE.load(Ordering::Relaxed)))
+            .max(0.5);
+        let bloom_scale = crate::utils::get_bloom_scale(app_handle);
+        MH_CACHED_BLOOM_SCALE.store(bloom_scale.to_bits(), Ordering::Relaxed);
+        let free_drag = is_free_drag_enabled(app_handle);
 
-            // The collapsed card extends past the 8px edge band, so once the
-            // edge hover is established, keep it alive while the cursor is
-            // over the card too (otherwise pausing on the mixer button lets
-            // the hover expire and the HUD hides mid-click).
-            let over_card = !at_left_edge
+        let vol_reported = VOLUME_OVERLAY_RECT.lock().ok().and_then(|g| g.clone());
+        let bright_reported = BRIGHTNESS_OVERLAY_RECT.lock().ok().and_then(|g| g.clone());
+        let saved_vol = saved_setting_value_try("bloom-volume-overlay-position");
+        let saved_bright = saved_setting_value_try("bloom-brightness-overlay-position");
+
+        let vol_box = resolve_overlay_box(
+            vol_reported.as_ref(),
+            saved_vol.as_ref(),
+            free_drag,
+            DockEdge::Left,
+            mon_x,
+            mon_y,
+            mon_w,
+            mon_h,
+            dpi_scale,
+            bloom_scale,
+        );
+        let bright_box = resolve_overlay_box(
+            bright_reported.as_ref(),
+            saved_bright.as_ref(),
+            free_drag,
+            DockEdge::Right,
+            mon_x,
+            mon_y,
+            mon_w,
+            mon_h,
+            dpi_scale,
+            bloom_scale,
+        );
+
+        let conflicts_main = cursor_conflicts_with_main_notch(cursor, dpi_scale);
+        let strict_main = cursor_strictly_inside_main_notch(cursor, dpi_scale);
+        let card_pad = (10.0 * dpi_scale).round() as i32;
+
+        let at_vol_edge = !conflicts_main
+            && point_on_overlay_edge_strip(
+                cursor.x,
+                cursor.y,
+                vol_box,
+                free_drag,
+                mon_x,
+                mon_y,
+                mon_w,
+                mon_h,
+                dpi_scale,
+            );
+        let at_bright_edge = !conflicts_main
+            && point_on_overlay_edge_strip(
+                cursor.x,
+                cursor.y,
+                bright_box,
+                free_drag,
+                mon_x,
+                mon_y,
+                mon_w,
+                mon_h,
+                dpi_scale,
+            );
+
+        // --- Volume Edge / Docked Strip ---
+        if !fg_fs {
+            let over_vol_card = !at_vol_edge
                 && !in_mixer
                 && MH_LAST_LEFT_EDGE_HOVER.load(Ordering::Relaxed) != 0
-                && app_handle
-                    .primary_monitor()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| {
-                        let bloom_scale = crate::utils::get_bloom_scale(app_handle);
-                        let ms = m.size();
-                        let mp = m.position();
-                        let sc = m.scale_factor() * bloom_scale;
-                        let nw = (42.0 * sc) as i32;
-                        let nh = (196.0 * sc) as i32;
-                        let nx = mp.x;
-                        let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
-                        cursor.x >= nx
-                            && cursor.x <= nx + nw
-                            && cursor.y >= ny
-                            && cursor.y <= ny + nh
-                    });
+                && point_in_box(cursor.x, cursor.y, vol_box, card_pad)
+                && !strict_main;
 
-            if at_left_edge || in_mixer || over_card {
+            if at_vol_edge || in_mixer || over_vol_card {
                 MH_LEFT_EXPIRY_MS.store(now + 500, Ordering::Relaxed);
             }
 
@@ -3274,12 +4751,14 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
             }
         }
 
-        // --- Right Edge (Brightness) ---
+        // --- Brightness Edge / Docked Strip ---
         if !fg_fs {
-            let at_right_edge =
-                cursor.x >= (mon_x + mon_w - 8) && cursor.y >= mon_y && cursor.y <= (mon_y + mon_h);
+            let over_bright_card = !at_bright_edge
+                && MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed) != 0
+                && point_in_box(cursor.x, cursor.y, bright_box, card_pad)
+                && !strict_main;
 
-            if at_right_edge {
+            if at_bright_edge || over_bright_card {
                 MH_RIGHT_EXPIRY_MS.store(now + 500, Ordering::Relaxed);
             }
 
@@ -3310,40 +4789,24 @@ fn process_mouse_position(app_handle: &AppHandle, cursor: windows::Win32::Founda
                 }
                 MH_LAST_OV_IGNORE.store(1, Ordering::Relaxed);
             } else {
-                // The overlay applies `bloom-scale` as CSS zoom, so the cards
-                // are larger than 42x196 CSS px for non-default scales.
-                let bloom_scale = crate::utils::get_bloom_scale(app_handle);
-                let over_left = in_mixer
-                    || if let Ok(Some(m)) = ov_win.primary_monitor() {
-                        let ms = m.size();
-                        let mp = m.position();
-                        let sc = m.scale_factor() * bloom_scale;
-                        let nw = (42.0 * sc) as i32;
-                        let nh = (196.0 * sc) as i32;
-                        let nx = mp.x;
-                        let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
-                        cursor.x >= nx
-                            && cursor.x <= nx + nw
-                            && cursor.y >= ny
-                            && cursor.y <= ny + nh
-                    } else {
-                        false
-                    };
+                let vol_card_active = vol_reported.is_some()
+                    || MH_LAST_LEFT_EDGE_HOVER.load(Ordering::Relaxed) != 0
+                    || bright_reported.is_none();
+                let bright_card_active = bright_reported.is_some()
+                    || MH_LAST_RIGHT_EDGE_HOVER.load(Ordering::Relaxed) != 0
+                    || vol_reported.is_none();
 
-                let over_right = if let Ok(Some(m)) = ov_win.primary_monitor() {
-                    let ms = m.size();
-                    let mp = m.position();
-                    let sc = m.scale_factor() * bloom_scale;
-                    let nw = (42.0 * sc) as i32;
-                    let nh = (196.0 * sc) as i32;
-                    let nx = mp.x + ms.width as i32 - nw;
-                    let ny = mp.y + (ms.height as i32 / 2) - (nh / 2);
-                    cursor.x >= nx && cursor.x <= nx + nw && cursor.y >= ny && cursor.y <= ny + nh
-                } else {
-                    false
-                };
+                let over_volume = in_mixer
+                    || at_vol_edge
+                    || (vol_card_active
+                        && point_in_box(cursor.x, cursor.y, vol_box, card_pad)
+                        && !strict_main);
+                let over_brightness = at_bright_edge
+                    || (bright_card_active
+                        && point_in_box(cursor.x, cursor.y, bright_box, card_pad)
+                        && !strict_main);
 
-                let should_ignore = !(over_left || over_right);
+                let should_ignore = !(over_volume || over_brightness);
                 let prev = MH_LAST_OV_IGNORE.load(Ordering::Relaxed);
                 let new_val = if should_ignore { 1 } else { 0 };
                 if prev != new_val {
@@ -3496,6 +4959,7 @@ pub fn trigger_app_scan() {
                                                 hwnd: None,
                                                 executable,
                                                 all_hwnds: None,
+                                                window_title: None,
                                             });
                                         }
                                         ILFree(Some(absolute_pidl as *const _));
@@ -3649,6 +5113,7 @@ fn collect_shortcuts(dir: &std::path::Path, apps: &mut Vec<AppInfo>, depth: i32)
                         hwnd: None,
                         executable,
                         all_hwnds: None,
+                        window_title: None,
                     });
                 }
             }
@@ -3683,7 +5148,11 @@ pub fn register_appbar(window: tauri::WebviewWindow) {
         let hwnd = window.hwnd().unwrap();
         let scale = monitor.scale_factor();
         let bloom_scale = crate::utils::get_bloom_scale(window.app_handle());
-        let ph = ((420.0 * bloom_scale) * scale) as i32;
+        let ph = if is_free_drag_enabled(window.app_handle()) {
+            m_size.height as i32
+        } else {
+            ((420.0 * bloom_scale) * scale) as i32
+        };
         let pr = ((40.0 * bloom_scale) * scale) as i32; // Scale the reserved top screen space
 
         unsafe {
@@ -3822,7 +5291,12 @@ fn set_main_appbar_reservation(main_win: tauri::WebviewWindow, reserve: bool) {
             let m_pos = monitor.position();
             let scale = monitor.scale_factor();
             let bloom_scale = crate::utils::get_bloom_scale(main_win.app_handle());
-            let ph = ((420.0 * bloom_scale) * scale) as i32;
+            let is_free_drag = is_free_drag_enabled(main_win.app_handle());
+            let ph = if is_free_drag {
+                m_size.height as i32
+            } else {
+                ((420.0 * bloom_scale) * scale) as i32
+            };
 
             unsafe {
                 use windows::Win32::Foundation::RECT;
@@ -3865,6 +5339,12 @@ fn set_main_appbar_reservation(main_win: tauri::WebviewWindow, reserve: bool) {
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW,
                     );
                 }
+                if let Ok(mut lock) = MAIN_WINDOW_RECT.lock() {
+                    *lock = Some((
+                        tauri::PhysicalPosition::new(final_left, final_top),
+                        tauri::PhysicalSize::new(final_width as u32, ph.max(1) as u32),
+                    ));
+                }
             }
         }
 
@@ -3895,6 +5375,34 @@ pub fn reconcile_main_appbar(app: &AppHandle) {
         set_main_appbar_reservation(main_win, notch_mode_reserves_work_area(mode.as_deref()));
     }
     restore_desktop_workarea();
+}
+
+/// Ensures `main` spans the full primary monitor whenever Free Drag is enabled,
+/// without needlessly toggling `ShowWindow` if it already matches.
+pub fn ensure_main_window_spans_monitor(app: &AppHandle) {
+    if !is_free_drag_enabled(app) {
+        return;
+    }
+    let Some(main_win) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return;
+    };
+    let m_pos = monitor.position();
+    let m_size = monitor.size();
+    let needs_resize = match (main_win.outer_position(), main_win.outer_size()) {
+        (Ok(pos), Ok(size)) => {
+            pos.x != m_pos.x
+                || pos.y != m_pos.y
+                || size.width != m_size.width
+                || size.height != m_size.height
+        }
+        _ => true,
+    };
+    if needs_resize {
+        reconcile_main_appbar(app);
+    }
 }
 
 /// Apply an explicit mode to the main AppBar. `change_notch_mode` knows the
@@ -3952,7 +5460,7 @@ pub fn register_dock_appbar(window: tauri::WebviewWindow) {
 
 static DOCK_APPBAR_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_dock_appbar() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock_dock_appbar() -> std::sync::MutexGuard<'static, ()> {
     DOCK_APPBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -4056,8 +5564,13 @@ fn register_dock_appbar_inner(window: tauri::WebviewWindow, attempt: i32) {
 
             // Always ensure the window is visible — show() is idempotent
             let _ = window.show();
-            if window.is_visible().unwrap_or(false) && set_taskbar_visibility(false, false) {
-                NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+            if !SHUTTING_DOWN.load(Ordering::Relaxed)
+                && crate::utils::dock_enabled()
+                && window.is_visible().unwrap_or(false)
+            {
+                if set_taskbar_visibility(false, false) || TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire) {
+                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                }
             }
         }
     } else {
@@ -4329,7 +5842,8 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
                             is_running: true,
                             hwnd: Some(hwnd.0 as isize),
                             executable: exe_name,
-                            all_hwnds: None,
+                            all_hwnds: Some(vec![(hwnd.0 as isize, title.clone())]),
+                            window_title: Some(title),
                         });
                     }
                 }
@@ -4346,13 +5860,14 @@ pub unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> B
                     let system_root =
                         std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
                     apps.push(AppInfo {
-                        name: title,
+                        name: title.clone(),
                         path: format!(r"{system_root}\System32\consent.exe"),
                         icon: None,
                         is_running: true,
                         hwnd: Some(hwnd.0 as isize),
                         executable: Some("consent.exe".into()),
-                        all_hwnds: None,
+                        all_hwnds: Some(vec![(hwnd.0 as isize, title.clone())]),
+                        window_title: Some(title),
                     });
                 }
             }
@@ -4420,9 +5935,12 @@ fn reposition_all_windows(app_handle: &AppHandle) {
                 reposition_autohide_dock(app_handle, dock_win);
             }
         }
-    }
-    if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) {
-        set_taskbar_visibility(false, false);
+        if !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+            && (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) || any_native_taskbar_exposed())
+            && set_taskbar_visibility(false, false)
+        {
+            NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+        }
     }
     sync_overlays(app_handle);
     // Re-assert topmost on all windows after repositioning to recover from any z-order loss
@@ -4438,13 +5956,13 @@ fn reposition_all_windows(app_handle: &AppHandle) {
     }
 }
 
-fn reposition_autohide_dock(app_handle: &AppHandle, dock_win: tauri::WebviewWindow) {
+pub(crate) fn reposition_autohide_dock(app_handle: &AppHandle, dock_win: tauri::WebviewWindow) {
     let dock_clone = dock_win.clone();
     let ah = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         for _attempt in 0..5 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            if !crate::utils::dock_enabled() {
+            if !crate::utils::dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
                 return;
             }
             let hwnd_val = match dock_clone.hwnd() {
@@ -4483,20 +6001,27 @@ fn reposition_autohide_dock(app_handle: &AppHandle, dock_win: tauri::WebviewWind
                 if let Ok(hwnd) = dock_clone.hwnd() {
                     re_assert_topmost(hwnd);
                 }
-                if crate::utils::dock_enabled() {
+                if crate::utils::dock_enabled() && !SHUTTING_DOWN.load(Ordering::Relaxed) {
                     let _ = dock_clone.show();
                 }
                 break;
             }
         }
-        if NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) {
-            set_taskbar_visibility(false, false);
+        if !SHUTTING_DOWN.load(Ordering::Relaxed)
+            && crate::utils::dock_enabled()
+            && !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+            && (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
+                || dock_clone.is_visible().unwrap_or(false))
+            && set_taskbar_visibility(false, false)
+        {
+            NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
         }
         sync_overlays(&ah);
     });
 }
 
 static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_CHANGE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn setup_display_change_monitor(app_handle: AppHandle) {
     let _ = crate::state::DISPLAY_MONITOR_HANDLE.set(app_handle);
@@ -4504,6 +6029,12 @@ pub fn setup_display_change_monitor(app_handle: AppHandle) {
     std::thread::spawn(|| unsafe {
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::*;
+
+        #[link(name = "wtsapi32")]
+        extern "system" {
+            fn WTSRegisterSessionNotification(hWnd: HWND, dwFlags: u32) -> BOOL;
+        }
+        const NOTIFY_FOR_THIS_SESSION: u32 = 0;
 
         let taskbar_created =
             RegisterWindowMessageA(windows::core::PCSTR(c"TaskbarCreated".as_ptr() as *const u8));
@@ -4544,6 +6075,8 @@ pub fn setup_display_change_monitor(app_handle: AppHandle) {
             Err(_) => return,
         };
 
+        let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, Some(hwnd), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
@@ -4567,6 +6100,10 @@ unsafe extern "system" fn display_monitor_proc(
     const PBT_APMRESUMESUSPEND: u32 = 0x0007;
     const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
     const WM_SETTINGCHANGE: u32 = 0x001A;
+    const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+    const WTS_CONSOLE_CONNECT: u32 = 1;
+    const WTS_REMOTE_CONNECT: u32 = 3;
+    const WTS_SESSION_UNLOCK: u32 = 8;
 
     if msg != 0 && msg == TASKBAR_CREATED_MESSAGE.load(Ordering::Relaxed) {
         // Explorer has rebuilt its AppBar list. A primary-monitor DPI change
@@ -4591,15 +6128,49 @@ unsafe extern "system" fn display_monitor_proc(
 
     match msg {
         WM_DISPLAYCHANGE => {
-            let now = get_now_ms();
-            let last = LAST_DISPLAY_CHANGE_MS.load(Ordering::Relaxed);
-            if now - last > 500 {
-                LAST_DISPLAY_CHANGE_MS.store(now, Ordering::Relaxed);
+            // Trailing-edge debounce so burst display events never drop the final state,
+            // plus a delayed +1000ms pass to hide late-spawned Shell_SecondaryTrayWnd.
+            let seq = DISPLAY_CHANGE_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(app_handle) = DISPLAY_MONITOR_HANDLE.get() {
+                let ah = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if DISPLAY_CHANGE_SEQ.load(Ordering::Relaxed) != seq
+                        || SHUTTING_DOWN.load(Ordering::Relaxed)
+                    {
+                        return;
+                    }
+                    reposition_all_windows(&ah);
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    if DISPLAY_CHANGE_SEQ.load(Ordering::Relaxed) == seq
+                        && !SHUTTING_DOWN.load(Ordering::Relaxed)
+                        && crate::utils::dock_enabled()
+                        && !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+                        && any_native_taskbar_exposed()
+                        && set_taskbar_visibility(false, false)
+                    {
+                        NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+            LRESULT(0)
+        }
+        WM_WTSSESSION_CHANGE => {
+            let code = wparam.0 as u32;
+            if code == WTS_SESSION_UNLOCK
+                || code == WTS_CONSOLE_CONNECT
+                || code == WTS_REMOTE_CONNECT
+            {
                 if let Some(app_handle) = DISPLAY_MONITOR_HANDLE.get() {
                     let ah = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        reposition_all_windows(&ah);
+                        for delay in [300u64, 1200] {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            reposition_all_windows(&ah);
+                        }
                     });
                 }
             }
@@ -4648,6 +6219,16 @@ unsafe extern "system" fn display_monitor_proc(
                     }
                 };
                 let _ = app_handle.emit("system-accent-changed", color_hex);
+                if msg == WM_SETTINGCHANGE
+                    && !SHUTTING_DOWN.load(Ordering::Relaxed)
+                    && crate::utils::dock_enabled()
+                    && !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+                    && any_native_taskbar_exposed()
+                {
+                    if set_taskbar_visibility(false, false) {
+                        NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                    }
+                }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -4862,5 +6443,359 @@ mod tests {
             "Brave",
             "C:\\Program Files\\Brave\\brave.exe"
         ));
+    }
+
+    #[test]
+    fn overlay_box_resolves_custom_top_left_right_and_scales() {
+        use super::{point_in_box, point_on_overlay_edge_strip, resolve_overlay_box, DockEdge};
+        use crate::state::OverlayRect;
+
+        // Free drag disabled -> falls back to default left/right center regardless of rect
+        let reported = OverlayRect {
+            x: 300.0,
+            y: 0.0,
+            width: 196.0,
+            height: 42.0,
+            edge: Some("top".into()),
+        };
+        let b_disabled = resolve_overlay_box(
+            Some(&reported),
+            None,
+            false,
+            DockEdge::Left,
+            0,
+            0,
+            1920,
+            1080,
+            1.0,
+            1.0,
+        );
+        assert_eq!(b_disabled.edge, DockEdge::Left);
+        assert!(!b_disabled.is_custom_docked);
+        assert_eq!((b_disabled.x, b_disabled.width, b_disabled.height), (0, 42, 196));
+
+        // Free drag enabled + top reported rect with dpi_scale=1.25, bloom_scale=1.2 (sc=1.5)
+        let b_top = resolve_overlay_box(
+            Some(&reported),
+            None,
+            true,
+            DockEdge::Left,
+            0,
+            0,
+            2400,
+            1350,
+            1.25,
+            1.2,
+        );
+        assert_eq!(b_top.edge, DockEdge::Top);
+        assert!(b_top.is_custom_docked);
+        assert_eq!((b_top.x, b_top.y, b_top.width, b_top.height), (450, 0, 294, 63));
+        assert!(point_on_overlay_edge_strip(
+            550,
+            2,
+            b_top,
+            true,
+            0,
+            0,
+            2400,
+            1350,
+            1.25
+        ));
+        assert!(!point_on_overlay_edge_strip(
+            100,
+            2,
+            b_top,
+            true,
+            0,
+            0,
+            2400,
+            1350,
+            1.25
+        ));
+        assert!(point_in_box(600, 30, b_top, 10));
+
+        // Saved JSON string fallback when rect is None (e.g. while idle)
+        let saved = serde_json::json!("{\"x\":1878,\"y\":700,\"edge\":\"right\"}");
+        let b_saved = resolve_overlay_box(
+            None,
+            Some(&saved),
+            true,
+            DockEdge::Right,
+            0,
+            0,
+            1920,
+            1080,
+            1.0,
+            1.0,
+        );
+        assert_eq!(b_saved.edge, DockEdge::Right);
+        assert!(b_saved.is_custom_docked);
+        assert_eq!((b_saved.x, b_saved.y, b_saved.width, b_saved.height), (1878, 700, 42, 196));
+        assert!(point_on_overlay_edge_strip(
+            1918,
+            750,
+            b_saved,
+            true,
+            0,
+            0,
+            1920,
+            1080,
+            1.0
+        ));
+        assert!(!point_on_overlay_edge_strip(
+            1918,
+            200,
+            b_saved,
+            true,
+            0,
+            0,
+            1920,
+            1080,
+            1.0
+        ));
+    }
+
+    #[test]
+    fn main_notch_overlap_and_edge_wake_handle_top_left_right() {
+        use super::{
+            in_notch_edge_band_geom, notch_overlap_rect_intersects, resolve_main_notch_edge,
+            DockEdge,
+        };
+        use crate::types::IntRect;
+
+        // Main Notch docked on Left edge at y=500..696
+        let left_notch = IntRect {
+            x: 0,
+            y: 500,
+            width: 42,
+            height: 196,
+        };
+        assert_eq!(
+            resolve_main_notch_edge(left_notch, Some(DockEdge::Left), 0, 0, 0, 0, 1920, 1.0),
+            DockEdge::Left
+        );
+
+        // Top-left window (0, 0, 400, 300) must NOT overlap Left notch at y=500
+        assert!(!notch_overlap_rect_intersects(
+            left_notch,
+            Some(DockEdge::Left),
+            0,
+            0,
+            (0, 0, 1920, 1080),
+            (0, 0, 400, 300),
+            1.0
+        ));
+        // Window overlapping y=500..696 on Left edge MUST overlap
+        assert!(notch_overlap_rect_intersects(
+            left_notch,
+            Some(DockEdge::Left),
+            0,
+            0,
+            (0, 0, 1920, 1080),
+            (0, 480, 500, 720),
+            1.0
+        ));
+
+        // Hidden 5px top notch still keeps 36px overlap footprint to avoid oscillation
+        let hidden_top = IntRect {
+            x: 880,
+            y: 0,
+            width: 80,
+            height: 5,
+        };
+        assert!(notch_overlap_rect_intersects(
+            hidden_top,
+            Some(DockEdge::Top),
+            0,
+            0,
+            (0, 0, 1920, 1080),
+            (800, 12, 1100, 500),
+            1.0
+        ));
+
+        // Edge wake for Right-docked notch at y=600..796: top-right close button (1910, 8) is NOT hijacked,
+        // while hovering (1918, 650) wakes it!
+        let right_notch = IntRect {
+            x: 1878,
+            y: 600,
+            width: 42,
+            height: 196,
+        };
+        let (top_right_close, _) = in_notch_edge_band_geom(
+            1910,
+            8,
+            Some(right_notch),
+            Some(DockEdge::Right),
+            0,
+            0,
+            0,
+            0,
+            1920,
+            1080,
+            1.0,
+            false,
+        );
+        assert!(!top_right_close);
+        let (right_band_hit, edge) = in_notch_edge_band_geom(
+            1918,
+            650,
+            Some(right_notch),
+            Some(DockEdge::Right),
+            0,
+            0,
+            0,
+            0,
+            1920,
+            1080,
+            1.0,
+            false,
+        );
+        assert!(right_band_hit);
+        assert_eq!(edge, DockEdge::Right);
+    }
+
+    #[test]
+    fn classifies_native_notification_and_calendar_popups_safely() {
+        use super::{classify_native_popup_window, NativeShellPopupKind};
+
+        assert_eq!(
+            classify_native_popup_window(
+                "shellexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "New notification"
+            ),
+            Some(NativeShellPopupKind::NotificationToast)
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "ShellExperienceHost.exe".to_lowercase().as_str(),
+                "Windows.UI.Core.CoreWindow",
+                "Pemberitahuan baru"
+            ),
+            Some(NativeShellPopupKind::NotificationToast)
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "shellexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Notification Center"
+            ),
+            Some(NativeShellPopupKind::CalendarOrActionCenter)
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "shellexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Pusat Pemberitahuan"
+            ),
+            Some(NativeShellPopupKind::CalendarOrActionCenter)
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "shellexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Date and Time Information"
+            ),
+            Some(NativeShellPopupKind::CalendarOrActionCenter)
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "explorer.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Informasi Tanggal dan Waktu"
+            ),
+            Some(NativeShellPopupKind::CalendarOrActionCenter)
+        );
+
+        // Must NOT suppress Quick Settings, File Explorer, Start Menu, or unrelated apps
+        assert_eq!(
+            classify_native_popup_window(
+                "shellexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Quick settings"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_native_popup_window("explorer.exe", "CabinetWClass", "File Explorer"),
+            None
+        );
+        assert_eq!(
+            classify_native_popup_window(
+                "startmenuexperiencehost.exe",
+                "Windows.UI.Core.CoreWindow",
+                "Start"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_native_popup_window("notepad.exe", "Windows.UI.Core.CoreWindow", "Notification"),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_toast_texts_and_strips_boilerplate() {
+        use super::parse_toast_texts;
+
+        assert_eq!(parse_toast_texts(&[]), None);
+        assert_eq!(
+            parse_toast_texts(&["New notification".into(), "Dismiss".into()]),
+            None
+        );
+        assert_eq!(
+            parse_toast_texts(&[
+                "New notification".into(),
+                "Discord".into(),
+                "Alice".into(),
+                "Are you online?".into(),
+                "Close".into()
+            ]),
+            Some((
+                "Discord".into(),
+                "Alice".into(),
+                "Are you online?".into()
+            ))
+        );
+        assert_eq!(
+            parse_toast_texts(&[
+                "New notification from WhatsApp".into(),
+                "Mom".into(),
+                "Don't forget dinner".into(),
+            ]),
+            Some((
+                "WhatsApp".into(),
+                "Mom".into(),
+                "Don't forget dinner".into()
+            ))
+        );
+        assert_eq!(
+            parse_toast_texts(&["System update ready".into()]),
+            Some(("Windows".into(), "System update ready".into(), String::new()))
+        );
+    }
+
+    #[test]
+    fn deduplicates_notifications_within_cooldown_window() {
+        use super::NotificationDeduplicator;
+
+        let mut dedup = NotificationDeduplicator::new(3000);
+        assert!(dedup.should_emit("Build Passed", "All tests green", 10_000));
+        assert!(!dedup.should_emit("  build passed ", "ALL TESTS GREEN", 11_500));
+        assert!(dedup.should_emit("Build Failed", "1 error", 11_600));
+        assert!(dedup.should_emit("Build Passed", "All tests green", 13_001));
+        assert!(!dedup.should_emit("", "   ", 14_000));
+    }
+
+    #[test]
+    fn win_n_interception_respects_modifiers_setting_and_shutdown() {
+        use super::should_intercept_win_n;
+
+        assert!(should_intercept_win_n(true, 0x4E, false, true, false));
+        assert!(!should_intercept_win_n(false, 0x4E, false, true, false));
+        assert!(!should_intercept_win_n(true, 0x31, false, true, false));
+        assert!(!should_intercept_win_n(true, 0x4E, true, true, false));
+        assert!(!should_intercept_win_n(true, 0x4E, false, false, false));
+        assert!(!should_intercept_win_n(true, 0x4E, false, true, true));
     }
 }

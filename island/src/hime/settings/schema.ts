@@ -295,7 +295,7 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
 	"hime-lyrics-pill": {
 		key: "hime-lyrics-pill",
 		type: "boolean",
-		default: true,
+		default: false,
 		section: "music",
 		label: "Tampil di Pill",
 		desc: "Baris lirik di pill tertutup"

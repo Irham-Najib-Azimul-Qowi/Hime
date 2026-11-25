@@ -287,7 +287,6 @@ impl Drop for ComApartment {
 /// AppBar state or user icon-promotion preferences are changed for this operation.
 struct TrayExposure {
     taskbar: HWND,
-    rect: RECT,
     style: i32,
     was_hidden: bool,
     overflow: Option<HWND>,
@@ -301,14 +300,11 @@ impl TrayExposure {
         }
         let hwnd = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null())
             .map_err(|_| "Windows taskbar is unavailable.")?;
-        let mut rect = RECT::default();
-        GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
         if crate::state::TRAY_INTERACTION_ACTIVE.swap(true, Ordering::SeqCst) {
             return Err("Another tray menu is already opening.".into());
         }
         let guard = Self {
             taskbar: hwnd,
-            rect,
             style: GetWindowLongW(hwnd, GWL_EXSTYLE),
             was_hidden: crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed),
             overflow: None,
@@ -467,29 +463,34 @@ impl Drop for TrayExposure {
             }
             // Exit/settings cleanup owns the final visible state if it changed
             // while UIA was working; never undo a taskbar restoration.
-            if self.was_hidden
+            let should_stay_hidden = self.was_hidden
                 && !crate::state::SHUTTING_DOWN.load(Ordering::Relaxed)
                 && crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
-            {
+                && crate::utils::dock_enabled();
+            if should_stay_hidden {
                 let _ = ShowWindow(self.taskbar, SW_HIDE);
                 SetWindowLongW(self.taskbar, GWL_EXSTYLE, self.style);
                 let _ = SetWindowPos(
                     self.taskbar,
                     None,
-                    self.rect.left,
-                    self.rect.top,
+                    -10000,
+                    -10000,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    SWP_HIDEWINDOW | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
                 );
             }
             if self.was_hidden
                 && (crate::state::SHUTTING_DOWN.load(Ordering::Relaxed)
-                    || !crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed))
+                    || !crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed)
+                    || !crate::utils::dock_enabled())
             {
                 crate::utils::set_taskbar_visibility(true, true);
             }
             crate::state::TRAY_INTERACTION_ACTIVE.store(false, Ordering::SeqCst);
+            if should_stay_hidden {
+                let _ = crate::utils::set_taskbar_visibility(false, false);
+            }
         }
     }
 }

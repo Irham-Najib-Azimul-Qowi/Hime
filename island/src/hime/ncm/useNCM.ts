@@ -242,8 +242,9 @@ export function useNCM(options: UseNCMOptions = {}) {
 			if (detail) submitPresentation(detail);
 		};
 		const handleNcmRetract = (e: Event) => {
-			const detail = (e as CustomEvent<{ id: string }>).detail;
-			if (detail?.id) retractPresentation(detail.id);
+			const detail = (e as any).detail;
+			const targetId = typeof detail === "string" ? detail : detail?.id;
+			if (targetId) retractPresentation(targetId);
 		};
 		window.addEventListener("hime:ncm-submit", handleNcmSubmit);
 		window.addEventListener("hime:ncm-retract", handleNcmRetract);

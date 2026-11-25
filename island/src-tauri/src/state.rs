@@ -97,6 +97,22 @@ pub static LAST_DISPLAY_CHANGE_MS: AtomicI64 = AtomicI64::new(0);
 /// unions this with the notch rect so the panel can receive cursor events.
 pub static VOLUME_MIXER_RECT: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
 
+/// Position and bounds of an overlay HUD card (Volume / Brightness) in unzoomed
+/// overlay CSS pixels (before `bloom-scale`), along with its docked edge
+/// (`"left" | "right" | "top"`). `None` falls back to saved position or default edge.
+#[derive(Clone, serde::Deserialize, serde::Serialize, Debug, PartialEq)]
+pub struct OverlayRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    #[serde(default)]
+    pub edge: Option<String>,
+}
+
+pub static VOLUME_OVERLAY_RECT: Mutex<Option<OverlayRect>> = Mutex::new(None);
+pub static BRIGHTNESS_OVERLAY_RECT: Mutex<Option<OverlayRect>> = Mutex::new(None);
+
 /// Process executable path → friendly display name (version-info
 /// `FileDescription`). Cached because the mixer polls sessions every 2s and
 /// reading version info hits the filesystem.

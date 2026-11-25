@@ -31,15 +31,7 @@ export function EdgeSurface({
 		const parent = surface?.parentElement;
 		const canvas = canvasRef.current;
 		const invalidation = invalidationRef.current;
-		if (
-			!reflective ||
-			!surface ||
-			!parent ||
-			!canvas ||
-			!invalidation ||
-			(edge !== "top" && edge !== "bottom")
-		)
-			return;
+		if (!reflective || !surface || !parent || !canvas || !invalidation) return;
 		const context = canvas.getContext("2d");
 		if (!context) return;
 		let width = 0;
@@ -59,14 +51,30 @@ export function EdgeSurface({
 		let previousClass = parent.className;
 
 		const draw = () => {
-			if (!(width > 26 && height > 0)) return;
+			const isHorizontalEdge = edge === "top" || edge === "bottom";
+			const span = isHorizontalEdge ? width : height;
+			const depth = isHorizontalEdge ? height : width;
+			if (!(span > 26 && depth > 0)) {
+				context.setTransform(1, 0, 0, 1, 0, 0);
+				context.clearRect(0, 0, canvas.width, canvas.height);
+				previousGeometry = "";
+				return;
+			}
 			const style = getComputedStyle(parent);
-			const radii = [
+			const rawRadii = [
 				style.borderTopLeftRadius,
 				style.borderTopRightRadius,
 				style.borderBottomLeftRadius,
 				style.borderBottomRightRadius
 			].map((value) => parseFloat(value) || 0);
+			// Map CSS [TL, TR, BL, BR] into contour's top-oriented [backL, backR, freeL, freeR].
+			const contourRadii =
+				edge === "left"
+					? [rawRadii[0], rawRadii[2], rawRadii[1], rawRadii[3]]
+					: edge === "right"
+						? [rawRadii[1], rawRadii[3], rawRadii[0], rawRadii[2]]
+						: rawRadii;
+			const contourEdge: "top" | "bottom" = edge === "bottom" ? "bottom" : "top";
 			if (paletteDirty) {
 				const surfaceStyle = getComputedStyle(surface);
 				colors = ["--surface-line", "--surface-side-light", "--surface-highlight"].map((property) =>
@@ -75,8 +83,8 @@ export function EdgeSurface({
 				paletteDirty = false;
 			}
 			const ratio = window.devicePixelRatio * Math.max(1, resolutionScale);
-			const pathData = edgeSurfaceContour(width, height, radii, edge, flares);
-			const geometry = [pathData, ratio, ...colors].join("|");
+			const pathData = edgeSurfaceContour(span, depth, contourRadii, contourEdge, flares);
+			const geometry = [edge, width, height, pathData, ratio, ...colors].join("|");
 			if (geometry === previousGeometry) return;
 			previousGeometry = geometry;
 
@@ -95,9 +103,14 @@ export function EdgeSurface({
 			if (edge === "bottom") {
 				context.translate(0, height);
 				context.scale(1, -1);
+			} else if (edge === "left") {
+				context.transform(0, 1, 1, 0, 0, 0);
+			} else if (edge === "right") {
+				context.translate(width, 0);
+				context.transform(0, 1, -1, 0, 0, 0);
 			}
 			const path = new Path2D(pathData);
-			const light = context.createLinearGradient(0, 0, 0, height);
+			const light = context.createLinearGradient(0, 0, 0, depth);
 			light.addColorStop(0, colors[0]);
 			light.addColorStop(0.45, colors[1]);
 			light.addColorStop(1, colors[2]);
@@ -111,10 +124,12 @@ export function EdgeSurface({
 			context.stroke(path);
 			context.restore();
 			if (flares) {
-				const fade = context.createLinearGradient(0, 0, width, 0);
+				const fade = isHorizontalEdge
+					? context.createLinearGradient(0, 0, width, 0)
+					: context.createLinearGradient(0, 0, 0, height);
 				fade.addColorStop(0, "transparent");
-				fade.addColorStop(13 / width, "white");
-				fade.addColorStop(1 - 13 / width, "white");
+				fade.addColorStop(13 / span, "white");
+				fade.addColorStop(1 - 13 / span, "white");
 				fade.addColorStop(1, "transparent");
 				context.save();
 				context.globalCompositeOperation = "destination-in";

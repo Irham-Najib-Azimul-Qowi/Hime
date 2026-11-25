@@ -24,7 +24,59 @@ export type EyeExpression =
   | "nakal"
   | "kedip-sebelah"
   | "pusing"
-  | "offline";
+  | "offline"
+  // Aliases and expressive variants
+  | "panik"
+  | "lelah"
+  | "waspada"
+  | "ceria"
+  | "senyum"
+  | "kedip"
+  | "lirik_kiri"
+  | "lirik_kanan";
+
+export const HIME_EXPRESSIONS: readonly EyeExpression[] = [
+  "netral",
+  "senang",
+  "semangat",
+  "bangga",
+  "fokus",
+  "berpikir",
+  "dengar",
+  "penasaran",
+  "kaget",
+  "khawatir",
+  "bosan",
+  "ngantuk",
+  "menguap",
+  "tidur",
+  "kesal",
+  "marah",
+  "sedih",
+  "curiga",
+  "nakal",
+  "kedip-sebelah",
+  "pusing",
+  "offline"
+] as const;
+
+export const EXPRESSION_ALIASES: Record<string, EyeExpression> = {
+  panik: "kaget",
+  lelah: "ngantuk",
+  waspada: "curiga",
+  ceria: "semangat",
+  senyum: "senang",
+  kedip: "kedip-sebelah",
+  lirik_kiri: "penasaran",
+  lirik_kanan: "curiga"
+};
+
+export function resolveEyeExpression(input: string): EyeExpression {
+  if (Object.prototype.hasOwnProperty.call(eyesData.expressions, input)) {
+    return input as EyeExpression;
+  }
+  return EXPRESSION_ALIASES[input] ?? "netral";
+}
 
 export interface HimeEyesProps {
   expression?: EyeExpression;
@@ -90,13 +142,28 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
   const [saccade, setSaccade] = useState({ dx: 0, dy: 0 });
 
   // Parametric expression data from eyes.json catalog
-  const expr = (Object.prototype.hasOwnProperty.call(eyesData.expressions, expression) ? (eyesData.expressions as Record<string, any>)[expression] : null) ?? eyesData.expressions.netral;
+  // When offline (!isOnline), eyes display "netral" geometry with muted gray color (#6F7785), low opacity (0.35), and completely static
+  const resolvedExprKey = resolveEyeExpression(expression);
+  const isOffline = resolvedExprKey === "offline" || expression === "offline";
+  const expr = isOffline
+    ? eyesData.expressions.netral
+    : ((Object.prototype.hasOwnProperty.call(eyesData.expressions, resolvedExprKey)
+        ? (eyesData.expressions as Record<string, any>)[resolvedExprKey]
+        : null) ?? eyesData.expressions.netral);
+  const effectiveLookX =
+    expression === "lirik_kiri" ? -0.7 : expression === "lirik_kanan" ? 0.7 : lookX;
+  const effectiveLookY = lookY;
   const leftParams: EyeParams = expr.l;
-  const rightParams: EyeParams = expr.r ?? expr.l;
-  const color = COLOR_MAP[expr.color] ?? COLOR_MAP.cyan;
-  const opacity = expr.opacity ?? (expression === "offline" ? 0.4 : 1.0);
-  const rot = expr.rot ?? 0;
-  const shadow = expression === "offline" ? "none" : (SHADOW_MAP[expr.color] ?? SHADOW_MAP.cyan);
+  const isWink = resolvedExprKey === "kedip-sebelah" && !isOffline;
+  const isSleeping = resolvedExprKey === "tidur" && !isOffline;
+  // Realistic wink: right eye uses full height geometry as base to animate scaleY closing and springing open
+  const rightParams: EyeParams = isWink
+    ? { ...leftParams, lidTop: 0.0, lidBot: 0.0 }
+    : (expr.r ?? expr.l);
+  const color = isOffline ? "#6F7785" : (COLOR_MAP[expr.color] ?? COLOR_MAP.cyan);
+  const opacity = isOffline ? 0.35 : (expr.opacity ?? 1.0);
+  const rot = isOffline ? 0 : (expr.rot ?? 0);
+  const shadow = isOffline ? "none" : (SHADOW_MAP[expr.color] ?? SHADOW_MAP.cyan);
 
   // Expression completion timer (if expression has duration and onExpressionComplete is provided)
   useEffect(() => {
@@ -112,8 +179,9 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
   // Blink timer:
   // - netral: random interval 3000ms - 7000ms, close for 120ms
   // - ngantuk: random interval 2000ms - 4000ms, slow lazy close for 250ms
+  // - offline: completely static (no blink)
   useEffect(() => {
-    if (expression !== "netral" && expression !== "ngantuk") {
+    if (isOffline || (expression !== "netral" && expression !== "ngantuk")) {
       setIsBlinking(false);
       return;
     }
@@ -166,8 +234,9 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
   }, [expression]);
 
   // Micro-saccades: subtle shift every 2.5 - 4.5 seconds for netral & bosan state
+  // When offline: completely static (no wandering or saccades)
   useEffect(() => {
-    if (expression !== "netral" && expression !== "bosan") {
+    if (isOffline || (expression !== "netral" && expression !== "bosan")) {
       setSaccade({ dx: 0, dy: 0 });
       return;
     }
@@ -191,9 +260,9 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
     };
   }, [expression]);
 
-  // Determine container motion style from 8 presets
+  // Determine container motion style from 8 presets (disabled when offline)
   const containerMotionStyle: React.CSSProperties = {};
-  const motionPreset = expr.motion;
+  const motionPreset = isOffline ? undefined : expr.motion;
   if (motionPreset && motionPreset !== "orbit-small") {
     switch (motionPreset) {
       case "bounce-soft":
@@ -233,8 +302,8 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
     const rx = eyeW * params.r;
 
     // Gaze offset combining parametric dx/dy, micro-saccades, and manual cursor gaze
-    const offsetX = (params.dx + saccade.dx + lookX * 0.25) * 4;
-    const offsetY = (params.dy + saccade.dy + lookY * 0.25) * 4;
+    const offsetX = (params.dx + saccade.dx + effectiveLookX * 0.25) * 4;
+    const offsetY = (params.dy + saccade.dy + effectiveLookY * 0.25) * 4;
 
     const tiltAngle = isRight ? -params.tilt : params.tilt;
     const maskId = `hime-eye-mask-${instanceId}-${idSuffix}`;
@@ -264,7 +333,9 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
         : "hime-orbit-left 1.4s linear infinite";
     }
 
-    return (
+    const isWinkingRightEye = isRight && isWink;
+
+    const svgElement = (
       <svg
         width={eyeW}
         height={eyeH}
@@ -324,6 +395,25 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
         />
       </svg>
     );
+
+    if (isWinkingRightEye) {
+      return (
+        <span
+          className="hime-eye-wink-wrap"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transformOrigin: "center center",
+            animation: "hime-wink-right 0.8s cubic-bezier(0.16, 1, 0.3, 1) infinite"
+          }}
+        >
+          {svgElement}
+        </span>
+      );
+    }
+
+    return svgElement;
   };
 
   const scale = size / 24;
@@ -344,6 +434,7 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
         justifyContent: "center",
         gap: `${6 * scale}px`,
         opacity,
+        position: "relative",
         transform: containerMotionStyle.transform || baseTransform,
         transformOrigin: "center center",
         transition: containerMotionStyle.transition || "transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease",
@@ -355,6 +446,29 @@ export const HimeEyes: React.FC<HimeEyesProps> = ({
     >
       {renderEye(leftParams, false, "left")}
       {renderEye(rightParams, true, "right")}
+
+      {/* Floating cartoon sleep Zzz for 'tidur' */}
+      {isSleeping && (
+        <div
+          className="hime-sleep-zzz-container"
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            top: `${-4 * scale}px`,
+            right: `${-14 * scale}px`,
+            pointerEvents: "none",
+            userSelect: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 10
+          }}
+        >
+          <span className="hime-zzz-letter hime-zzz-1">z</span>
+          <span className="hime-zzz-letter hime-zzz-2">z</span>
+          <span className="hime-zzz-letter hime-zzz-3">Z</span>
+        </div>
+      )}
     </div>
   );
 };

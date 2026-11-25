@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-    calculateEffectivePosition,
     calculateNextLineDelay,
     findActiveLyricIndex,
     parseLrc,
@@ -22,6 +21,10 @@ export interface UseLyricsProps {
     showInPill?: boolean;
 }
 
+// Natural 1:1 synchronization: active line matches when line.ms <= currentPositionMs < nextLine.ms
+// Fine-tuning is handled via userOffsetMs (+/-50ms, +/-200ms, +/-500ms controls)
+export const DEFAULT_LATENCY_OFFSET_MS = 0;
+
 export function useLyrics({
     title,
     artist,
@@ -30,7 +33,7 @@ export function useLyrics({
     hasMedia,
     positionMs,
     durationMs,
-    positionUpdatedAt,
+    positionUpdatedAt: _positionUpdatedAt,
     enabled = true,
     allowOnline = true,
     showInPill = true,
@@ -53,36 +56,23 @@ export function useLyrics({
         }
     }, []);
 
-    // Broadcast active lyric line to NCM center slot
-    const emitToNcm = useCallback((text: string) => {
+    // Resting notch clock invariant: do NOT broadcast lyrics to NCM center slot
+    const emitToNcm = useCallback((_text: string) => {
+        // Disabled: lyrics belong exclusively to the expanded lyrics view, never replacing the resting clock
         if (typeof window === "undefined") return;
-        if (!text) {
-            window.dispatchEvent(
-                new CustomEvent("hime:ncm-retract", { detail: "music-lyrics" }),
-            );
-            return;
-        }
         window.dispatchEvent(
-            new CustomEvent("hime:ncm-submit", {
-                detail: {
-                    id: "music-lyrics",
-                    module: "music",
-                    kind: "ambient",
-                    priority: 5, // PriorityLevel.P5_AMBIENT
-                    payload: { text: text.slice(0, 36) },
-                },
-            }),
+            new CustomEvent("hime:ncm-retract", { detail: { id: "music-lyrics" } }),
         );
     }, []);
 
     const retractFromNcm = useCallback(() => {
         if (typeof window === "undefined") return;
         window.dispatchEvent(
-            new CustomEvent("hime:ncm-retract", { detail: "music-lyrics" }),
+            new CustomEvent("hime:ncm-retract", { detail: { id: "music-lyrics" } }),
         );
     }, []);
 
-    // 1. Fetch lyrics when song metadata changes
+    // 1. Fetch lyrics immediately when song metadata is present (automatic fetch, no permission prompt)
     useEffect(() => {
         if (!enabled || !hasMedia || !title.trim()) {
             clearScheduledTimer();
@@ -109,12 +99,13 @@ export function useLyrics({
 
         const fetchLyricsData = async () => {
             try {
+                // Immediate automatic online fetch without prompting the user for permission
                 const res = await invoke<LyricsResponse>("hime_lyrics_get", {
                     title,
                     artist,
                     album: album || null,
                     durationSec: durationSec > 0 ? durationSec : null,
-                    allowOnline,
+                    allowOnline: true,
                 });
 
                 if (cancelled) return;
@@ -189,7 +180,8 @@ export function useLyrics({
                 return;
             }
 
-            const activeIdx = findActiveLyricIndex(lyrics.lines, targetPos);
+            const lookupPos = targetPos + DEFAULT_LATENCY_OFFSET_MS;
+            const activeIdx = findActiveLyricIndex(lyrics.lines, lookupPos);
             setActiveLineIndex(activeIdx);
 
             const activeText = activeIdx >= 0 ? lyrics.lines[activeIdx].text : "";
@@ -199,25 +191,16 @@ export function useLyrics({
                 emitToNcm(activeText);
             }
 
-            const delay = calculateNextLineDelay(lyrics.lines, activeIdx, targetPos);
+            const delay = calculateNextLineDelay(lyrics.lines, activeIdx, lookupPos);
             if (delay !== null) {
                 timerRef.current = setTimeout(() => {
                     if (!isPlayingRef.current) return;
-                    const nextEffective = calculateEffectivePosition(
-                        positionMs,
-                        positionUpdatedAt,
-                        true,
-                        userOffsetMs,
-                    );
-                    scheduleNextTick(nextEffective);
+                    scheduleNextTick(targetPos + delay);
                 }, delay);
             }
         },
         [
             lyrics,
-            positionMs,
-            positionUpdatedAt,
-            userOffsetMs,
             showInPill,
             clearScheduledTimer,
             emitToNcm,
@@ -231,23 +214,18 @@ export function useLyrics({
             return;
         }
 
+        const currentPos = positionMs + userOffsetMs;
+
         if (!isPlaying) {
             clearScheduledTimer();
-            const pos = calculateEffectivePosition(positionMs, positionUpdatedAt, false, userOffsetMs);
-            const activeIdx = findActiveLyricIndex(lyrics.lines, pos);
+            const activeIdx = findActiveLyricIndex(lyrics.lines, currentPos + DEFAULT_LATENCY_OFFSET_MS);
             setActiveLineIndex(activeIdx);
             const activeText = activeIdx >= 0 ? lyrics.lines[activeIdx].text : "";
             setActiveLineText(activeText);
             return;
         }
 
-        const effectivePos = calculateEffectivePosition(
-            positionMs,
-            positionUpdatedAt,
-            isPlaying,
-            userOffsetMs,
-        );
-        scheduleNextTick(effectivePos);
+        scheduleNextTick(currentPos);
 
         return () => {
             clearScheduledTimer();
@@ -256,7 +234,6 @@ export function useLyrics({
         lyrics,
         isPlaying,
         positionMs,
-        positionUpdatedAt,
         userOffsetMs,
         scheduleNextTick,
         clearScheduledTimer,

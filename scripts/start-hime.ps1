@@ -35,6 +35,8 @@ if ($Autostart) {
         Write-Host "Hime was not active before reboot. Skipping autostart."
         exit 0
     }
+    # Preserve and refresh the active state flag
+    Set-Content -Path $stateFile -Value ("active=" + (Get-Date).ToString("o")) -Force
 } else {
     # Manual start: set active state flag
     Set-Content -Path $stateFile -Value ("active=" + (Get-Date).ToString("o")) -Force
@@ -55,6 +57,20 @@ try {
 
 $himeRoot = "X:\folder_ai\Hime"
 
+$sh = $null
+try {
+    $sh = New-Object -ComObject Shell.Application
+} catch {}
+
+function Spawn-Detached($exePath, $args = "", $workDir = "", $showMode = 0) {
+    $ws = if ($showMode -eq 0) { "Hidden" } else { "Normal" }
+    if ($args) {
+        Start-Process -FilePath $exePath -ArgumentList $args -WorkingDirectory $workDir -WindowStyle $ws
+    } else {
+        Start-Process -FilePath $exePath -WorkingDirectory $workDir -WindowStyle $ws
+    }
+}
+
 # Helper to find release or debug executable
 function Find-Bin($subpath, $name) {
     $rel = Join-Path $himeRoot "$subpath\target\release\$name"
@@ -72,7 +88,7 @@ $listening = Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction Si
 if (-not $listening) {
     $routerCmd = "$env:APPDATA\npm\9router.cmd"
     if (Test-Path $routerCmd) {
-        Start-Process -FilePath $routerCmd -ArgumentList "-H 127.0.0.1 -p 20128 --skip-update" -WindowStyle Hidden
+        Spawn-Detached "cmd.exe" "/c `"$routerCmd`" -H 127.0.0.1 -p 20128 --skip-update" "$env:APPDATA\npm" 0
     }
 }
 
@@ -81,7 +97,7 @@ $core = Get-Process -Name "hime-core" -ErrorAction SilentlyContinue
 if (-not $core) {
     $coreExe = Find-Bin "core" "hime-core.exe"
     if ($coreExe) {
-        Start-Process -FilePath $coreExe -WorkingDirectory $himeRoot -WindowStyle Hidden
+        Spawn-Detached $coreExe "" $himeRoot 0
     }
 }
 
@@ -90,7 +106,7 @@ $shell = Get-Process -Name "hime-island" -ErrorAction SilentlyContinue
 if (-not $shell) {
     $shellExe = Find-Bin "island\src-tauri" "hime-island.exe"
     if ($shellExe) {
-        Start-Process -FilePath $shellExe -WorkingDirectory "$himeRoot\island"
+        Spawn-Detached $shellExe "" "$himeRoot\island" 1
     }
 } else {
     # If already running, signal HimeShowIsland to wake / toggle the notch UI
@@ -101,19 +117,39 @@ if (-not $shell) {
     } catch {}
 }
 
-# 6. Start Hotkey Daemon if not running
-$hotkey = Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue
-if (-not $hotkey) {
-    $hotkeyExe = Find-Bin "island\src-tauri" "hime_hotkey.exe"
-    if ($hotkeyExe) {
-        Start-Process -FilePath $hotkeyExe -WorkingDirectory $himeRoot -WindowStyle Hidden
-    }
+# 6. Start Hotkey Daemon (guarantee single up-to-date instance)
+$hotkeyExe = Find-Bin "island\src-tauri" "hime_hotkey.exe"
+$hotkeys = @(Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue)
+$restartHotkey = $false
+if ($hotkeys.Count -gt 1) {
+    $restartHotkey = $true
+} elseif ($hotkeys.Count -eq 1 -and $hotkeyExe) {
+    try {
+        $runningPath = $hotkeys[0].Path
+        if ($runningPath -and (($runningPath -ne $hotkeyExe) -or ((Get-Item $hotkeyExe).LastWriteTime -gt $hotkeys[0].StartTime))) {
+            $restartHotkey = $true
+        }
+    } catch {}
+}
+if ($restartHotkey) {
+    $hotkeys | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 150
+    $hotkeys = @()
+}
+if ($hotkeys.Count -eq 0 -and $hotkeyExe) {
+    Spawn-Detached $hotkeyExe "" $himeRoot 0
 }
 
 # 7. Start Supervisor Watchdog in background
 $supervisorScript = "$himeRoot\scripts\hime-supervisor.ps1"
 if (Test-Path $supervisorScript) {
-    Start-Process -FilePath "powershell.exe" -ArgumentList @("-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $supervisorScript) -WindowStyle Hidden
+    $launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
+    $wscriptExe = "$env:SystemRoot\System32\wscript.exe"
+    if ((Test-Path $launcherVbs) -and (Test-Path $wscriptExe)) {
+        Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`"" $himeRoot 0
+    } else {
+        Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`"" $himeRoot 0
+    }
 }
 
 Write-Host "Hime Ecosystem Started (Active & Persistent)." -ForegroundColor Green

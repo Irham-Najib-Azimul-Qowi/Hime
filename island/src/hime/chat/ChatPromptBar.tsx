@@ -33,10 +33,12 @@ export interface ChatPromptBarProps {
   attachments?: AttachmentRef[];
   onRemoveAttachment?: (id: string) => void;
   onOpenFilePicker?: () => void;
+  isFileDialogOpen?: boolean;
   isVoiceRecording?: boolean;
   voiceAudioLevel?: number;
   onToggleVoice?: () => void;
   placeholder?: string;
+  onTextChange?: (text: string) => void;
 }
 
 // Icon component lookup map
@@ -61,25 +63,37 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
   attachments = [],
   onRemoveAttachment,
   onOpenFilePicker,
+  isFileDialogOpen,
   isVoiceRecording = false,
   voiceAudioLevel = 0,
   onToggleVoice,
-  placeholder = "Tanya Hime... (ketik / untuk skill)"
+  placeholder = "Tanya Hime...",
+  onTextChange
 }) => {
   const [text, setText] = useState("");
+  const [internalFileDialogOpen, setInternalFileDialogOpen] = useState(false);
+  const isFileDialogActive = isFileDialogOpen ?? internalFileDialogOpen;
   const [selectedSkill, setSelectedSkill] = useState<SkillManifest | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Auto-expand textarea height (1 to 6 lines, max ~120px)
+  // Auto-expand textarea: slim single-line (~20px height) by default; only expand up to 2 lines (~40px) when text wraps
   useEffect(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = "20px";
       const scrollH = textareaRef.current.scrollHeight;
-      textareaRef.current.style.height = `${Math.min(120, Math.max(34, scrollH))}px`;
+      if (scrollH > 24) {
+        setIsExpanded(true);
+        // Expand up to 2 lines (~40px max)
+        textareaRef.current.style.height = `${Math.min(40, scrollH)}px`;
+      } else {
+        setIsExpanded(false);
+        textareaRef.current.style.height = "20px";
+      }
     }
   }, [text]);
 
@@ -117,12 +131,14 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
     setSelectedSkill(skill);
     setShowSlashMenu(false);
     setText("");
+    onTextChange?.("");
     textareaRef.current?.focus();
   };
 
   const selectCommand = (commandSlash: string) => {
     setShowSlashMenu(false);
     setText(commandSlash);
+    onTextChange?.(commandSlash);
     textareaRef.current?.focus();
   };
 
@@ -176,6 +192,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setText(val);
+    onTextChange?.(val);
 
     // Detect slash trigger (dismiss if text contains space e.g. after typing command arguments)
     if (val.startsWith("/") && !val.includes(" ")) {
@@ -194,18 +211,21 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
     const skills = selectedSkill ? [selectedSkill.id] : [];
     const attached = [...attachments];
 
-    // Clear input state immediately <= 1s
+    // Clear input state immediately
     setText("");
+    onTextChange?.("");
     setSelectedSkill(null);
     setShowSlashMenu(false);
 
     if (textareaRef.current) {
-      textareaRef.current.style.height = "34px";
+      textareaRef.current.style.height = "24px";
       textareaRef.current.focus();
     }
 
     onSendMessage(trimmed, skills, attached);
   };
+
+  const hasContent = text.trim().length > 0 || attachments.length > 0;
 
   return (
     <div
@@ -214,7 +234,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
         width: "100%",
         display: "flex",
         flexDirection: "column",
-        gap: "6px",
+        gap: "4px",
         boxSizing: "border-box"
       }}
     >
@@ -233,13 +253,16 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
               right: 0,
               maxHeight: "220px",
               overflowY: "auto",
-              background: "rgba(13, 14, 18, 0.98)",
-              backdropFilter: "blur(16px)",
+              overflowX: "hidden",
+              scrollbarWidth: "none",
+              msOverflowStyle: "none",
+              background: "rgba(16, 18, 24, 0.96)",
+              backdropFilter: "blur(18px)",
               border: "1px solid rgba(255, 255, 255, 0.12)",
-              borderRadius: "14px",
+              borderRadius: "16px",
               padding: "6px",
               zIndex: 50,
-              boxShadow: "0 12px 32px rgba(0, 0, 0, 0.6)"
+              boxShadow: "0 14px 36px rgba(0, 0, 0, 0.65)"
             }}
           >
             {combinedCatalog.map((entry, idx) => {
@@ -268,7 +291,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
                     alignItems: "center",
                     gap: "8px",
                     padding: "6px 10px",
-                    borderRadius: "8px",
+                    borderRadius: "10px",
                     background: isSelected ? "rgba(255, 255, 255, 0.08)" : "transparent",
                     cursor: "pointer",
                     transition: "background 0.1s ease"
@@ -333,7 +356,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
         )}
       </AnimatePresence>
 
-      {/* Attachment chips row if attachments are staged */}
+      {/* Attachment chips row if attachments are staged (clean rounded pill geometry) */}
       {attachments.length > 0 && (
         <div
           style={{
@@ -341,9 +364,10 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
             flexWrap: "wrap",
             gap: "6px",
             padding: "4px 8px",
-            background: "rgba(20, 22, 28, 0.7)",
-            borderRadius: "10px",
-            border: "1px solid rgba(255, 255, 255, 0.06)"
+            background: "rgba(22, 24, 29, 0.8)",
+            backdropFilter: "blur(12px)",
+            borderRadius: "14px",
+            border: "1px solid rgba(255, 255, 255, 0.08)"
           }}
         >
           {attachments.map((att) => (
@@ -352,19 +376,19 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                gap: "4px",
+                gap: "5px",
                 padding: "2px 8px",
-                borderRadius: "6px",
-                background: "rgba(255, 255, 255, 0.06)",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
-                fontSize: "10.5px",
+                borderRadius: "9999px",
+                background: "rgba(255, 255, 255, 0.08)",
+                border: "1px solid rgba(255, 255, 255, 0.12)",
+                fontSize: "10px",
                 color: "#F4F6FA"
               }}
             >
               <Paperclip size={10} color={`var(--accent-${att.accent})`} />
               <span
                 style={{
-                  maxWidth: "100px",
+                  maxWidth: "110px",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap"
@@ -372,7 +396,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
               >
                 {att.name}
               </span>
-              <span style={{ fontSize: "9px", color: "#6F7785" }}>
+              <span style={{ fontSize: "8.5px", color: "#8E96A4" }}>
                 ({formatFileSize(att.size)})
               </span>
               {onRemoveAttachment && (
@@ -387,7 +411,8 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
                     cursor: "pointer",
                     color: "#A7AEBB",
                     display: "flex",
-                    alignItems: "center"
+                    alignItems: "center",
+                    marginLeft: "2px"
                   }}
                 >
                   <X size={10} />
@@ -398,27 +423,88 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
         </div>
       )}
 
-      {/* Input container: Solid category pill + Auto-expanding textarea + Action buttons */}
+      {/* Slim Single-Line (~32-34px height) ChatGPT-style Rounded Pill Prompt Input Container */}
       <div
         style={{
           display: "flex",
-          alignItems: "flex-end",
-          gap: "6px",
-          background: "rgba(20, 22, 28, 0.95)",
+          alignItems: "center",
+          gap: "5px",
+          background: "rgba(24, 26, 32, 0.92)",
+          backdropFilter: "blur(16px)",
           border: isVoiceRecording
             ? "1px solid #34E3A6"
             : "1px solid rgba(255, 255, 255, 0.12)",
-          borderRadius: "14px",
-          padding: "6px 8px",
+          borderRadius: "9999px", // Seamless pill geometry
+          padding: "2px 6px 2px 10px",
+          minHeight: "32px",
+          height: isExpanded ? "auto" : "32px",
+          maxHeight: "58px", // Max ~58px when wrapped to 2 lines
           boxShadow: isVoiceRecording
-            ? "0 0 16px rgba(52, 227, 166, 0.25)"
-            : "none",
-          transition: "border 0.2s ease, box-shadow 0.2s ease"
+            ? "0 0 18px rgba(52, 227, 166, 0.25)"
+            : "0 4px 16px rgba(0, 0, 0, 0.35)",
+          transition: "border 0.2s ease, box-shadow 0.2s ease",
+          boxSizing: "border-box"
         }}
       >
+        {/* Attachment Pill Button (Left) */}
+        {onOpenFilePicker && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setInternalFileDialogOpen(true);
+              if (typeof window !== "undefined") {
+                (window as any).isFileDialogOpen = true;
+                (window as any).__isFileDialogOpen = true;
+                (window as any).__himeFileDialogOpen = true;
+                window.addEventListener(
+                  "focus",
+                  () => {
+                    setTimeout(() => {
+                      setInternalFileDialogOpen(false);
+                      (window as any).isFileDialogOpen = false;
+                      (window as any).__isFileDialogOpen = false;
+                      (window as any).__himeFileDialogOpen = false;
+                    }, 500);
+                  },
+                  { once: true }
+                );
+              }
+              onOpenFilePicker();
+            }}
+            title="Lampirkan berkas"
+            style={{
+              background: isFileDialogActive ? "rgba(52, 227, 166, 0.12)" : "transparent",
+              border: "none",
+              borderRadius: "50%",
+              width: "26px",
+              height: "26px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              color: isFileDialogActive ? "#34E3A6" : "#A7AEBB",
+              transition: "background 0.15s ease, color 0.15s ease, transform 0.1s ease",
+              flexShrink: 0
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "rgba(255, 255, 255, 0.08)";
+              e.currentTarget.style.color = "#F4F6FA";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "#A7AEBB";
+            }}
+            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.92)")}
+            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          >
+            <Paperclip size={14} />
+          </button>
+        )}
+
         {/* Active Solid Category Skill Pill */}
         {selectedSkill && (
-          <div style={{ marginBottom: "4px", flexShrink: 0 }}>
+          <div style={{ flexShrink: 0 }}>
             <SkillPill
               id={selectedSkill.id}
               name={selectedSkill.id}
@@ -428,7 +514,7 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
           </div>
         )}
 
-        {/* Auto-expanding prompt textarea — NEVER disabled */}
+        {/* Compact Auto-expanding Textarea (~20px single line, vertically centered, up to 40px for 2 lines) */}
         <textarea
           ref={textareaRef}
           value={text}
@@ -447,107 +533,97 @@ export const ChatPromptBar: React.FC<ChatPromptBarProps> = ({
             outline: "none",
             resize: "none",
             fontSize: "12px",
-            lineHeight: 1.5,
+            lineHeight: "20px",
             color: "#F4F6FA",
-            padding: "5px 4px",
-            fontFamily: "inherit",
-            boxSizing: "border-box"
+            padding: "0 4px",
+            height: "20px",
+            maxHeight: "40px",
+            fontFamily: "'Consolas', 'Cascadia Code', 'JetBrains Mono', -apple-system, sans-serif",
+            boxSizing: "border-box",
+            overflowY: isExpanded ? "auto" : "hidden",
+            display: "block"
           }}
         />
 
-        {/* Action icons: File Attachment Button */}
-        {onOpenFilePicker && (
-          <button
-            type="button"
-            onClick={onOpenFilePicker}
-            title="Lampirkan berkas"
-            style={{
-              background: "none",
-              border: "none",
-              borderRadius: "8px",
-              width: "28px",
-              height: "28px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-              color: "#A7AEBB",
-              transition: "transform 140ms ease-out, color 140ms ease-out",
-              marginBottom: "2px",
-              flexShrink: 0
-            }}
-            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.92)")}
-            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
-          >
-            <Paperclip size={15} />
-          </button>
-        )}
-
-        {/* Voice Push-to-Talk Mic Button */}
+        {/* Voice Push-to-Talk Mic Pill Button (Right) */}
         {onToggleVoice && (
           <button
             type="button"
             onClick={onToggleVoice}
-            title={isVoiceRecording ? "Hentikan" : "Bicara"}
+            title={isVoiceRecording ? "Hentikan rekaman" : "Bicara dengan Hime"}
             style={{
               background: isVoiceRecording
                 ? "rgba(52, 227, 166, 0.22)"
-                : "none",
+                : "transparent",
               border: isVoiceRecording
                 ? "1px solid #34E3A6"
                 : "none",
-              borderRadius: "8px",
-              width: "28px",
-              height: "28px",
+              borderRadius: "50%",
+              width: "26px",
+              height: "26px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               cursor: "pointer",
               color: isVoiceRecording ? "#34E3A6" : "#A7AEBB",
-              transition: "transform 140ms ease-out",
+              transition: "background 0.15s ease, color 0.15s ease, transform 0.12s ease",
               transform: isVoiceRecording
                 ? `scale(${1 + voiceAudioLevel * 0.2})`
                 : "scale(1)",
-              marginBottom: "2px",
               flexShrink: 0
             }}
+            onMouseEnter={(e) => {
+              if (!isVoiceRecording) {
+                e.currentTarget.style.background = "rgba(255, 255, 255, 0.08)";
+                e.currentTarget.style.color = "#F4F6FA";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isVoiceRecording) {
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "#A7AEBB";
+              }
+            }}
+            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.92)")}
+            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
           >
-            {isVoiceRecording ? <Mic size={15} /> : <MicOff size={15} />}
+            {isVoiceRecording ? <Mic size={13} /> : <MicOff size={13} />}
           </button>
         )}
 
-        {/* Send Button */}
+        {/* Modern High-contrast Send Pill Button (Right) */}
         <button
           type="button"
           onClick={handleSubmit}
-          disabled={!text.trim() && attachments.length === 0}
-          title="Kirim"
+          disabled={!hasContent}
+          title="Kirim instruksi"
           style={{
-            background:
-              text.trim() || attachments.length > 0
-                ? "var(--accent-mint, #34E3A6)"
-                : "rgba(255, 255, 255, 0.06)",
+            background: hasContent
+              ? "#FFFFFF"
+              : "rgba(255, 255, 255, 0.08)",
             border: "none",
-            borderRadius: "8px",
-            width: "28px",
-            height: "28px",
+            borderRadius: "50%",
+            width: "26px",
+            height: "26px",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            cursor: text.trim() || attachments.length > 0 ? "pointer" : "default",
-            color: text.trim() || attachments.length > 0 ? "#0A0B0E" : "#6F7785",
-            transition: "transform 140ms ease-out, background 140ms ease-out",
-            marginBottom: "2px",
+            cursor: hasContent ? "pointer" : "default",
+            color: hasContent ? "#0A0B0E" : "rgba(255, 255, 255, 0.25)",
+            boxShadow: hasContent
+              ? "0 2px 8px rgba(255, 255, 255, 0.25)"
+              : "none",
+            transition: "transform 0.12s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease",
             flexShrink: 0
           }}
           onMouseDown={(e) => {
-            if (text.trim() || attachments.length > 0) {
+            if (hasContent) {
               e.currentTarget.style.transform = "scale(0.92)";
             }
           }}
           onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
         >
-          <ArrowUp size={15} />
+          <ArrowUp size={14} strokeWidth={2.4} />
         </button>
       </div>
     </div>

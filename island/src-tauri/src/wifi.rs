@@ -11,22 +11,29 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use windows::core::{GUID, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE};
+use windows::Win32::NetworkManagement::IpHelper::{
+    FreeMibTable, GetBestInterface, GetIfTable2, GetIpForwardTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+};
 use windows::Win32::NetworkManagement::WiFi::{
-    dot11_BSS_type_infrastructure, wlan_connection_mode_profile,
-    wlan_intf_opcode_current_connection, wlan_notification_acm_connection_attempt_fail,
-    wlan_notification_acm_connection_complete, wlan_notification_acm_disconnected,
-    wlan_notification_acm_interface_arrival, wlan_notification_acm_interface_removal,
-    wlan_notification_acm_profile_change, wlan_notification_acm_scan_complete,
-    wlan_notification_acm_scan_fail, wlan_notification_acm_scan_list_refresh, WlanCloseHandle,
-    WlanConnect, WlanDeleteProfile, WlanDisconnect, WlanEnumInterfaces, WlanFreeMemory,
-    WlanGetAvailableNetworkList, WlanGetProfile, WlanOpenHandle, WlanQueryInterface,
-    WlanRegisterNotification, WlanScan, WlanSetProfile, DOT11_CIPHER_ALGO_TKIP, DOT11_SSID,
-    L2_NOTIFICATION_DATA, WLAN_AVAILABLE_NETWORK, WLAN_AVAILABLE_NETWORK_CONNECTED,
-    WLAN_AVAILABLE_NETWORK_HAS_PROFILE, WLAN_AVAILABLE_NETWORK_LIST, WLAN_CONNECTION_ATTRIBUTES,
-    WLAN_CONNECTION_NOTIFICATION_DATA, WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO_LIST,
-    WLAN_NOTIFICATION_SOURCE_ACM, WLAN_REASON_CODE_MSMSEC_BASE,
+    dot11_BSS_type_infrastructure, wlan_connection_mode_profile, wlan_interface_state_connected,
+    wlan_interface_state_disconnected, wlan_interface_state_disconnecting,
+    wlan_interface_state_not_ready, wlan_intf_opcode_current_connection,
+    wlan_notification_acm_connection_attempt_fail, wlan_notification_acm_connection_complete,
+    wlan_notification_acm_disconnected, wlan_notification_acm_interface_arrival,
+    wlan_notification_acm_interface_removal, wlan_notification_acm_profile_change,
+    wlan_notification_acm_scan_complete, wlan_notification_acm_scan_fail,
+    wlan_notification_acm_scan_list_refresh, WlanCloseHandle, WlanConnect, WlanDeleteProfile,
+    WlanDisconnect, WlanEnumInterfaces, WlanFreeMemory, WlanGetAvailableNetworkList,
+    WlanGetProfile, WlanOpenHandle, WlanQueryInterface, WlanRegisterNotification, WlanScan,
+    WlanSetProfile, DOT11_CIPHER_ALGO_TKIP, DOT11_SSID, L2_NOTIFICATION_DATA,
+    WLAN_AVAILABLE_NETWORK, WLAN_AVAILABLE_NETWORK_CONNECTED, WLAN_AVAILABLE_NETWORK_HAS_PROFILE,
+    WLAN_AVAILABLE_NETWORK_LIST, WLAN_CONNECTION_ATTRIBUTES, WLAN_CONNECTION_NOTIFICATION_DATA,
+    WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST,
+    WLAN_INTERFACE_STATE, WLAN_NOTIFICATION_SOURCE_ACM, WLAN_REASON_CODE_MSMSEC_BASE,
     WLAN_REASON_CODE_MSMSEC_PSK_MISMATCH_SUSPECTED,
 };
+use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6};
 
 /// How long to wait for Windows to report the outcome of a connection attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
@@ -73,25 +80,34 @@ impl Client {
         Ok(Client(handle))
     }
 
-    /// The first wireless interface. Like the Windows quick settings, Bloom
-    /// manages one adapter.
-    fn interface(&self) -> Result<GUID, String> {
+    /// Enumerates all wireless interfaces and their current states.
+    fn interfaces(&self) -> Result<Vec<(GUID, WLAN_INTERFACE_STATE)>, String> {
         let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
         let rc = unsafe { WlanEnumInterfaces(self.0, None, &mut list) };
         if rc != 0 {
             return Err(format!("Couldn't list Wi-Fi adapters ({rc})"));
         }
-        // Success guarantees an allocated list; it ends in a C flexible array,
-        // and only its first entry is read.
-        let guid = unsafe {
-            let guid = list
-                .as_ref()
-                .filter(|l| l.dwNumberOfItems > 0)
-                .map(|l| l.InterfaceInfo[0].InterfaceGuid);
+        let ifaces = unsafe {
+            let mut items = Vec::new();
+            if let Some(header) = list.as_ref() {
+                let count = (header.dwNumberOfItems as usize).min(64);
+                if count > 0 {
+                    let entries: &[WLAN_INTERFACE_INFO] =
+                        std::slice::from_raw_parts(header.InterfaceInfo.as_ptr(), count);
+                    items.extend(entries.iter().map(|info| (info.InterfaceGuid, info.isState)));
+                }
+            }
             WlanFreeMemory(list as *const _);
-            guid
+            items
         };
-        guid.ok_or_else(|| "no-adapter".to_string())
+        Ok(ifaces)
+    }
+
+    /// The active wireless interface, preferring one in the connected state.
+    /// Falls back to the first enumerated adapter when none is connected.
+    fn interface(&self) -> Result<GUID, String> {
+        let ifaces = self.interfaces()?;
+        pick_preferred_wlan_interface(&ifaces).ok_or_else(|| "no-adapter".to_string())
     }
 }
 
@@ -348,6 +364,27 @@ fn set_profile_xml(client: &Client, iface: &GUID, xml: &str) -> Result<(), Strin
 static APP: OnceLock<AppHandle> = OnceLock::new();
 /// The SSID a connect call is waiting on, and where to send its reason code.
 static PENDING_CONNECT: Mutex<Option<(Vec<u8>, Sender<u32>)>> = Mutex::new(None);
+/// Last confirmed SSID, used only when WlanEnumInterfaces still reports a
+/// connected state but WlanQueryInterface briefly fails during background scans/roaming.
+static LAST_CONNECTED_SSID: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_cached_ssid(ssid: Option<String>) {
+    if let Ok(mut cached) = LAST_CONNECTED_SSID.lock() {
+        *cached = ssid;
+    }
+}
+
+fn get_cached_ssid() -> Option<String> {
+    LAST_CONNECTED_SSID.lock().ok().and_then(|c| c.clone())
+}
+
+fn pick_preferred_wlan_interface(ifaces: &[(GUID, WLAN_INTERFACE_STATE)]) -> Option<GUID> {
+    ifaces
+        .iter()
+        .find(|(_, state)| *state == wlan_interface_state_connected)
+        .or_else(|| ifaces.first())
+        .map(|(guid, _)| *guid)
+}
 
 unsafe extern "system" fn on_notification(
     data: *mut L2_NOTIFICATION_DATA,
@@ -377,6 +414,12 @@ unsafe extern "system" fn on_notification(
                 }
             }
         }
+    }
+
+    if code == wlan_notification_acm_disconnected.0
+        || code == wlan_notification_acm_interface_removal.0
+    {
+        set_cached_ssid(None);
     }
 
     let refresh = [
@@ -423,38 +466,358 @@ pub fn setup_wifi_notifications(app: AppHandle) {
     });
 }
 
-/// Name of the network the adapter is associated with, if any.
-pub fn connected_ssid() -> Option<String> {
-    let client = Client::open().ok()?;
-    let iface = client.interface().ok()?;
+fn query_interface_ssid(client: &Client, iface: &GUID) -> Result<Option<String>, u32> {
     let mut size = 0u32;
     let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
     unsafe {
         let rc = WlanQueryInterface(
             client.0,
-            &iface,
+            iface,
             wlan_intf_opcode_current_connection,
             None,
             &mut size,
             &mut data,
             None,
         );
-        // Fails with ERROR_INVALID_STATE while not associated.
-        let ssid = if rc == 0 {
-            (data as *const WLAN_CONNECTION_ATTRIBUTES)
+        let res = if rc == 0 {
+            let ssid = (data as *const WLAN_CONNECTION_ATTRIBUTES)
                 .as_ref()
+                .filter(|attrs| attrs.isState == wlan_interface_state_connected)
                 .map(|attrs| {
                     String::from_utf8_lossy(ssid_bytes(&attrs.wlanAssociationAttributes.dot11Ssid))
                         .into_owned()
                 })
+                .filter(|s| !s.is_empty());
+            Ok(ssid)
         } else {
-            None
+            Err(rc)
         };
         if !data.is_null() {
             WlanFreeMemory(data);
         }
-        ssid
+        res
     }
+}
+
+/// Returns true if any wireless interface currently reports `wlan_interface_state_connected`.
+fn is_wifi_connected() -> bool {
+    let Ok(client) = Client::open() else {
+        return false;
+    };
+    let Ok(ifaces) = client.interfaces() else {
+        return false;
+    };
+    ifaces
+        .iter()
+        .any(|(_, state)| *state == wlan_interface_state_connected)
+}
+
+/// Name of the network the adapter is associated with, if any.
+pub fn connected_ssid() -> Option<String> {
+    let Ok(client) = Client::open() else {
+        set_cached_ssid(None);
+        return None;
+    };
+    let Ok(ifaces) = client.interfaces() else {
+        set_cached_ssid(None);
+        return None;
+    };
+    if ifaces.is_empty() {
+        set_cached_ssid(None);
+        return None;
+    }
+
+    let connected_ifaces: Vec<GUID> = ifaces
+        .iter()
+        .filter(|(_, state)| *state == wlan_interface_state_connected)
+        .map(|(guid, _)| *guid)
+        .collect();
+
+    if !connected_ifaces.is_empty() {
+        for iface in &connected_ifaces {
+            match query_interface_ssid(&client, iface) {
+                Ok(Some(ssid)) => {
+                    set_cached_ssid(Some(ssid.clone()));
+                    return Some(ssid);
+                }
+                Err(_) => {
+                    // Background WlanScan or transient roam can briefly cause
+                    // WlanQueryInterface to return non-zero while still connected.
+                    std::thread::sleep(Duration::from_millis(15));
+                    if let Ok(Some(ssid)) = query_interface_ssid(&client, iface) {
+                        set_cached_ssid(Some(ssid.clone()));
+                        return Some(ssid);
+                    }
+                }
+                Ok(None) => {}
+            }
+        }
+        // Windows still reports at least one interface in wlan_interface_state_connected;
+        // preserve the last confirmed SSID rather than transiently dropping to offline/LAN.
+        return get_cached_ssid();
+    }
+
+    // No interface is in wlan_interface_state_connected; check if all are clearly disconnected.
+    let any_active_transition = ifaces.iter().any(|(_, state)| {
+        *state != wlan_interface_state_disconnected
+            && *state != wlan_interface_state_disconnecting
+            && *state != wlan_interface_state_not_ready
+    });
+
+    if !any_active_transition {
+        set_cached_ssid(None);
+        return None;
+    }
+
+    if let Some((iface, _)) = ifaces.first() {
+        if let Ok(Some(ssid)) = query_interface_ssid(&client, iface) {
+            set_cached_ssid(Some(ssid.clone()));
+            return Some(ssid);
+        }
+    }
+
+    // Transient roaming/associating state: keep cached SSID only if we previously had one.
+    get_cached_ssid()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EthernetCandidate<'a> {
+    interface_index: u32,
+    if_type: u32,
+    oper_status: i32,
+    media_connect_state: i32,
+    tunnel_type: i32,
+    interface_flags_bitfield: u8,
+    physical_address_len: u32,
+    description: &'a str,
+    alias: &'a str,
+}
+
+fn is_hardware_interface(interface_flags_bitfield: u8) -> bool {
+    // MIB_IF_ROW2.InterfaceAndOperStatusFlags bit 0 = HardwareInterface
+    (interface_flags_bitfield & 0x01) != 0
+}
+
+fn should_accept_ethernet_candidate(
+    candidate: &EthernetCandidate<'_>,
+    gateway_if_indices: &std::collections::HashSet<u32>,
+    best_if_index: Option<u32>,
+    wifi_connected: bool,
+) -> bool {
+    // IF_TYPE_ETHERNET_CSMACD = 6
+    // OperStatus 1 = IfOperStatusUp
+    // MediaConnectState 1 = MediaConnectStateConnected
+    // TUNNEL_TYPE_NONE = 0
+    if candidate.if_type != 6
+        || candidate.oper_status != 1
+        || candidate.media_connect_state != 1
+        || candidate.tunnel_type != 0
+        || !is_hardware_interface(candidate.interface_flags_bitfield)
+        || candidate.physical_address_len == 0
+    {
+        return false;
+    }
+
+    if is_virtual_adapter(candidate.description, candidate.alias) {
+        return false;
+    }
+
+    // Require an active default gateway route on this interface.
+    if gateway_if_indices.is_empty() || !gateway_if_indices.contains(&candidate.interface_index) {
+        return false;
+    }
+
+    // If Wi-Fi is actively connected, do not claim Ethernet unless Windows' best-route
+    // decision actually prefers this Ethernet interface.
+    if wifi_connected && best_if_index != Some(candidate.interface_index) {
+        return false;
+    }
+
+    true
+}
+
+unsafe fn collect_default_gateway_indices(
+    family: ADDRESS_FAMILY,
+    out_indices: &mut std::collections::HashSet<u32>,
+) {
+    let mut forward_out = std::mem::MaybeUninit::<*mut MIB_IPFORWARD_TABLE2>::uninit();
+    let fwd_ret = GetIpForwardTable2(family, forward_out.as_mut_ptr());
+    if !fwd_ret.is_ok() {
+        return;
+    }
+    if let Some(fwd_table) = std::ptr::NonNull::new(forward_out.assume_init()) {
+        let fwd_ptr = fwd_table.as_ptr();
+        let fwd_rows = std::slice::from_raw_parts(
+            std::ptr::addr_of!((*fwd_ptr).Table).cast::<MIB_IPFORWARD_ROW2>(),
+            fwd_table.as_ref().NumEntries as usize,
+        );
+        for fwd in fwd_rows {
+            if fwd.DestinationPrefix.PrefixLength == 0 && !fwd.Loopback {
+                out_indices.insert(fwd.InterfaceIndex);
+            }
+        }
+        FreeMibTable(fwd_ptr as *const _);
+    }
+}
+
+/// Checks whether the system is currently connected to an active wired Ethernet / LAN network.
+/// Returns `(is_connected, adapter_name)`.
+pub fn is_ethernet_connected() -> (bool, Option<String>) {
+    unsafe {
+        // Collect interface indices that have an active IPv4 or IPv6 default gateway.
+        let mut gateway_if_indices = std::collections::HashSet::new();
+        collect_default_gateway_indices(AF_INET, &mut gateway_if_indices);
+        collect_default_gateway_indices(AF_INET6, &mut gateway_if_indices);
+
+        // If no default gateway route exists on the system, no wired LAN internet uplink is active.
+        if gateway_if_indices.is_empty() {
+            return (false, None);
+        }
+
+        let mut best_idx = 0u32;
+        // 8.8.8.8 (0x08080808) — inspects local routing table only, sends no packets.
+        let best_if_index = if GetBestInterface(0x08080808, &mut best_idx) == 0 {
+            Some(best_idx)
+        } else {
+            None
+        };
+        let wifi_connected = is_wifi_connected();
+
+        let mut out = std::mem::MaybeUninit::<*mut MIB_IF_TABLE2>::uninit();
+        let ret = GetIfTable2(out.as_mut_ptr());
+        if !ret.is_ok() {
+            return (false, None);
+        }
+        let Some(table) = std::ptr::NonNull::new(out.assume_init()) else {
+            return (false, None);
+        };
+        let table_ptr = table.as_ptr();
+        let rows = std::slice::from_raw_parts(
+            std::ptr::addr_of!((*table_ptr).Table).cast::<MIB_IF_ROW2>(),
+            table.as_ref().NumEntries as usize,
+        );
+
+        let mut eth_name: Option<String> = None;
+        let mut fallback_name: Option<String> = None;
+        for row in rows {
+            let desc = wide_to_string(&row.Description);
+            let alias_raw = wide_to_string(&row.Alias);
+            let candidate = EthernetCandidate {
+                interface_index: row.InterfaceIndex,
+                if_type: row.Type,
+                oper_status: row.OperStatus.0,
+                media_connect_state: row.MediaConnectState.0,
+                tunnel_type: row.TunnelType.0,
+                interface_flags_bitfield: row.InterfaceAndOperStatusFlags._bitfield,
+                physical_address_len: row.PhysicalAddressLength,
+                description: &desc,
+                alias: &alias_raw,
+            };
+
+            if should_accept_ethernet_candidate(
+                &candidate,
+                &gateway_if_indices,
+                best_if_index,
+                wifi_connected,
+            ) {
+                let trimmed = alias_raw.trim();
+                let name = if trimmed.is_empty() {
+                    "Ethernet".to_string()
+                } else {
+                    trimmed.to_string()
+                };
+                if best_if_index == Some(row.InterfaceIndex) {
+                    eth_name = Some(name);
+                    break;
+                }
+                if fallback_name.is_none() {
+                    fallback_name = Some(name);
+                }
+            }
+        }
+        FreeMibTable(table_ptr as *const _);
+        let chosen = eth_name.or(fallback_name);
+        (chosen.is_some(), chosen)
+    }
+}
+
+/// Checks whether there is active internet connectivity.
+/// Uses Windows NetworkInformation GetInternetConnectionProfile if available,
+/// and validates via rapid public socket probe with a short timeout.
+pub fn check_internet_access() -> bool {
+    // 1. Try WinRT NetworkInformation::GetInternetConnectionProfile()
+    let winrt_ok = (|| -> Option<bool> {
+        let profile = windows::Networking::Connectivity::NetworkInformation::GetInternetConnectionProfile().ok()?;
+        let level = profile.GetNetworkConnectivityLevel().ok()?;
+        Some(level == windows::Networking::Connectivity::NetworkConnectivityLevel::InternetAccess)
+    })();
+
+    if let Some(ok) = winrt_ok {
+        if ok {
+            return true;
+        }
+    }
+
+    // 2. Direct TCP probe to high-availability public DNS IP addresses (1.1.1.1:53, 8.8.8.8:53)
+    // with a fast 450ms timeout.
+    use std::net::{SocketAddr, TcpStream};
+
+    let timeout = Duration::from_millis(450);
+    let endpoints = [
+        SocketAddr::from(([1, 1, 1, 1], 53)),
+        SocketAddr::from(([8, 8, 8, 8], 53)),
+    ];
+
+    for addr in &endpoints {
+        if TcpStream::connect_timeout(addr, timeout).is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_virtual_adapter(desc: &str, alias: &str) -> bool {
+    const EXCLUDED: &[&str] = &[
+        "virtual",
+        "hyper-v",
+        "vethernet",
+        "vmware",
+        "virtualbox",
+        "tap",
+        "vpn",
+        "loopback",
+        "wsl",
+        "pseudo",
+        "tunnel",
+        "tailscale",
+        "zerotier",
+        "wireguard",
+        "bluetooth",
+        "pve-nat",
+        "default switch",
+        "host-only",
+        "nat",
+        "docker",
+        "container",
+        "radmin",
+        "hamachi",
+        "wan miniport",
+        "km-test",
+        "npcap",
+        "tun",
+        "bridge",
+        "ndis",
+        "microsoft virtual",
+        "microsoft km-test",
+        "microsoft wi-fi",
+        "microsoft network adapter",
+    ];
+    let desc_lower = desc.to_lowercase();
+    let alias_lower = alias.to_lowercase();
+    EXCLUDED
+        .iter()
+        .any(|&term| desc_lower.contains(term) || alias_lower.contains(term))
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -620,6 +983,7 @@ pub async fn wifi_disconnect() -> Result<(), String> {
         if rc != 0 {
             return Err(format!("Couldn't disconnect ({rc})"));
         }
+        set_cached_ssid(None);
         Ok(())
     })
     .await
@@ -725,5 +1089,182 @@ mod tests {
         assert!(is_key_mismatch(WLAN_REASON_CODE_MSMSEC_BASE + 5));
         assert!(!is_key_mismatch(0));
         assert!(!is_key_mismatch(0x30000));
+    }
+
+    #[test]
+    fn rejects_virtual_and_preserves_hardware_adapters() {
+        let virtual_cases = [
+            ("Hyper-V Virtual Ethernet Adapter", "vEthernet (Default Switch)"),
+            ("Docker Desktop NAT", "docker0"),
+            ("Container Network Adapter", "Ethernet 3"),
+            ("Radmin VPN", "Radmin VPN"),
+            ("LogMeIn Hamachi Virtual Ethernet Adapter", "Hamachi"),
+            ("WAN Miniport (Network Monitor)", "WAN Miniport"),
+            ("Microsoft KM-TEST Loopback Adapter", "Loopback"),
+            ("Npcap Loopback Adapter", "Npcap"),
+            ("Wintun Userspace Tunnel", "wg0"),
+            ("TAP-Windows Adapter V9", "Bridge Connection"),
+            ("Remote NDIS based Internet Sharing Device", "Ethernet 4"),
+            ("VirtualBox Host-Only Ethernet Adapter", "VirtualBox"),
+            ("Microsoft Virtual WiFi Miniport Adapter", "Local Area Connection* 1"),
+            ("Microsoft Wi-Fi Direct Virtual Adapter", "Local Area Connection* 2"),
+            ("Microsoft Network Adapter Multiplexor Driver", "Bridge"),
+        ];
+        for (desc, alias) in virtual_cases {
+            assert!(
+                is_virtual_adapter(desc, alias),
+                "expected virtual adapter to be rejected: desc={desc:?}, alias={alias:?}"
+            );
+        }
+
+        let hardware_cases = [
+            ("Realtek PCIe 2.5GbE Family Controller", "Ethernet"),
+            ("Intel(R) Ethernet Connection (14) I219-V", "Ethernet"),
+            ("Microsoft Surface Ethernet Adapter", "Ethernet 2"),
+            ("ASIX AX88179 USB 3.0 to Gigabit Ethernet Adapter", "USB Ethernet"),
+        ];
+        for (desc, alias) in hardware_cases {
+            assert!(
+                !is_virtual_adapter(desc, alias),
+                "expected hardware adapter to be accepted: desc={desc:?}, alias={alias:?}"
+            );
+        }
+    }
+
+    fn base_hardware_candidate<'a>() -> EthernetCandidate<'a> {
+        EthernetCandidate {
+            interface_index: 10,
+            if_type: 6,
+            oper_status: 1,
+            media_connect_state: 1,
+            tunnel_type: 0,
+            interface_flags_bitfield: 0x01,
+            physical_address_len: 6,
+            description: "Realtek PCIe 2.5GbE Family Controller",
+            alias: "Ethernet",
+        }
+    }
+
+    #[test]
+    fn rejects_ethernet_when_gateway_table_empty_or_missing_interface() {
+        let candidate = base_hardware_candidate();
+        let empty = std::collections::HashSet::new();
+        assert!(!should_accept_ethernet_candidate(
+            &candidate,
+            &empty,
+            Some(10),
+            false
+        ));
+
+        let other_gw: std::collections::HashSet<u32> = [99].into_iter().collect();
+        assert!(!should_accept_ethernet_candidate(
+            &candidate,
+            &other_gw,
+            Some(10),
+            false
+        ));
+
+        let matching_gw: std::collections::HashSet<u32> = [10].into_iter().collect();
+        assert!(should_accept_ethernet_candidate(
+            &candidate,
+            &matching_gw,
+            Some(10),
+            false
+        ));
+    }
+
+    #[test]
+    fn checks_hardware_interface_tunnel_and_mac_length() {
+        let gw: std::collections::HashSet<u32> = [10].into_iter().collect();
+
+        let mut no_hw_flag = base_hardware_candidate();
+        no_hw_flag.interface_flags_bitfield = 0x00;
+        assert!(!should_accept_ethernet_candidate(
+            &no_hw_flag,
+            &gw,
+            Some(10),
+            false
+        ));
+
+        let mut tunnel = base_hardware_candidate();
+        tunnel.tunnel_type = 1;
+        assert!(!should_accept_ethernet_candidate(
+            &tunnel,
+            &gw,
+            Some(10),
+            false
+        ));
+
+        let mut no_mac = base_hardware_candidate();
+        no_mac.physical_address_len = 0;
+        assert!(!should_accept_ethernet_candidate(
+            &no_mac,
+            &gw,
+            Some(10),
+            false
+        ));
+    }
+
+    #[test]
+    fn respects_best_route_precedence_when_wifi_connected() {
+        let candidate = base_hardware_candidate();
+        let gw: std::collections::HashSet<u32> = [10].into_iter().collect();
+
+        // Wi-Fi is connected and has the best route (index 4 != Ethernet index 10).
+        assert!(!should_accept_ethernet_candidate(
+            &candidate,
+            &gw,
+            Some(4),
+            true
+        ));
+        // Wi-Fi is connected and best route could not be resolved.
+        assert!(!should_accept_ethernet_candidate(&candidate, &gw, None, true));
+        // Wi-Fi is connected, but Ethernet actually owns the best route.
+        assert!(should_accept_ethernet_candidate(
+            &candidate,
+            &gw,
+            Some(10),
+            true
+        ));
+        // Wi-Fi is disconnected (e.g., Ethernet + VPN tunnel as best route index 22).
+        assert!(should_accept_ethernet_candidate(
+            &candidate,
+            &gw,
+            Some(22),
+            false
+        ));
+    }
+
+    #[test]
+    fn selects_connected_wlan_interface_over_disconnected() {
+        let g1 = GUID::from_u128(1);
+        let g2 = GUID::from_u128(2);
+        let picked = pick_preferred_wlan_interface(&[
+            (g1, wlan_interface_state_disconnected),
+            (g2, wlan_interface_state_connected),
+        ]);
+        assert_eq!(picked, Some(g2));
+
+        let fallback = pick_preferred_wlan_interface(&[
+            (g1, wlan_interface_state_disconnected),
+            (g2, wlan_interface_state_not_ready),
+        ]);
+        assert_eq!(fallback, Some(g1));
+        assert_eq!(pick_preferred_wlan_interface(&[]), None);
+    }
+
+    #[test]
+    fn ethernet_detection_runs_without_panic() {
+        let (connected, name) = is_ethernet_connected();
+        println!(">>> ETHERNET DEBUG: connected={}, name={:?}", connected, name);
+        if connected {
+            assert!(name.is_some());
+        }
+    }
+
+    #[test]
+    fn internet_connectivity_check_runs_without_panic() {
+        let has_internet = check_internet_access();
+        println!(">>> INTERNET ACCESS DEBUG: has_internet={}", has_internet);
     }
 }

@@ -1,4 +1,4 @@
-import { Volume2, Sun, ArrowLeftToLine, ArrowRightToLine } from "lucide-react";
+import { Volume2, Sun, ArrowLeftToLine, ArrowRightToLine, Move } from "lucide-react";
 import { SettingRow } from "./SettingRow";
 
 interface OverlaysTabProps {
@@ -10,6 +10,8 @@ interface OverlaysTabProps {
 	toggleBrightnessOverlay: () => void;
 	brightnessEdgeEnabled: boolean;
 	toggleBrightnessEdge: () => void;
+	freeDragEnabled?: boolean;
+	toggleFreeDrag?: () => void;
 }
 
 export function OverlaysTab({
@@ -20,7 +22,9 @@ export function OverlaysTab({
 	brightnessOverlayEnabled,
 	toggleBrightnessOverlay,
 	brightnessEdgeEnabled,
-	toggleBrightnessEdge
+	toggleBrightnessEdge,
+	freeDragEnabled,
+	toggleFreeDrag
 }: OverlaysTabProps) {
 	return (
 		<>
@@ -74,6 +78,22 @@ export function OverlaysTab({
 						</label>
 					</SettingRow>
 				)}
+
+				<SettingRow
+					icon={Move}
+					label="Free Position / Draggable Overlays"
+					desc="Click-hold and drag volume & brightness bars anywhere on screen"
+					divider={false}
+				>
+					<label className="toggle-switch">
+						<input
+							type="checkbox"
+							checked={freeDragEnabled ?? false}
+							onChange={toggleFreeDrag}
+						/>
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
 			</div>
 		</>
 	);

@@ -67,4 +67,91 @@ describe("tasks/HimeTasksPanel", () => {
 		expect(HimeTasksPanel).toBeDefined();
 		expect(typeof HimeTasksPanel).toBe("function");
 	});
+
+	test("QuickAddBar is exported and is a function", async () => {
+		const { QuickAddBar } = await import("../src/hime/tasks/QuickAddBar");
+		expect(QuickAddBar).toBeDefined();
+		expect(typeof QuickAddBar).toBe("function");
+	});
+
+	test("TaskCard is exported and is a function", async () => {
+		const { TaskCard } = await import("../src/hime/tasks/TaskCard");
+		expect(TaskCard).toBeDefined();
+		expect(typeof TaskCard).toBe("function");
+	});
+});
+
+describe("Quick Settings & Task UI Layout Invariants", () => {
+	test("App.css configures 2 balanced rows of 5 icons for quick toggles", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const css = fs.readFileSync(path.resolve(__dirname, "../src/App.css"), "utf8");
+
+		expect(css).toContain(".cc-circular-actions-row");
+		expect(css).toMatch(/grid-template-columns:\s*repeat\(5,\s*1fr\)/);
+		expect(css).toMatch(/gap:\s*10px\s*14px/);
+	});
+
+	test("Quick settings buttons use rounded pill geometry and size 36px", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const css = fs.readFileSync(path.resolve(__dirname, "../src/App.css"), "utf8");
+
+		expect(css).toMatch(/\.cc-circular-btn\s*\{[^}]*width:\s*36px/);
+		expect(css).toMatch(/\.cc-circular-btn\s*\{[^}]*border-radius:\s*9999px/);
+	});
+
+	test("QuickAddBar contains dark menu #121214 styling for category options", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const quickAddBarSrc = fs.readFileSync(path.resolve(__dirname, "../src/hime/tasks/QuickAddBar.tsx"), "utf8");
+
+		expect(quickAddBarSrc).toContain("#121214");
+		expect(quickAddBarSrc).toContain("Pilih Kategori");
+		expect(quickAddBarSrc).toContain("Tanpa Kategori");
+		expect(quickAddBarSrc).toContain("+ Tambah tugas…");
+	});
+
+	test("App.tsx accommodates 2-row command-center height", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const appSrc = fs.readFileSync(path.resolve(__dirname, "../src/App.tsx"), "utf8");
+
+		expect(appSrc).toContain('if (bloomMode === "command-center") return isOpen ? 276 : 36;');
+	});
+
+	test("App.tsx and App.css hide visual chevron arrows beside clock while keeping wheel navigation", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const appSrc = fs.readFileSync(path.resolve(__dirname, "../src/App.tsx"), "utf8");
+		const css = fs.readFileSync(path.resolve(__dirname, "../src/App.css"), "utf8");
+
+		expect(appSrc).toContain("const showPanelArrows = false;");
+		expect(appSrc).toContain("handleWheel");
+		expect(appSrc).toContain("cycleBloomMode");
+		expect(css).toMatch(/\.panel-arrow\s*\{[^}]*display:\s*none\s*!important/);
+	});
+
+	test("CATEGORIES defines vibrant luminous accent colors (purple, cyan, mint, coral, amber)", async () => {
+		const { CATEGORIES } = await import("../src/hime/tasks/types");
+		const colors = CATEGORIES.map((c) => c.color.toUpperCase());
+		expect(colors).toContain("#8B5CF6"); // Luminous Purple
+		expect(colors).toContain("#06B6D4"); // Luminous Cyan
+		expect(colors).toContain("#10B981"); // Luminous Mint
+		expect(colors).toContain("#F43F5E"); // Luminous Coral
+		expect(colors).toContain("#F59E0B"); // Luminous Amber
+	});
+
+	test("TaskCard and HimeTasksPanel include colorful luminous badge and segmented tab styles", async () => {
+		const fs = await import("fs");
+		const path = await import("path");
+		const cardSrc = fs.readFileSync(path.resolve(__dirname, "../src/hime/tasks/TaskCard.tsx"), "utf8");
+		const panelSrc = fs.readFileSync(path.resolve(__dirname, "../src/hime/tasks/HimeTasksPanel.tsx"), "utf8");
+
+		expect(cardSrc).toContain("category.color");
+		expect(cardSrc).toContain("boxShadow");
+		expect(cardSrc).toContain("borderRadius: 9999");
+		expect(panelSrc).toContain("linear-gradient");
+		expect(panelSrc).toContain("hari ini");
+	});
 });

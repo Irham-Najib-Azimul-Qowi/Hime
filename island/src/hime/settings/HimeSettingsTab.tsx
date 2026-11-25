@@ -42,7 +42,10 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 	const isOnline = status.is_online;
 
 	const [himeEnabled, setHimeEnabled] = useState<boolean>(() => {
-		return localStorage.getItem("hime-enabled") !== "false";
+		return (
+			localStorage.getItem("hime-enabled") !== "false" &&
+			localStorage.getItem("bloom-assistant-enabled") !== "false"
+		);
 	});
 	const [pingResult, setPingResult] = useState<string | null>(null);
 	const [pinging, setPinging] = useState(false);
@@ -56,7 +59,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 		return localStorage.getItem("hime-9router-key") || "";
 	});
 	const [selectedModel, setSelectedModel] = useState<string>(() => {
-		return localStorage.getItem("hime-9router-model") || "anthropic/claude-3-5-sonnet";
+		return localStorage.getItem("hime-9router-model") || "openrouter/deepseek/deepseek-chat";
 	});
 	const [customModel, setCustomModel] = useState<string>(() => {
 		return localStorage.getItem("hime-9router-custom-model") || "";
@@ -197,6 +200,20 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 		const next = !himeEnabled;
 		setHimeEnabled(next);
 		localStorage.setItem("hime-enabled", next ? "true" : "false");
+		localStorage.setItem("bloom-assistant-enabled", next ? "true" : "false");
+		invoke("save_setting", {
+			key: "bloom-assistant-enabled",
+			value: next ? "true" : "false"
+		}).catch(console.error);
+		invoke("save_setting", {
+			key: "hime-enabled",
+			value: next ? "true" : "false"
+		}).catch(console.error);
+		window.dispatchEvent(
+			new CustomEvent("settings-changed", {
+				detail: { key: "bloom-assistant-enabled", value: next ? "true" : "false" }
+			})
+		);
 	};
 
 	const handleNotchModeChange = (mode: string) => {
@@ -312,10 +329,10 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					label="Status Core"
 					desc={
 						isOnline
-							? `Core v${status.core_version ?? "0.1.0"} (${status.last_ping_ms ?? 0} ms)`
+							? `Core v${status.core_version ?? "1.0.0"} (${status.last_ping_ms ?? 0} ms)`
 							: "Core offline, IPC terputus"
 					}
-					divider={false}
+					divider
 				>
 					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
 						<span
@@ -331,24 +348,36 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							type="button"
 							disabled={pinging}
 							onClick={handlePing}
-							style={{
-								display: "flex",
-								alignItems: "center",
-								gap: "4px",
-								background: "rgba(255, 255, 255, 0.08)",
-								border: "1px solid rgba(255, 255, 255, 0.12)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#e5e5e5",
-								fontSize: "11px",
-								cursor: pinging ? "not-allowed" : "pointer"
-							}}
+							className="settings-btn"
 							title="Uji latency IPC Win32 Named Pipe"
 						>
 							<RefreshCw size={11} className={pinging ? "animate-spin" : ""} />
 							<span>{pinging ? "Menguji..." : pingResult ? "Online" : "Uji Ping"}</span>
 						</button>
 					</div>
+				</SettingRow>
+
+				<SettingRow
+					icon={ShieldCheck}
+					label="Hak Akses SuperAdmin"
+					desc="Izin eksekusi penuh sistem (Root / Laptop SuperAdmin)"
+					divider={false}
+				>
+					<span
+						className="settings-pill settings-pill--success"
+						style={{
+							backgroundColor: "rgba(16, 185, 129, 0.15)",
+							color: "#10b981",
+							borderColor: "rgba(16, 185, 129, 0.3)",
+							fontWeight: 600,
+							display: "inline-flex",
+							alignItems: "center",
+							gap: "4px"
+						}}
+					>
+						<ShieldCheck size={12} />
+						<span>SuperAdmin Aktif</span>
+					</span>
 				</SettingRow>
 			</div>
 
@@ -368,19 +397,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							e.stopPropagation();
 							handleOpen9Router();
 						}}
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: "6px",
-							background: "#0284c7",
-							border: "none",
-							borderRadius: "6px",
-							padding: "5px 12px",
-							color: "#ffffff",
-							fontSize: "11px",
-							fontWeight: 600,
-							cursor: "pointer"
-						}}
+						className="settings-btn settings-btn--primary"
 					>
 						<ExternalLink size={12} />
 						<span>Buka UI</span>
@@ -397,24 +414,15 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						value={routerUrl}
 						onChange={(e) => setRouterUrl(e.target.value)}
 						placeholder="http://127.0.0.1:20128/v1"
-						style={{
-							background: "var(--bloom-group-bg, rgba(255, 255, 255, 0.08))",
-							border: "1px solid var(--bloom-border, rgba(255, 255, 255, 0.12))",
-							borderRadius: "6px",
-							padding: "4px 8px",
-							color: "var(--bloom-text, #ffffff)",
-							fontSize: "11px",
-							fontFamily: "monospace",
-							width: "190px",
-							outline: "none"
-						}}
+						className="settings-input"
+						style={{ width: "190px", fontFamily: "monospace" }}
 					/>
 				</SettingRow>
 
 				<SettingRow
 					icon={Key}
 					label="Token 9Router"
-					desc="Kunci autentikasi 9Router"
+					desc="Kunci otorisasi 9Router"
 				>
 					<div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
 						<input
@@ -422,30 +430,13 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							value={routerKey}
 							onChange={(e) => setRouterKey(e.target.value)}
 							placeholder="Opsional / Token..."
-							style={{
-								background: "var(--bloom-group-bg, rgba(255, 255, 255, 0.08))",
-								border: "1px solid var(--bloom-border, rgba(255, 255, 255, 0.12))",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "var(--bloom-text, #ffffff)",
-								fontSize: "11px",
-								fontFamily: "monospace",
-								width: "140px",
-								outline: "none"
-							}}
+							className="settings-input"
+							style={{ width: "140px", fontFamily: "monospace" }}
 						/>
 						<button
 							type="button"
 							onClick={() => setShowKey(!showKey)}
-							style={{
-								background: "none",
-								border: "none",
-								color: "#a3a3a3",
-								cursor: "pointer",
-								padding: "4px",
-								display: "flex",
-								alignItems: "center"
-							}}
+							className="settings-btn-icon"
 							title={showKey ? "Sembunyikan Token" : "Tampilkan Token"}
 						>
 							{showKey ? <EyeOff size={13} /> : <Eye size={13} />}
@@ -464,6 +455,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							value={selectedModel}
 							onChange={(e) => setSelectedModel(e.target.value)}
 						>
+							<option value="openrouter/deepseek/deepseek-chat">DeepSeek Chat (OpenRouter)</option>
 							<option value="anthropic/claude-3-5-sonnet">Claude 3.5</option>
 							<option value="openai/gpt-4o">GPT-4o</option>
 							<option value="google/gemini-1.5-pro">Gemini 1.5 Pro</option>
@@ -477,16 +469,8 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 								value={customModel}
 								onChange={(e) => setCustomModel(e.target.value)}
 								placeholder="provider/model-id"
-								style={{
-									background: "var(--bloom-group-bg, rgba(255, 255, 255, 0.08))",
-									border: "1px solid var(--bloom-border, rgba(255, 255, 255, 0.12))",
-									borderRadius: "6px",
-									padding: "4px 8px",
-									color: "var(--bloom-text, #ffffff)",
-									fontSize: "11px",
-									width: "120px",
-									outline: "none"
-								}}
+								className="settings-input"
+								style={{ width: "120px" }}
 							/>
 						)}
 					</div>
@@ -507,18 +491,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							type="button"
 							disabled={testingRouter}
 							onClick={handleTestRouterConnection}
-							style={{
-								display: "flex",
-								alignItems: "center",
-								gap: "4px",
-								background: "rgba(56, 189, 248, 0.12)",
-								border: "1px solid rgba(56, 189, 248, 0.25)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#38bdf8",
-								fontSize: "11px",
-								cursor: testingRouter ? "not-allowed" : "pointer"
-							}}
+							className="settings-btn settings-btn--accent"
 						>
 							<Activity size={11} className={testingRouter ? "animate-spin" : ""} />
 							<span>{testingRouter ? "Menguji..." : "Uji Coba"}</span>
@@ -527,19 +500,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						<button
 							type="button"
 							onClick={handleSaveRouterConfig}
-							style={{
-								display: "flex",
-								alignItems: "center",
-								gap: "4px",
-								background: "#10b981",
-								border: "none",
-								borderRadius: "6px",
-								padding: "4px 10px",
-								color: "#ffffff",
-								fontSize: "11px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className="settings-btn settings-btn--success"
 						>
 							<Check size={11} />
 							<span>Simpan</span>
@@ -554,7 +515,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 				<SettingRow
 					icon={PanelTop}
 					label="Perilaku Layar"
-					desc="Otomatis tipis saat layar penuh"
+					desc="Otomatis tipis saat fullscreen"
 					divider={false}
 				>
 					<select
@@ -562,9 +523,9 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						value={currentNotchMode}
 						onChange={(e) => handleNotchModeChange(e.target.value)}
 					>
-						<option value="smart">Smart (Otomatis tipis fullscreen)</option>
+						<option value="smart">Smart (Auto-tipis fullscreen)</option>
 						<option value="fixed">Fixed (Selalu tampil di atas)</option>
-						<option value="peek">Peek (Hanya saat disentuh kursor)</option>
+						<option value="peek">Peek (Hanya saat disentuh)</option>
 					</select>
 				</SettingRow>
 			</div>
@@ -613,15 +574,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							e.stopPropagation();
 							handleResetBackoff();
 						}}
-						style={{
-							background: "rgba(255, 255, 255, 0.08)",
-							border: "1px solid rgba(255, 255, 255, 0.15)",
-							borderRadius: "6px",
-							padding: "4px 10px",
-							color: "#e2e8f0",
-							fontSize: "11px",
-							cursor: "pointer"
-						}}
+						className="settings-btn"
 					>
 						{"Reset".slice(0, 10)}
 					</button>
@@ -645,19 +598,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							e.stopPropagation();
 							setShowQrModal(!showQrModal);
 						}}
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: "4px",
-							background: showQrModal ? "#8b5cf6" : "rgba(139, 92, 246, 0.15)",
-							border: "1px solid rgba(139, 92, 246, 0.35)",
-							borderRadius: "6px",
-							padding: "4px 10px",
-							color: showQrModal ? "#ffffff" : "#c4b5fd",
-							fontSize: "11px",
-							fontWeight: 600,
-							cursor: "pointer"
-						}}
+						className={`settings-btn ${showQrModal ? "settings-btn--primary" : "settings-btn--accent"}`}
 					>
 						<QrCode size={12} />
 						<span>{showQrModal ? "Tutup QR" : "Kode QR"}</span>
@@ -665,40 +606,17 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 				</SettingRow>
 
 				{showQrModal && (
-					<div
-						style={{
-							padding: "14px 16px",
-							background: "rgba(15, 23, 42, 0.6)",
-							borderTop: "1px solid rgba(255, 255, 255, 0.08)",
-							display: "flex",
-							flexDirection: "column",
-							alignItems: "center",
-							gap: "10px"
-						}}
-					>
-						<div style={{ fontSize: "12px", color: "#e2e8f0", fontWeight: 600 }}>
+					<div className="qr-pairing-card">
+						<div className="qr-pairing-title">
 							Pindai QR dengan Hime Mobile
 						</div>
-						<div
-							style={{
-								width: "140px",
-								height: "140px",
-								background: "#ffffff",
-								padding: "8px",
-								borderRadius: "10px",
-								display: "flex",
-								flexDirection: "column",
-								alignItems: "center",
-								justifyContent: "center",
-								boxShadow: "0 4px 16px rgba(0, 0, 0, 0.4)"
-							}}
-						>
-							<QrCode size={120} color="#0f172a" strokeWidth={2} />
+						<div className="qr-pairing-box">
+							<QrCode size={110} color="#0f172a" strokeWidth={2} />
 						</div>
 
 						<div style={{ textAlign: "center" }}>
 							<div style={{ fontSize: "10px", color: "#94a3b8" }}>Kode Verifikasi Manual:</div>
-							<div style={{ fontSize: "15px", fontFamily: "monospace", fontWeight: 700, color: "#38bdf8", letterSpacing: "2px" }}>
+							<div style={{ fontSize: "15px", fontFamily: "monospace", fontWeight: 700, color: "#38bdf8", letterSpacing: "2px", marginTop: "2px" }}>
 								{pairingPin}
 							</div>
 							<div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
@@ -713,18 +631,9 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 									setIsPhonePaired(!isPhonePaired);
 									localStorage.setItem("hime-mobile-paired", !isPhonePaired ? "true" : "false");
 								}}
-								style={{
-									background: isPhonePaired ? "rgba(239, 68, 68, 0.15)" : "rgba(16, 185, 129, 0.15)",
-									border: isPhonePaired ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(16, 185, 129, 0.3)",
-									color: isPhonePaired ? "#f87171" : "#34d399",
-									borderRadius: "6px",
-									padding: "4px 10px",
-									fontSize: "10px",
-									fontWeight: 600,
-									cursor: "pointer"
-								}}
+								className={`settings-btn ${isPhonePaired ? "settings-btn--danger" : "settings-btn--success"}`}
 							>
-								{isPhonePaired ? "Putuskan" : "Simulasi Pasang"}
+								{isPhonePaired ? "Putuskan" : "Pasang"}
 							</button>
 						</div>
 					</div>
@@ -755,16 +664,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					desc="Sinkron repositori & isu"
 				>
 					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-						<span
-							style={{
-								padding: "2px 6px",
-								borderRadius: "4px",
-								fontSize: "10px",
-								background: githubConnected ? "rgba(16, 185, 129, 0.15)" : "rgba(156, 163, 175, 0.15)",
-								color: githubConnected ? "#34d399" : "#9ca3af",
-								border: githubConnected ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(156, 163, 175, 0.3)"
-							}}
-						>
+						<span className={`settings-pill ${githubConnected ? "settings-pill--success" : "settings-pill--muted"}`}>
 							{githubConnected ? "repo, read:user" : "Terputus"}
 						</span>
 						<button
@@ -774,16 +674,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 								setGithubConnected(next);
 								localStorage.setItem("hime-github-connected", next ? "true" : "false");
 							}}
-							style={{
-								background: githubConnected ? "rgba(239, 68, 68, 0.15)" : "rgba(139, 92, 246, 0.15)",
-								border: githubConnected ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(139, 92, 246, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 10px",
-								color: githubConnected ? "#f87171" : "#c084fc",
-								fontSize: "11px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className={`settings-btn ${githubConnected ? "settings-btn--danger" : "settings-btn--accent"}`}
 						>
 							{githubConnected ? "Putus" : "Sambung"}
 						</button>
@@ -796,16 +687,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					desc="Akses berkas & dokumen cloud"
 				>
 					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-						<span
-							style={{
-								padding: "2px 6px",
-								borderRadius: "4px",
-								fontSize: "10px",
-								background: gdriveConnected ? "rgba(16, 185, 129, 0.15)" : "rgba(156, 163, 175, 0.15)",
-								color: gdriveConnected ? "#34d399" : "#9ca3af",
-								border: gdriveConnected ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(156, 163, 175, 0.3)"
-							}}
-						>
+						<span className={`settings-pill ${gdriveConnected ? "settings-pill--success" : "settings-pill--muted"}`}>
 							{gdriveConnected ? "drive.file" : "Terputus"}
 						</span>
 						<button
@@ -815,16 +697,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 								setGdriveConnected(next);
 								localStorage.setItem("hime-gdrive-connected", next ? "true" : "false");
 							}}
-							style={{
-								background: gdriveConnected ? "rgba(239, 68, 68, 0.15)" : "rgba(56, 189, 248, 0.15)",
-								border: gdriveConnected ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(56, 189, 248, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 10px",
-								color: gdriveConnected ? "#f87171" : "#38bdf8",
-								fontSize: "11px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className={`settings-btn ${gdriveConnected ? "settings-btn--danger" : "settings-btn--accent"}`}
 						>
 							{gdriveConnected ? "Putus" : "Sambung"}
 						</button>
@@ -836,17 +709,8 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					label="Izin Cloud"
 					desc="Aksi cloud selalu minta izin"
 				>
-					<span
-						style={{
-							fontSize: "11px",
-							color: "#10b981",
-							fontWeight: 600,
-							display: "flex",
-							alignItems: "center",
-							gap: "4px"
-						}}
-					>
-						<Check size={12} />
+					<span className="settings-pill settings-pill--success">
+						<Check size={11} />
 						{"Wajib Izin"}
 					</span>
 				</SettingRow>
@@ -857,13 +721,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 					desc="Pantau RAM & Mode Hemat"
 					divider={false}
 				>
-					<span
-						style={{
-							fontSize: "11px",
-							color: "#38bdf8",
-							fontWeight: 600
-						}}
-					>
+					<span className="settings-pill settings-pill--info">
 						{"Target ≤250MB"}
 					</span>
 				</SettingRow>
@@ -881,16 +739,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						<button
 							type="button"
 							onClick={() => handleSimulateProactive("bisik")}
-							style={{
-								background: "rgba(168, 85, 247, 0.15)",
-								border: "1px solid rgba(168, 85, 247, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#c084fc",
-								fontSize: "10px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className="settings-btn settings-btn--purple"
 							title="Bisik: Titik di pill + mata penasaran"
 						>
 							Bisik
@@ -898,16 +747,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						<button
 							type="button"
 							onClick={() => handleSimulateProactive("colek")}
-							style={{
-								background: "rgba(245, 158, 11, 0.15)",
-								border: "1px solid rgba(245, 158, 11, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#fbbf24",
-								fontSize: "10px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className="settings-btn settings-btn--amber"
 							title="Colek: Rekap malam (auto-hilang)"
 						>
 							Colek
@@ -915,16 +755,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						<button
 							type="button"
 							onClick={() => handleSimulateProactive("tanya")}
-							style={{
-								background: "rgba(56, 189, 248, 0.15)",
-								border: "1px solid rgba(56, 189, 248, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#38bdf8",
-								fontSize: "10px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className="settings-btn settings-btn--accent"
 							title="Tanya: File ganda (<= 3 opsi + Ingat)"
 						>
 							Tanya
@@ -932,16 +763,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 						<button
 							type="button"
 							onClick={() => handleSimulateProactive("penting")}
-							style={{
-								background: "rgba(239, 68, 68, 0.15)",
-								border: "1px solid rgba(239, 68, 68, 0.3)",
-								borderRadius: "6px",
-								padding: "4px 8px",
-								color: "#f87171",
-								fontSize: "10px",
-								fontWeight: 600,
-								cursor: "pointer"
-							}}
+							className="settings-btn settings-btn--danger"
 							title="Penting: Ringkasan pagi + ekspansi + suara"
 						>
 							Penting
@@ -964,16 +786,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 							e.stopPropagation();
 							handleTestApproval();
 						}}
-						style={{
-							background: "rgba(245, 158, 11, 0.15)",
-							border: "1px solid rgba(245, 158, 11, 0.3)",
-							borderRadius: "6px",
-							padding: "4px 10px",
-							color: "#fbbf24",
-							fontSize: "11px",
-							fontWeight: 600,
-							cursor: triggering ? "not-allowed" : "pointer"
-						}}
+						className="settings-btn settings-btn--amber"
 					>
 						{triggering ? "Kirim..." : "Tes Izin"}
 					</button>

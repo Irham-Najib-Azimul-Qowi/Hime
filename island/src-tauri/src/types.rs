@@ -24,6 +24,7 @@ pub struct AudioVisualizationData {
 pub struct MediaInfo {
     pub title: String,
     pub artist: String,
+    pub album: String,
     pub is_playing: bool,
     pub has_media: bool,
     pub artwork: Option<Vec<String>>,
@@ -64,6 +65,8 @@ pub struct AppInfo {
     pub hwnd: Option<isize>,
     pub executable: Option<String>,
     pub all_hwnds: Option<Vec<(isize, String)>>, // (hwnd, title)
+    #[serde(default)]
+    pub window_title: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -83,6 +86,12 @@ pub struct WifiStatus {
     pub connected: bool,
     /// The connected network's name, for the controls tile.
     pub ssid: Option<String>,
+    #[serde(default)]
+    pub is_ethernet: bool,
+    #[serde(default)]
+    pub ethernet_name: Option<String>,
+    #[serde(default)]
+    pub has_internet: bool,
 }
 
 #[derive(Clone, Serialize)]

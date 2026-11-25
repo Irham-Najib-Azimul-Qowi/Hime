@@ -62,6 +62,7 @@ static TASKBAR_OWNER_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 static TASKBAR_OWNER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 static TASKBAR_MARKER: OnceLock<PathBuf> = OnceLock::new();
+static NATIVE_NOTIF_MARKER: OnceLock<PathBuf> = OnceLock::new();
 static TASKBAR_WATCHDOG_STARTED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 /// Point the crash-recovery marker at this user's app config dir (called from setup).
@@ -69,6 +70,83 @@ pub fn init_taskbar_marker(app: &tauri::AppHandle) {
     if let Ok(dir) = app.path().app_config_dir() {
         let _ = TASKBAR_MARKER.set(dir.join("taskbar_hidden.flag"));
     }
+}
+
+/// Point the native-notification suppression marker at this user's app config dir.
+pub fn init_native_notif_marker(app: &tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_config_dir() {
+        let _ = NATIVE_NOTIF_MARKER.set(dir.join("native_notif_suppressed.flag"));
+    }
+}
+
+/// True if a previous Hime session left native notification/calendar popups suppressed.
+pub fn native_notif_marker_exists() -> bool {
+    NATIVE_NOTIF_MARKER.get().is_some_and(|p| p.exists())
+}
+
+pub(crate) fn format_native_notif_marker(pid: u32, hwnds: &[isize]) -> String {
+    let mut contents = format!("pid={pid}\n");
+    let mut sorted = hwnds.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for hwnd in sorted {
+        if hwnd != 0 {
+            contents.push_str(&format!("hwnd={hwnd}\n"));
+        }
+    }
+    contents
+}
+
+pub(crate) fn parse_native_notif_marker_hwnds(contents: &str) -> Vec<isize> {
+    let mut hwnds = Vec::new();
+    for line in contents.lines() {
+        if let Some(raw) = line.trim().strip_prefix("hwnd=") {
+            if let Ok(hwnd) = raw.trim().parse::<isize>() {
+                if hwnd != 0 && !hwnds.contains(&hwnd) {
+                    hwnds.push(hwnd);
+                }
+            }
+        }
+    }
+    hwnds
+}
+
+pub fn write_native_notif_marker(hwnds: &[isize]) {
+    let Some(path) = NATIVE_NOTIF_MARKER.get() else {
+        return;
+    };
+    if hwnds.is_empty() {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let contents = format_native_notif_marker(std::process::id(), hwnds);
+    let _ = std::fs::write(path, contents);
+}
+
+pub fn read_native_notif_marker_hwnds() -> Vec<isize> {
+    NATIVE_NOTIF_MARKER
+        .get()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| parse_native_notif_marker_hwnds(&s))
+        .unwrap_or_default()
+}
+
+pub fn remove_native_notif_marker() {
+    if let Some(path) = NATIVE_NOTIF_MARKER.get() {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Restores any ShellExperienceHost/Explorer notification or calendar windows
+/// left visually suppressed by a crashed Hime session, then removes the marker.
+pub fn restore_native_notifications_after_crash() {
+    let hwnds = read_native_notif_marker_hwnds();
+    crate::services::restore_native_notifications_with_hwnds(&hwnds);
+    remove_native_notif_marker();
 }
 
 /// A separate Bloom process restores Explorer's taskbar when this process is
@@ -280,15 +358,82 @@ pub fn secondary_taskbar_windows() -> Vec<windows::Win32::Foundation::HWND> {
     windows
 }
 
-pub fn any_native_taskbar_visible() -> bool {
+pub(crate) fn is_taskbar_window_exposed(
+    is_visible: bool,
+    rect: Option<&windows::Win32::Foundation::RECT>,
+) -> bool {
+    is_visible || rect.is_some_and(is_placed_rect)
+}
+
+/// True when any primary or secondary native taskbar is visible OR placed back
+/// on-screen (catching Explorer auto-hide/Z-order leaks before `ShowWindow`).
+pub fn any_native_taskbar_exposed() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, IsWindowVisible};
     unsafe {
         let primary = windows::core::PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
-        FindWindowA(primary, windows::core::PCSTR::null())
-            .is_ok_and(|hwnd| IsWindowVisible(hwnd).as_bool())
-            || secondary_taskbar_windows()
-                .into_iter()
-                .any(|hwnd| IsWindowVisible(hwnd).as_bool())
+        let primary_exposed = FindWindowA(primary, windows::core::PCSTR::null()).is_ok_and(|hwnd| {
+            let visible = IsWindowVisible(hwnd).as_bool();
+            let rect = placed_taskbar_rect(hwnd);
+            is_taskbar_window_exposed(visible, rect.as_ref())
+        });
+        primary_exposed
+            || secondary_taskbar_windows().into_iter().any(|hwnd| {
+                let visible = IsWindowVisible(hwnd).as_bool();
+                let rect = placed_taskbar_rect(hwnd);
+                is_taskbar_window_exposed(visible, rect.as_ref())
+            })
+    }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let alive =
+            GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
+        let _ = CloseHandle(handle);
+        alive
+    }
+}
+
+pub(crate) fn marker_owned_by_live_other_process(
+    contents: Option<&str>,
+    current_pid: u32,
+    is_pid_alive: impl Fn(u32) -> bool,
+) -> bool {
+    let Some(contents) = contents else {
+        return false;
+    };
+    let Some(pid) = parse_marker_pid(contents) else {
+        return false;
+    };
+    pid != current_pid && is_pid_alive(pid)
+}
+
+unsafe fn restore_taskbar_exstyle(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongA, SetLayeredWindowAttributes, SetWindowLongA, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    let ex = GetWindowLongA(hwnd, GWL_EXSTYLE);
+    let cleaned = ex & !(WS_EX_LAYERED.0 as i32) & !(WS_EX_TRANSPARENT.0 as i32);
+    if cleaned != ex {
+        let _ = SetLayeredWindowAttributes(
+            hwnd,
+            windows::Win32::Foundation::COLORREF(0),
+            255,
+            LWA_ALPHA,
+        );
+        let _ = SetWindowLongA(hwnd, GWL_EXSTYLE, cleaned);
     }
 }
 
@@ -333,7 +478,7 @@ pub fn refresh_taskbar_owner() -> bool {
 /// after Explorer restarts, a new taskbar can still report an empty rectangle;
 /// saving that would restore the taskbar to the screen's corner later, so it
 /// is left unsaved and restoring asks Explorer for the position instead.
-fn placed_taskbar_rect(
+pub fn placed_taskbar_rect(
     hwnd: windows::Win32::Foundation::HWND,
 ) -> Option<windows::Win32::Foundation::RECT> {
     let mut rect = windows::Win32::Foundation::RECT::default();
@@ -350,7 +495,7 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
     // dock has been disabled or while its tray is in use.
     if !visible
         && (!dock_enabled()
-            || crate::state::TRAY_INTERACTION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed))
+            || crate::state::TRAY_INTERACTION_ACTIVE.load(std::sync::atomic::Ordering::Acquire))
     {
         return false;
     }
@@ -434,6 +579,45 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
             let Some(p) = TASKBAR_MARKER.get() else {
                 return false;
             };
+            let existing = std::fs::read_to_string(p).ok();
+            // Never take over a marker that another live Bloom process owns;
+            // reclaim stale markers left by dead PIDs after importing any saved original state.
+            if (existing.is_some() || p.exists())
+                && marker_owned_by_live_other_process(
+                    existing.as_deref(),
+                    std::process::id(),
+                    is_process_alive,
+                )
+            {
+                return false;
+            }
+            if let Some(ref stale) = existing {
+                if let Some(state) = parse_marker_state(stale) {
+                    let _ = ORIGINAL_TASKBAR_STATE.compare_exchange(
+                        -1,
+                        state,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                if let Some(rect) = parse_marker_rect(stale, "primary=").filter(is_placed_rect) {
+                    if let Ok(mut guard) = ORIGINAL_TRAY_RECT.lock() {
+                        if guard.is_none() {
+                            *guard = Some(rect);
+                        }
+                    }
+                }
+                let mut secondaries = parse_marker_secondaries(stale);
+                secondaries.retain(|_, rect| is_placed_rect(rect));
+                if !secondaries.is_empty() {
+                    if let Ok(mut guard) = ORIGINAL_SEC_TRAY_RECTS.lock() {
+                        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+                        for (k, v) in secondaries {
+                            map.entry(k).or_insert(v);
+                        }
+                    }
+                }
+            }
             let original = ORIGINAL_TASKBAR_STATE.load(std::sync::atomic::Ordering::Relaxed);
             let primary = ORIGINAL_TRAY_RECT.lock().ok().and_then(|guard| *guard);
             let secondaries = ORIGINAL_SEC_TRAY_RECTS
@@ -442,13 +626,6 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
                 .and_then(|guard| guard.clone())
                 .unwrap_or_default();
             let contents = marker_contents(original, std::process::id(), primary, &secondaries);
-            let existing = std::fs::read_to_string(p).ok();
-            // Never take over a marker that another Bloom process owns.
-            if (existing.is_some() || p.exists())
-                && existing.as_deref().and_then(parse_marker_pid) != Some(std::process::id())
-            {
-                return false;
-            }
             // Rewritten when a monitor added since the last hide brings another
             // taskbar, so the watchdog can restore it as well.
             if existing.as_deref() != Some(contents.as_str()) {
@@ -478,37 +655,39 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
             1 // Force Auto-hide when hiding
         };
 
-        // 1. Set the taskbar state (Auto-hide or Always-on-top)
-        let mut abd = APPBARDATA {
+        // 1. Set the taskbar state only when it actually differs (avoids poking
+        //    Windows 11's auto-hide state machine into asynchronously re-showing).
+        let mut get_state_abd = APPBARDATA {
             cbSize: std::mem::size_of::<APPBARDATA>() as u32,
             hWnd: tray_hwnd,
-            lParam: windows::Win32::Foundation::LPARAM(state_val),
             ..Default::default()
         };
-        SHAppBarMessage(ABM_SETSTATE, &mut abd);
+        let current_state = SHAppBarMessage(ABM_GETSTATE, &mut get_state_abd) as isize;
+        let should_set_state = if visible {
+            current_state != state_val
+        } else {
+            (current_state & 1) == 0
+        };
+        if should_set_state {
+            let mut abd = APPBARDATA {
+                cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                hWnd: tray_hwnd,
+                lParam: windows::Win32::Foundation::LPARAM(state_val),
+                ..Default::default()
+            };
+            SHAppBarMessage(ABM_SETSTATE, &mut abd);
+        }
 
         // 2. Control visibility of the primary taskbar
         let mut primary_positioned = true;
         {
             use windows::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongA, SetLayeredWindowAttributes, SetWindowLongA, SetWindowPos,
-                GWL_EXSTYLE, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED,
-                WS_EX_TRANSPARENT,
+                SetWindowPos, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
             };
             if visible {
                 // Revert any lingering WS_EX_LAYERED / WS_EX_TRANSPARENT left by
                 // open_system_tray if the user quit before the tray thread cleaned up.
-                let ex = GetWindowLongA(tray_hwnd, GWL_EXSTYLE);
-                let cleaned = ex & !(WS_EX_LAYERED.0 as i32) & !(WS_EX_TRANSPARENT.0 as i32);
-                if cleaned != ex {
-                    let _ = SetWindowLongA(tray_hwnd, GWL_EXSTYLE, cleaned);
-                    let _ = SetLayeredWindowAttributes(
-                        tray_hwnd,
-                        windows::Win32::Foundation::COLORREF(0),
-                        255,
-                        LWA_ALPHA,
-                    );
-                }
+                restore_taskbar_exstyle(tray_hwnd);
                 if let Ok(guard) = ORIGINAL_TRAY_RECT.lock() {
                     if let Some(rect) = *guard {
                         primary_positioned = SetWindowPos(
@@ -531,7 +710,7 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
                     }
                 }
                 let _ = ShowWindow(tray_hwnd, SW_HIDE);
-                // Move it far off-screen to prevent any "thin line" artifacts or flashes
+                // Atomically hide and move off-screen to prevent artifacts or flashes
                 let _ = SetWindowPos(
                     tray_hwnd,
                     None,
@@ -539,7 +718,7 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
                     -10000,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_HIDEWINDOW | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
         }
@@ -548,9 +727,10 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
         let mut secondary_positioned = true;
         for &secondary_tray_hwnd in &secondary_trays {
             use windows::Win32::UI::WindowsAndMessaging::{
-                SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+                SetWindowPos, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
             };
             if visible {
+                restore_taskbar_exstyle(secondary_tray_hwnd);
                 let saved = ORIGINAL_SEC_TRAY_RECTS.lock().ok().and_then(|guard| {
                     guard
                         .as_ref()
@@ -578,7 +758,7 @@ pub fn set_taskbar_visibility(visible: bool, always_on_top: bool) -> bool {
                     -10000,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_HIDEWINDOW | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
         }
@@ -1167,7 +1347,7 @@ pub fn atomic_write_file(path: &std::path::Path, content: &[u8]) -> Result<(), S
         "{}.tmp-{}-{}",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("bloom"),
+            .unwrap_or("hime"),
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
@@ -1269,7 +1449,16 @@ pub fn get_setting_str(_app: &tauri::AppHandle, key: &str) -> Option<String> {
 }
 
 fn dock_setting_enabled(value: Option<&serde_json::Value>) -> bool {
-    value.is_none_or(|value| value.as_str() == Some("true"))
+    value.is_none_or(|val| {
+        val.as_bool().unwrap_or_else(|| val.as_str() == Some("true"))
+    })
+}
+
+pub(crate) fn setting_bool_default_true(value: Option<&serde_json::Value>) -> bool {
+    value.is_none_or(|val| {
+        val.as_bool()
+            .unwrap_or_else(|| val.as_str() != Some("false"))
+    })
 }
 
 /// An absent setting uses the fresh-install default; any explicit value other
@@ -1280,6 +1469,19 @@ pub fn dock_enabled() -> bool {
             .lock()
             .map(|settings| dock_setting_enabled(settings.get("bloom-dock-enabled")))
             .unwrap_or(false)
+    })
+}
+
+/// Suppressing native Windows toast banners & calendar/notification center flyouts
+/// defaults to `true` when omitted, and turns off only when explicitly `"false"`.
+pub fn suppress_native_notifications_enabled() -> bool {
+    crate::state::SETTINGS_CACHE.get().is_none_or(|cache| {
+        cache
+            .lock()
+            .map(|settings| {
+                setting_bool_default_true(settings.get("bloom-suppress-native-notifications"))
+            })
+            .unwrap_or(true)
     })
 }
 
@@ -1843,8 +2045,85 @@ mod tests {
 
         assert!(dock_setting_enabled(None));
         assert!(dock_setting_enabled(Some(&serde_json::json!("true"))));
+        assert!(dock_setting_enabled(Some(&serde_json::json!(true))));
         assert!(!dock_setting_enabled(Some(&serde_json::json!("false"))));
+        assert!(!dock_setting_enabled(Some(&serde_json::json!(false))));
         assert!(!dock_setting_enabled(Some(&serde_json::json!("invalid"))));
-        assert!(!dock_setting_enabled(Some(&serde_json::json!(true))));
+        assert!(!dock_setting_enabled(Some(&serde_json::json!(123))));
+    }
+
+    #[test]
+    fn stale_marker_owned_by_dead_pid_is_reclaimable() {
+        use super::marker_owned_by_live_other_process;
+
+        let marker = "abstate=2\npid=4242\nprimary=0,1032,1920,1080\n";
+        // Owned by dead PID -> reclaimable (not owned by live other process)
+        assert!(!marker_owned_by_live_other_process(
+            Some(marker),
+            9999,
+            |_| false
+        ));
+        // Owned by live other PID -> protected
+        assert!(marker_owned_by_live_other_process(
+            Some(marker),
+            9999,
+            |pid| pid == 4242
+        ));
+        // Owned by self -> reclaimable/updatable
+        assert!(!marker_owned_by_live_other_process(
+            Some(marker),
+            4242,
+            |_| true
+        ));
+        // Corrupt / legacy marker without PID -> reclaimable
+        assert!(!marker_owned_by_live_other_process(
+            Some("1"),
+            9999,
+            |_| true
+        ));
+    }
+
+    #[test]
+    fn taskbar_exposed_detects_visible_or_onscreen_rect() {
+        use super::is_taskbar_window_exposed;
+        let onscreen = windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 1032,
+            right: 1920,
+            bottom: 1080,
+        };
+        let offscreen = windows::Win32::Foundation::RECT {
+            left: -10000,
+            top: -10000,
+            right: -8080,
+            bottom: -9952,
+        };
+        assert!(is_taskbar_window_exposed(true, None));
+        assert!(is_taskbar_window_exposed(false, Some(&onscreen)));
+        assert!(!is_taskbar_window_exposed(false, Some(&offscreen)));
+        assert!(!is_taskbar_window_exposed(false, None));
+    }
+
+    #[test]
+    fn suppress_native_notifications_defaults_true_and_honors_explicit_false() {
+        use super::setting_bool_default_true;
+        assert!(setting_bool_default_true(None));
+        assert!(setting_bool_default_true(Some(&serde_json::json!("true"))));
+        assert!(setting_bool_default_true(Some(&serde_json::json!(true))));
+        assert!(setting_bool_default_true(Some(&serde_json::json!(null))));
+        assert!(!setting_bool_default_true(Some(&serde_json::json!("false"))));
+        assert!(!setting_bool_default_true(Some(&serde_json::json!(false))));
+    }
+
+    #[test]
+    fn native_notif_marker_round_trips_and_deduplicates_hwnds() {
+        use super::{format_native_notif_marker, parse_native_notif_marker_hwnds};
+        let contents = format_native_notif_marker(4242, &[200, 100, 200, 0, 300]);
+        assert!(contents.starts_with("pid=4242\n"));
+        assert_eq!(parse_native_notif_marker_hwnds(&contents), vec![100, 200, 300]);
+        assert_eq!(
+            parse_native_notif_marker_hwnds("pid=1\nhwnd=bad\nhwnd=0\nhwnd=42\nhwnd=42\n"),
+            vec![42]
+        );
     }
 }

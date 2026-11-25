@@ -26,7 +26,7 @@ interface AudioSession {
 
 // Sliders can unmount or lose focus while a drag is in progress. Always drop
 // their document listeners so an old slider cannot keep sending changes.
-function useMouseSliderDrag(onMove: (clientY: number) => void, onEnd?: () => void) {
+function useMouseSliderDrag(onMove: (clientX: number, clientY: number) => void, onEnd?: () => void) {
 	const moveRef = useRef(onMove);
 	const endRef = useRef(onEnd);
 	const cleanupRef = useRef<(() => void) | null>(null);
@@ -35,10 +35,10 @@ function useMouseSliderDrag(onMove: (clientY: number) => void, onEnd?: () => voi
 
 	useEffect(() => () => cleanupRef.current?.(), []);
 
-	return (clientY: number) => {
+	return (clientX: number, clientY: number) => {
 		cleanupRef.current?.();
-		moveRef.current(clientY);
-		const handleMove = (event: MouseEvent) => moveRef.current(event.clientY);
+		moveRef.current(clientX, clientY);
+		const handleMove = (event: MouseEvent) => moveRef.current(event.clientX, event.clientY);
 		const cleanup = () => {
 			document.removeEventListener("mousemove", handleMove);
 			document.removeEventListener("mouseup", cleanup);
@@ -103,7 +103,7 @@ function MixerTile({
 		};
 	}, [percentage]);
 
-	const volumeFromY = (clientY: number) => {
+	const volumeFromY = (_clientX: number, clientY: number) => {
 		if (!barRef.current) return;
 		const rect = barRef.current.getBoundingClientRect();
 		const relativeY = rect.bottom - clientY;
@@ -114,17 +114,25 @@ function MixerTile({
 	});
 
 	const handleMouseDown = (e: React.MouseEvent) => {
-		startDrag(e.clientY);
+		startDrag(e.clientX, e.clientY);
 		draggingRef.current = session.pid;
 	};
 
+	const handleWheel = (e: React.WheelEvent) => {
+		e.stopPropagation();
+		const delta = e.deltaY < 0 ? 0.04 : -0.04;
+		const newVol = Math.max(0, Math.min(1, Math.round((session.volume + delta) * 100) / 100));
+		onVolumeChange(session.pid, newVol);
+	};
+
 	return (
-		<div className="volume-mixer-tile">
+		<div className="volume-mixer-tile" onWheel={handleWheel}>
 			<div
 				ref={barRef}
 				className="volume-mixer-bar"
 				onMouseDown={handleMouseDown}
-				onTouchStart={(e) => volumeFromY(e.touches[0].clientY)}
+				onTouchStart={(e) => volumeFromY(e.touches[0].clientX, e.touches[0].clientY)}
+				onWheel={handleWheel}
 				title={`${session.name} — ${percentage}%`}
 				style={{ cursor: "pointer" }}
 			>
@@ -174,6 +182,271 @@ const MIXER_MAX_PANEL_WIDTH =
 // hit-testing uses the same 42x196.
 const HUD_CARD_WIDTH = 42;
 const HUD_CARD_HEIGHT = 196;
+const HUD_HORIZONTAL_WIDTH = 196;
+const HUD_HORIZONTAL_HEIGHT = 42;
+const MIXER_TOP_PANEL_HEIGHT = 160;
+const EDGE_CLAMP_MARGIN = 12;
+
+type OverlayEdge = "top" | "left" | "right";
+interface OverlayPosition {
+	x: number;
+	y: number;
+	edge?: OverlayEdge;
+}
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.max(min, Math.min(max, value));
+}
+
+function resolveOverlayEdge(
+	position: OverlayPosition | null | undefined,
+	defaultEdge: OverlayEdge,
+	screenW: number
+): OverlayEdge {
+	if (!position) return defaultEdge;
+	if (position.edge === "top" || position.edge === "left" || position.edge === "right") {
+		return position.edge;
+	}
+	if (position.y <= 40) return "top";
+	return position.x > screenW / 2 ? "right" : "left";
+}
+
+function computeDockedOverlayGeometry(
+	edge: OverlayEdge,
+	position: OverlayPosition | null | undefined,
+	shellW: number,
+	shellH: number,
+	screenW: number,
+	screenH: number
+): { x: number; y: number } {
+	if (edge === "top") {
+		const maxX = Math.max(EDGE_CLAMP_MARGIN, screenW - shellW - EDGE_CLAMP_MARGIN);
+		const rawX = position ? position.x : (screenW - shellW) / 2;
+		return { x: Math.round(clamp(rawX, EDGE_CLAMP_MARGIN, maxX)), y: 0 };
+	}
+	const maxY = Math.max(EDGE_CLAMP_MARGIN, screenH - shellH - EDGE_CLAMP_MARGIN);
+	const rawY = position ? position.y : (screenH - shellH) / 2;
+	const y = Math.round(clamp(rawY, EDGE_CLAMP_MARGIN, maxY));
+	const x = edge === "right" ? Math.round(Math.max(0, screenW - shellW)) : 0;
+	return { x, y };
+}
+
+function snapReleaseToEdge(
+	releaseX: number,
+	releaseY: number,
+	dragW: number,
+	screenW: number,
+	screenH: number
+): OverlayPosition {
+	const distTop = Math.max(0, releaseY);
+	const distLeft = Math.max(0, releaseX);
+	const distRight = Math.max(0, screenW - (releaseX + dragW));
+
+	// Never snap to bottom edge; pick closest among top, left, right.
+	if (distTop <= distLeft && distTop <= distRight) {
+		const maxX = Math.max(EDGE_CLAMP_MARGIN, screenW - HUD_HORIZONTAL_WIDTH - EDGE_CLAMP_MARGIN);
+		return {
+			x: Math.round(clamp(releaseX, EDGE_CLAMP_MARGIN, maxX)),
+			y: 0,
+			edge: "top"
+		};
+	}
+	const maxY = Math.max(EDGE_CLAMP_MARGIN, screenH - HUD_CARD_HEIGHT - EDGE_CLAMP_MARGIN);
+	const snappedY = Math.round(clamp(releaseY, EDGE_CLAMP_MARGIN, maxY));
+	if (distLeft <= distRight) {
+		return { x: 0, y: snappedY, edge: "left" };
+	}
+	return {
+		x: Math.round(Math.max(0, screenW - HUD_CARD_WIDTH)),
+		y: snappedY,
+		edge: "right"
+	};
+}
+
+function useViewportSize(): { width: number; height: number } {
+	const [size, setSize] = useState(() => ({
+		width: typeof window !== "undefined" ? window.innerWidth : 1920,
+		height: typeof window !== "undefined" ? window.innerHeight : 1080
+	}));
+	useEffect(() => {
+		const onResize = () => setSize({ width: window.innerWidth, height: window.innerHeight });
+		window.addEventListener("resize", onResize);
+		return () => window.removeEventListener("resize", onResize);
+	}, []);
+	return size;
+}
+
+function useOverlayCardDrag({
+	enabled,
+	scale,
+	screenW,
+	screenH,
+	dockedGeometry,
+	dragW,
+	dragH,
+	ignoreSelector,
+	onDragStart,
+	onPositionChange,
+	onDragEnd
+}: {
+	enabled?: boolean;
+	scale: number;
+	screenW: number;
+	screenH: number;
+	dockedGeometry: { x: number; y: number };
+	dragW: number;
+	dragH: number;
+	ignoreSelector: string;
+	onDragStart?: () => void;
+	onPositionChange?: (pos: OverlayPosition) => void;
+	onDragEnd?: () => void;
+}) {
+	const [isDragging, setIsDragging] = useState(false);
+	const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+	const dragCleanupRef = useRef<(() => void) | null>(null);
+
+	useEffect(() => () => dragCleanupRef.current?.(), []);
+
+	const handleCardPointerDown = (e: React.PointerEvent) => {
+		if (!enabled || e.button !== 0) return;
+		const target = e.target as HTMLElement;
+		if (target.closest(ignoreSelector)) return;
+
+		dragCleanupRef.current?.();
+		const safeScale = scale > 0 ? scale : 1;
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const initialPos = { ...dockedGeometry };
+		let latestPos = { ...dockedGeometry };
+		let hasMoved = false;
+
+		const onPointerMove = (moveEv: PointerEvent) => {
+			const rawDx = moveEv.clientX - startX;
+			const rawDy = moveEv.clientY - startY;
+			if (!hasMoved && (Math.abs(rawDx) > 3 || Math.abs(rawDy) > 3)) {
+				hasMoved = true;
+				setIsDragging(true);
+				onDragStart?.();
+			}
+			if (hasMoved) {
+				const dx = rawDx / safeScale;
+				const dy = rawDy / safeScale;
+				latestPos = {
+					x: Math.round(clamp(initialPos.x + dx, 0, Math.max(0, screenW - dragW))),
+					y: Math.round(clamp(initialPos.y + dy, 0, Math.max(0, screenH - dragH)))
+				};
+				setDragPos(latestPos);
+			}
+		};
+
+		const finishDrag = (endEv?: PointerEvent) => {
+			window.removeEventListener("pointermove", onPointerMove);
+			window.removeEventListener("pointerup", finishDrag);
+			window.removeEventListener("pointercancel", finishDrag);
+			window.removeEventListener("blur", onBlur);
+			dragCleanupRef.current = null;
+			if (hasMoved) {
+				const releaseX = endEv
+					? clamp(initialPos.x + (endEv.clientX - startX) / safeScale, 0, Math.max(0, screenW - dragW))
+					: latestPos.x;
+				const releaseY = endEv
+					? clamp(initialPos.y + (endEv.clientY - startY) / safeScale, 0, Math.max(0, screenH - dragH))
+					: latestPos.y;
+				const snapped = snapReleaseToEdge(releaseX, releaseY, dragW, screenW, screenH);
+				setIsDragging(false);
+				setDragPos(null);
+				onPositionChange?.(snapped);
+				onDragEnd?.();
+			}
+		};
+
+		const onBlur = () => finishDrag();
+
+		dragCleanupRef.current = () => {
+			window.removeEventListener("pointermove", onPointerMove);
+			window.removeEventListener("pointerup", finishDrag);
+			window.removeEventListener("pointercancel", finishDrag);
+			window.removeEventListener("blur", onBlur);
+		};
+
+		window.addEventListener("pointermove", onPointerMove);
+		window.addEventListener("pointerup", finishDrag);
+		window.addEventListener("pointercancel", finishDrag);
+		window.addEventListener("blur", onBlur);
+	};
+
+	return { isDragging, dragPos, handleCardPointerDown };
+}
+
+function buildWrapperPosStyle(
+	activeEdge: OverlayEdge,
+	isDragging: boolean,
+	dragPos: { x: number; y: number } | null,
+	docked: { x: number; y: number },
+	hasPosition: boolean
+): React.CSSProperties {
+	if (isDragging && dragPos) {
+		return {
+			transformOrigin: "center center",
+			position: "absolute",
+			left: dragPos.x,
+			right: "auto",
+			top: dragPos.y
+		};
+	}
+	if (activeEdge === "top") {
+		return {
+			transformOrigin: "top center",
+			position: "absolute",
+			left: docked.x,
+			right: "auto",
+			top: 0
+		};
+	}
+	if (activeEdge === "right") {
+		return {
+			transformOrigin: "right center",
+			position: hasPosition ? "absolute" : undefined,
+			left: "auto",
+			right: 0,
+			top: hasPosition ? docked.y : undefined
+		};
+	}
+	return {
+		transformOrigin: "left center",
+		position: hasPosition ? "absolute" : undefined,
+		left: 0,
+		right: "auto",
+		top: hasPosition ? docked.y : undefined
+	};
+}
+
+function getContentSlideOffset(activeEdge: OverlayEdge): { x: number; y: number } {
+	if (activeEdge === "top") return { x: 0, y: -10 };
+	if (activeEdge === "right") return { x: 10, y: 0 };
+	return { x: -10, y: 0 };
+}
+
+function useOverlayRectSync(
+	command: "update_volume_overlay_rect" | "update_brightness_overlay_rect",
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	edge: OverlayEdge
+) {
+	useLayoutEffect(() => {
+		invoke(command, {
+			rect: { x, y, width, height, edge }
+		}).catch(() => {});
+	}, [command, x, y, width, height, edge]);
+
+	useEffect(() => {
+		return () => {
+			invoke(command, { rect: null }).catch(() => {});
+		};
+	}, [command]);
+}
 
 // Last fetched session list, so reopening the mixer renders at the right width
 // immediately instead of growing out of the empty-state width.
@@ -184,18 +457,37 @@ function VolumeNotch({
 	isMuted,
 	onVolumeChange,
 	mixerExpanded,
-	onMixerExpandedChange
+	onMixerExpandedChange,
+	freeDragEnabled,
+	scale,
+	position,
+	onPositionChange,
+	onDragStart,
+	onDragEnd
 }: {
 	volume: number;
 	isMuted: boolean;
 	onVolumeChange: (vol: number) => void;
 	mixerExpanded: boolean;
 	onMixerExpandedChange: (expanded: boolean) => void;
+	freeDragEnabled?: boolean;
+	scale: number;
+	position?: OverlayPosition | null;
+	onPositionChange?: (pos: OverlayPosition) => void;
+	onDragStart?: () => void;
+	onDragEnd?: () => void;
 }) {
 	const percentage = Math.round(volume * 100);
 	const barRef = useRef<HTMLDivElement>(null);
 	const shellRef = useRef<HTMLDivElement>(null);
 	const draggingRef = useRef<number | null>(null);
+
+	const viewport = useViewportSize();
+	const safeScale = scale > 0 ? scale : 1;
+	const screenW = viewport.width / safeScale;
+	const screenH = viewport.height / safeScale;
+	const activeEdge = resolveOverlayEdge(position, "left", screenW);
+	const isHorizontal = activeEdge === "top";
 
 	const [sessions, setSessions] = useState<AudioSession[]>(lastKnownSessions);
 	const [sessionsLoaded, setSessionsLoaded] = useState(false);
@@ -210,6 +502,44 @@ function VolumeNotch({
 		MIXER_PANEL_PADDING * 2 +
 		mixerColumns * MIXER_COLUMN_WIDTH +
 		(mixerColumns - 1) * MIXER_COLUMN_GAP;
+	const shellW = isHorizontal
+		? mixerExpanded
+			? Math.max(HUD_HORIZONTAL_WIDTH, mixerPanelWidth)
+			: HUD_HORIZONTAL_WIDTH
+		: mixerExpanded
+			? HUD_CARD_WIDTH + mixerPanelWidth
+			: HUD_CARD_WIDTH;
+	const shellH = isHorizontal
+		? mixerExpanded
+			? HUD_HORIZONTAL_HEIGHT + MIXER_TOP_PANEL_HEIGHT
+			: HUD_HORIZONTAL_HEIGHT
+		: HUD_CARD_HEIGHT;
+
+	const docked = computeDockedOverlayGeometry(
+		activeEdge,
+		position,
+		shellW,
+		shellH,
+		screenW,
+		screenH
+	);
+
+	const { isDragging, dragPos, handleCardPointerDown } = useOverlayCardDrag({
+		enabled: freeDragEnabled,
+		scale: safeScale,
+		screenW,
+		screenH,
+		dockedGeometry: docked,
+		dragW: shellW,
+		dragH: shellH,
+		ignoreSelector: ".volume-notch-bar, .volume-mixer-bar, .volume-mixer-tile, .volume-mixer-panel, button",
+		onDragStart,
+		onPositionChange,
+		onDragEnd
+	});
+
+	const renderX = isDragging && dragPos ? dragPos.x : docked.x;
+	const renderY = isDragging && dragPos ? dragPos.y : docked.y;
 
 	// Flash the percentage in place of the icon whenever the volume changes.
 	useEffect(() => {
@@ -287,6 +617,8 @@ function VolumeNotch({
 		}).catch(() => {});
 	}, []);
 
+	useOverlayRectSync("update_volume_overlay_rect", renderX, renderY, shellW, shellH, activeEdge);
+
 	useLayoutEffect(() => {
 		if (!mixerExpanded) return;
 		reportPanelBounds();
@@ -297,7 +629,7 @@ function VolumeNotch({
 			observer?.disconnect();
 			invoke("clear_volume_mixer_rect").catch(() => {});
 		};
-	}, [mixerExpanded, reportPanelBounds]);
+	}, [mixerExpanded, reportPanelBounds, renderX, renderY, shellW, shellH, activeEdge]);
 
 	// Slider drags fire many times per second. Coalesce into one backend call
 	// per ~60ms and always flush the final value, so releasing quickly doesn't
@@ -353,115 +685,240 @@ function VolumeNotch({
 	const handleBarInteraction = (e: React.MouseEvent | React.TouchEvent) => {
 		if (!barRef.current) return;
 		const rect = barRef.current.getBoundingClientRect();
-		const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-		const relativeY = rect.bottom - clientY;
-		const newVolume = Math.max(0, Math.min(1, relativeY / rect.height));
-		onVolumeChange(newVolume);
-	};
-
-	const startDrag = useMouseSliderDrag((clientY) => {
-			if (!barRef.current) return;
-			const rect = barRef.current.getBoundingClientRect();
+		if (isHorizontal) {
+			const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
+			const relativeX = clientX - rect.left;
+			const newVolume = Math.max(0, Math.min(1, relativeX / rect.width));
+			onVolumeChange(newVolume);
+		} else {
+			const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
 			const relativeY = rect.bottom - clientY;
 			const newVolume = Math.max(0, Math.min(1, relativeY / rect.height));
 			onVolumeChange(newVolume);
+		}
+	};
+
+	const startDrag = useMouseSliderDrag((clientX, clientY) => {
+		if (!barRef.current) return;
+		const rect = barRef.current.getBoundingClientRect();
+		if (isHorizontal) {
+			const relativeX = clientX - rect.left;
+			const newVolume = Math.max(0, Math.min(1, relativeX / rect.width));
+			onVolumeChange(newVolume);
+		} else {
+			const relativeY = rect.bottom - clientY;
+			const newVolume = Math.max(0, Math.min(1, relativeY / rect.height));
+			onVolumeChange(newVolume);
+		}
 	});
 	const handleMouseDown = (e: React.MouseEvent) => {
-		startDrag(e.clientY);
+		startDrag(e.clientX, e.clientY);
 	};
+
+	const handleWheel = (e: React.WheelEvent) => {
+		e.stopPropagation();
+		const delta = e.deltaY < 0 ? 0.04 : -0.04;
+		const newVolume = Math.max(0, Math.min(1, Math.round((volume + delta) * 100) / 100));
+		onVolumeChange(newVolume);
+	};
+
+	const wrapperPosStyle = buildWrapperPosStyle(
+		activeEdge,
+		isDragging,
+		dragPos,
+		docked,
+		Boolean(position)
+	);
+
+	const restY: number | string = isDragging || isHorizontal || position ? 0 : "-50%";
+	const exitAnim = isHorizontal
+		? mixerExpanded
+			? { y: -48, opacity: 0, filter: "blur(8px)", transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] as const } }
+			: { scaleY: 0, opacity: 0, filter: "blur(8px)", y: 0, transition: { duration: 0.2 } }
+		: mixerExpanded
+			? {
+					// Retract the expanded card as one surface. Scaling X would
+					// squash the app list into the edge.
+					x: activeEdge === "right" ? 64 : -64,
+					opacity: 0,
+					filter: "blur(8px)",
+					y: restY,
+					transition: { duration: 0.24, ease: [0.16, 1, 0.3, 1] as const }
+				}
+			: {
+					scaleX: 0,
+					scaleY: 0.8,
+					opacity: 0,
+					filter: "blur(12px)",
+					y: restY,
+					transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] as const }
+				};
+
+	const contentSlideOffset = getContentSlideOffset(activeEdge);
+
+	const mixerExitAnim = isHorizontal
+		? { opacity: 0, y: -18, transition: { y: { duration: 0.28, ease: [0.32, 0.72, 0, 1] as const }, opacity: { duration: 0.18, delay: 0.1 } } }
+		: {
+				opacity: 0,
+				x: activeEdge === "right" ? 18 : -18,
+				transition: {
+					x: { duration: 0.28, ease: [0.32, 0.72, 0, 1] as const },
+					opacity: { duration: 0.18, delay: 0.1 }
+				}
+			};
 
 	return (
 		<motion.div
-			className="volume-notch-wrapper"
-			style={{ transformOrigin: "left center" }}
-			initial={{ scaleX: 0, scaleY: 0.5, opacity: 0, filter: "blur(12px)", y: "-50%" }}
-			animate={{ scaleX: 1, scaleY: 1, opacity: 1, filter: "blur(0px)", y: "-50%" }}
-			exit={
-				mixerExpanded
-					? {
-							// Retract the expanded card as one surface. Scaling X would
-							// squash the app list into the edge.
-							x: -64,
-							opacity: 0,
-							filter: "blur(8px)",
-							y: "-50%",
-							transition: { duration: 0.24, ease: [0.16, 1, 0.3, 1] }
-						}
-					: {
-							scaleX: 0,
-							scaleY: 0.8,
-							opacity: 0,
-							filter: "blur(12px)",
-							y: "-50%",
-							transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
-						}
-			}
+			className={`volume-notch-wrapper ${isDragging ? "is-dragging" : `is-edge-${activeEdge}`} ${isHorizontal ? "is-horizontal" : ""}`}
+			style={wrapperPosStyle}
+			initial={{
+				scaleX: isHorizontal ? 1 : 0,
+				scaleY: isHorizontal ? 0 : 0.5,
+				opacity: 0,
+				filter: "blur(12px)",
+				y: restY
+			}}
+			animate={{
+				scaleX: 1,
+				scaleY: 1,
+				opacity: 1,
+				filter: "blur(0px)",
+				y: restY
+			}}
+			onPointerDown={handleCardPointerDown}
+			exit={exitAnim}
 			transition={{ type: "spring", stiffness: 320, damping: 28, mass: 0.75 }}
 		>
-			<EdgeSurface edge="left" />
+			<EdgeSurface edge={activeEdge} flares={!isDragging} resolutionScale={safeScale} />
 			<motion.div
 				ref={shellRef}
-				className="volume-notch"
-				animate={{ width: mixerExpanded ? 42 + mixerPanelWidth : 42 }}
+				className={`volume-notch ${freeDragEnabled ? "free-drag-enabled" : ""} ${isHorizontal ? "is-horizontal" : ""}`}
+				animate={{
+					width: shellW,
+					height: shellH
+				}}
 				transition={{ type: "spring", bounce: 0, duration: 0.35 }}
 				onAnimationComplete={reportPanelBounds}
+				onWheel={handleWheel}
 			>
+				{freeDragEnabled && (
+					<div
+						className="overlay-drag-handle"
+						title="Click-hold to drag"
+					/>
+				)}
 				<motion.div
-					className="volume-notch-content-group"
-					initial={{ opacity: 0, x: -10 }}
-					animate={{ opacity: 1, x: 0 }}
-					exit={{ opacity: 0, x: -5, transition: { duration: 0.15 } }}
+					className={`volume-notch-content-group ${isHorizontal ? "is-horizontal" : ""}`}
+					initial={{ opacity: 0, ...contentSlideOffset }}
+					animate={{ opacity: 1, x: 0, y: 0 }}
+					exit={{
+						opacity: 0,
+						x: contentSlideOffset.x / 2,
+						y: contentSlideOffset.y / 2,
+						transition: { duration: 0.15 }
+					}}
 					transition={{ delay: 0.05, duration: 0.2, ease: "easeOut" }}
 				>
-					<div
-						ref={barRef}
-						className="volume-notch-bar"
-						onMouseDown={handleMouseDown}
-						onTouchStart={handleBarInteraction}
-						style={{ cursor: "pointer" }}
-					>
-						<motion.div
-							className="volume-notch-fill"
-							initial={false}
-							animate={{ height: isMuted ? "0%" : `${percentage}%` }}
-							transition={{ type: "spring", stiffness: 300, damping: 35 }}
-						/>
-					</div>
-					<button
-						className={`volume-notch-action ${mixerExpanded ? "active" : ""} ${
-							showPercentage ? "showing-percent" : ""
-						}`}
-						onClick={(e) => {
-							e.stopPropagation();
-							onMixerExpandedChange(!mixerExpanded);
-						}}
-						title="App volume mixer"
-					>
-						<span className="volume-notch-action-icon">
-							<SpeakerIcon size={16} muted={isMuted} />
-						</span>
-						<span className="volume-notch-action-mixer">
-							<MixerIcon size={16} />
-						</span>
-						<span className="volume-notch-action-percent">{isMuted ? "0%" : `${percentage}%`}</span>
-					</button>
+					{isHorizontal ? (
+						<>
+							<button
+								className={`volume-notch-action ${mixerExpanded ? "active" : ""} ${
+									showPercentage ? "showing-percent" : ""
+								}`}
+								onClick={(e) => {
+									e.stopPropagation();
+									onMixerExpandedChange(!mixerExpanded);
+								}}
+								title="App volume mixer"
+							>
+								<span
+									className="volume-notch-action-icon"
+									style={mixerExpanded ? { opacity: 0, pointerEvents: "none" } : undefined}
+									aria-hidden={mixerExpanded}
+								>
+									<SpeakerIcon size={16} muted={isMuted} />
+								</span>
+								<span
+									className="volume-notch-action-mixer"
+									style={!mixerExpanded ? { opacity: 0, pointerEvents: "none" } : undefined}
+									aria-hidden={!mixerExpanded}
+								>
+									<MixerIcon size={16} />
+								</span>
+								<span className="volume-notch-action-percent">{isMuted ? "0%" : `${percentage}%`}</span>
+							</button>
+
+							<div
+								ref={barRef}
+								className="volume-notch-bar"
+								onMouseDown={handleMouseDown}
+								onTouchStart={handleBarInteraction}
+								onWheel={handleWheel}
+								style={{ cursor: "pointer" }}
+							>
+								<motion.div
+									className="volume-notch-fill"
+									initial={false}
+									animate={{ width: isMuted ? "0%" : `${percentage}%`, height: "100%" }}
+									transition={{ type: "spring", stiffness: 300, damping: 35 }}
+								/>
+							</div>
+						</>
+					) : (
+						<>
+							<div
+								ref={barRef}
+								className="volume-notch-bar"
+								onMouseDown={handleMouseDown}
+								onTouchStart={handleBarInteraction}
+								onWheel={handleWheel}
+								style={{ cursor: "pointer" }}
+							>
+								<motion.div
+									className="volume-notch-fill"
+									initial={false}
+									animate={{ height: isMuted ? "0%" : `${percentage}%` }}
+									transition={{ type: "spring", stiffness: 300, damping: 35 }}
+								/>
+							</div>
+							<button
+								className={`volume-notch-action ${mixerExpanded ? "active" : ""} ${
+									showPercentage ? "showing-percent" : ""
+								}`}
+								onClick={(e) => {
+									e.stopPropagation();
+									onMixerExpandedChange(!mixerExpanded);
+								}}
+								title="App volume mixer"
+							>
+								<span
+									className="volume-notch-action-icon"
+									style={mixerExpanded ? { opacity: 0, pointerEvents: "none" } : undefined}
+									aria-hidden={mixerExpanded}
+								>
+									<SpeakerIcon size={16} muted={isMuted} />
+								</span>
+								<span
+									className="volume-notch-action-mixer"
+									style={!mixerExpanded ? { opacity: 0, pointerEvents: "none" } : undefined}
+									aria-hidden={!mixerExpanded}
+								>
+									<MixerIcon size={16} />
+								</span>
+								<span className="volume-notch-action-percent">{isMuted ? "0%" : `${percentage}%`}</span>
+							</button>
+						</>
+					)}
 				</motion.div>
 
 				<AnimatePresence>
 					{mixerExpanded && (
 						<motion.div
 							className="volume-mixer-panel"
-							style={{ width: mixerPanelWidth }}
+							style={isHorizontal ? undefined : { width: mixerPanelWidth }}
 							initial={{ opacity: 0 }}
 							animate={{ opacity: 1 }}
-							exit={{
-								opacity: 0,
-								x: -18,
-								transition: {
-									x: { duration: 0.28, ease: [0.32, 0.72, 0, 1] },
-									opacity: { duration: 0.18, delay: 0.1 }
-								}
-							}}
+							exit={mixerExitAnim}
 						>
 							<div
 								className="volume-mixer-list"
@@ -517,75 +974,234 @@ const SunIcon = ({ brightness }: { brightness: number }) => (
 
 function BrightnessNotch({
 	brightness,
-	onBrightnessChange
+	onBrightnessChange,
+	freeDragEnabled,
+	scale,
+	position,
+	onPositionChange,
+	onDragStart,
+	onDragEnd
 }: {
 	brightness: number;
 	onBrightnessChange: (val: number) => void;
+	freeDragEnabled?: boolean;
+	scale: number;
+	position?: OverlayPosition | null;
+	onPositionChange?: (pos: OverlayPosition) => void;
+	onDragStart?: () => void;
+	onDragEnd?: () => void;
 }) {
 	const barRef = useRef<HTMLDivElement>(null);
+	const [showPercentage, setShowPercentage] = useState(false);
+	const percentageTimeoutRef = useRef<any>(null);
+
+	const percentage = Math.round(brightness);
+	const viewport = useViewportSize();
+	const safeScale = scale > 0 ? scale : 1;
+	const screenW = viewport.width / safeScale;
+	const screenH = viewport.height / safeScale;
+	const activeEdge = resolveOverlayEdge(position, "right", screenW);
+	const isHorizontal = activeEdge === "top";
+	const shellW = isHorizontal ? HUD_HORIZONTAL_WIDTH : HUD_CARD_WIDTH;
+	const shellH = isHorizontal ? HUD_HORIZONTAL_HEIGHT : HUD_CARD_HEIGHT;
+
+	const docked = computeDockedOverlayGeometry(
+		activeEdge,
+		position,
+		shellW,
+		shellH,
+		screenW,
+		screenH
+	);
+
+	const { isDragging, dragPos, handleCardPointerDown } = useOverlayCardDrag({
+		enabled: freeDragEnabled,
+		scale: safeScale,
+		screenW,
+		screenH,
+		dockedGeometry: docked,
+		dragW: shellW,
+		dragH: shellH,
+		ignoreSelector: ".brightness-notch-bar, button",
+		onDragStart,
+		onPositionChange,
+		onDragEnd
+	});
+
+	const renderX = isDragging && dragPos ? dragPos.x : docked.x;
+	const renderY = isDragging && dragPos ? dragPos.y : docked.y;
+	useOverlayRectSync("update_brightness_overlay_rect", renderX, renderY, shellW, shellH, activeEdge);
+
+	// Flash the percentage in place of the icon whenever the brightness changes.
+	useEffect(() => {
+		setShowPercentage(true);
+		if (percentageTimeoutRef.current) clearTimeout(percentageTimeoutRef.current);
+		percentageTimeoutRef.current = setTimeout(() => setShowPercentage(false), 1200);
+		return () => {
+			if (percentageTimeoutRef.current) clearTimeout(percentageTimeoutRef.current);
+		};
+	}, [brightness]);
 
 	const handleBarInteraction = (e: React.MouseEvent | React.TouchEvent) => {
 		if (!barRef.current) return;
 		const rect = barRef.current.getBoundingClientRect();
-		const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-		const relativeY = rect.bottom - clientY;
-		const newBrightness = Math.max(0, Math.min(100, (relativeY / rect.height) * 100));
-		onBrightnessChange(newBrightness);
-	};
-
-	const startDrag = useMouseSliderDrag((clientY) => {
-			if (!barRef.current) return;
-			const rect = barRef.current.getBoundingClientRect();
+		if (isHorizontal) {
+			const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
+			const relativeX = clientX - rect.left;
+			const newBrightness = Math.max(0, Math.min(100, (relativeX / rect.width) * 100));
+			onBrightnessChange(newBrightness);
+		} else {
+			const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
 			const relativeY = rect.bottom - clientY;
 			const newBrightness = Math.max(0, Math.min(100, (relativeY / rect.height) * 100));
 			onBrightnessChange(newBrightness);
+		}
+	};
+
+	const startDrag = useMouseSliderDrag((clientX, clientY) => {
+		if (!barRef.current) return;
+		const rect = barRef.current.getBoundingClientRect();
+		if (isHorizontal) {
+			const relativeX = clientX - rect.left;
+			const newBrightness = Math.max(0, Math.min(100, (relativeX / rect.width) * 100));
+			onBrightnessChange(newBrightness);
+		} else {
+			const relativeY = rect.bottom - clientY;
+			const newBrightness = Math.max(0, Math.min(100, (relativeY / rect.height) * 100));
+			onBrightnessChange(newBrightness);
+		}
 	});
 	const handleMouseDown = (e: React.MouseEvent) => {
-		startDrag(e.clientY);
+		startDrag(e.clientX, e.clientY);
 	};
+
+	const handleWheel = (e: React.WheelEvent) => {
+		e.stopPropagation();
+		const delta = e.deltaY < 0 ? 4 : -4;
+		const newBrightness = Math.max(0, Math.min(100, Math.round(brightness + delta)));
+		onBrightnessChange(newBrightness);
+	};
+
+	const wrapperPosStyle = buildWrapperPosStyle(
+		activeEdge,
+		isDragging,
+		dragPos,
+		docked,
+		Boolean(position)
+	);
+	const restY: number | string = isDragging || isHorizontal || position ? 0 : "-50%";
+	const contentSlideOffset = getContentSlideOffset(activeEdge);
 
 	return (
 		<motion.div
-			className="brightness-notch-wrapper"
-			style={{ transformOrigin: "right center" }}
-			initial={{ scaleX: 0, scaleY: 0.5, opacity: 0, filter: "blur(12px)", y: "-50%" }}
-			animate={{ scaleX: 1, scaleY: 1, opacity: 1, filter: "blur(0px)", y: "-50%" }}
-			exit={{
-				scaleX: 0,
-				scaleY: 0.8,
+			className={`brightness-notch-wrapper ${isDragging ? "is-dragging" : `is-edge-${activeEdge}`} ${isHorizontal ? "is-horizontal" : ""}`}
+			style={wrapperPosStyle}
+			initial={{
+				scaleX: isHorizontal ? 1 : 0,
+				scaleY: isHorizontal ? 0 : 0.5,
 				opacity: 0,
 				filter: "blur(12px)",
-				y: "-50%",
-				transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
+				y: restY
 			}}
+			animate={{
+				scaleX: 1,
+				scaleY: 1,
+				opacity: 1,
+				filter: "blur(0px)",
+				y: restY
+			}}
+			onPointerDown={handleCardPointerDown}
+			exit={
+				isHorizontal
+					? { scaleY: 0, opacity: 0, filter: "blur(8px)", y: 0, transition: { duration: 0.2 } }
+					: {
+							scaleX: 0,
+							scaleY: 0.8,
+							opacity: 0,
+							filter: "blur(12px)",
+							y: restY,
+							transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
+						}
+			}
 			transition={{ type: "spring", stiffness: 320, damping: 28, mass: 0.75 }}
 		>
-			<div className="brightness-notch">
-				<EdgeSurface edge="right" />
+			<EdgeSurface edge={activeEdge} flares={!isDragging} resolutionScale={safeScale} />
+			<div
+				className={`brightness-notch ${freeDragEnabled ? "free-drag-enabled" : ""} ${isHorizontal ? "is-horizontal" : ""}`}
+				onWheel={handleWheel}
+			>
+				{freeDragEnabled && (
+					<div
+						className="overlay-drag-handle"
+						title="Click-hold to drag"
+					/>
+				)}
 				<motion.div
-					className="brightness-notch-content-group"
-					initial={{ opacity: 0, x: 10 }}
-					animate={{ opacity: 1, x: 0 }}
-					exit={{ opacity: 0, x: 5, transition: { duration: 0.15 } }}
+					className={`brightness-notch-content-group ${isHorizontal ? "is-horizontal" : ""}`}
+					initial={{ opacity: 0, ...contentSlideOffset }}
+					animate={{ opacity: 1, x: 0, y: 0 }}
+					exit={{
+						opacity: 0,
+						x: contentSlideOffset.x / 2,
+						y: contentSlideOffset.y / 2,
+						transition: { duration: 0.15 }
+					}}
 					transition={{ delay: 0.05, duration: 0.2, ease: "easeOut" }}
 				>
-					<div
-						ref={barRef}
-						className="brightness-notch-bar"
-						onMouseDown={handleMouseDown}
-						onTouchStart={handleBarInteraction}
-						style={{ cursor: "pointer" }}
-					>
-						<motion.div
-							className="brightness-notch-fill"
-							initial={false}
-							animate={{ height: `${brightness}%` }}
-							transition={{ type: "spring", stiffness: 300, damping: 35 }}
-						/>
-					</div>
-					<div className="brightness-notch-icon">
-						<SunIcon brightness={brightness} />
-					</div>
+					{isHorizontal ? (
+						<>
+							<div
+								className={`brightness-notch-action ${showPercentage ? "showing-percent" : ""}`}
+							>
+								<span className="brightness-notch-action-icon">
+									<SunIcon brightness={brightness} />
+								</span>
+								<span className="brightness-notch-action-percent">{percentage}%</span>
+							</div>
+
+							<div
+								ref={barRef}
+								className="brightness-notch-bar"
+								onMouseDown={handleMouseDown}
+								onTouchStart={handleBarInteraction}
+								onWheel={handleWheel}
+								style={{ cursor: "pointer" }}
+							>
+								<motion.div
+									className="brightness-notch-fill"
+									initial={false}
+									animate={{ width: `${brightness}%`, height: "100%" }}
+									transition={{ type: "spring", stiffness: 300, damping: 35 }}
+								/>
+							</div>
+						</>
+					) : (
+						<>
+							<div
+								ref={barRef}
+								className="brightness-notch-bar"
+								onMouseDown={handleMouseDown}
+								onTouchStart={handleBarInteraction}
+								onWheel={handleWheel}
+								style={{ cursor: "pointer" }}
+							>
+								<motion.div
+									className="brightness-notch-fill"
+									initial={false}
+									animate={{ height: `${brightness}%` }}
+									transition={{ type: "spring", stiffness: 300, damping: 35 }}
+								/>
+							</div>
+							<div
+								className={`brightness-notch-action ${showPercentage ? "showing-percent" : ""}`}
+							>
+								<span className="brightness-notch-action-icon">
+									<SunIcon brightness={brightness} />
+								</span>
+								<span className="brightness-notch-action-percent">{percentage}%</span>
+							</div>
+						</>
+					)}
 				</motion.div>
 			</div>
 		</motion.div>
@@ -624,10 +1240,46 @@ function OverlayApp() {
 		() => localStorage.getItem("bloom-brightness-edge-enabled") !== "false"
 	);
 
+	// Free Drag state
+	const [freeDragEnabled, setFreeDragEnabled] = useState(
+		() => localStorage.getItem("bloom-free-drag-enabled") === "true"
+	);
+	const [volumePosition, setVolumePosition] = useState<OverlayPosition | null>(() => {
+		if (localStorage.getItem("bloom-free-drag-enabled") !== "true") return null;
+		try {
+			const raw = localStorage.getItem("bloom-volume-overlay-position");
+			if (raw) {
+				const p = JSON.parse(raw);
+				if (typeof p?.x === "number" && typeof p?.y === "number") return p;
+			}
+		} catch {}
+		return null;
+	});
+	const [brightnessPosition, setBrightnessPosition] = useState<OverlayPosition | null>(() => {
+		if (localStorage.getItem("bloom-free-drag-enabled") !== "true") return null;
+		try {
+			const raw = localStorage.getItem("bloom-brightness-overlay-position");
+			if (raw) {
+				const p = JSON.parse(raw);
+				if (typeof p?.x === "number" && typeof p?.y === "number") return p;
+			}
+		} catch {}
+		return null;
+	});
+
 	// Shared state
 	const [scale, setScale] = useState(() =>
 		parseFloat(localStorage.getItem("bloom-scale") || "1.0")
 	);
+	const volumePositionRef = useRef(volumePosition);
+	const brightnessPositionRef = useRef(brightnessPosition);
+	useEffect(() => {
+		volumePositionRef.current = volumePosition;
+	}, [volumePosition]);
+	useEffect(() => {
+		brightnessPositionRef.current = brightnessPosition;
+	}, [brightnessPosition]);
+
 	const timeoutRef = useRef<any>(null);
 	const hideWindowTimeoutRef = useRef<any>(null);
 	const splashActiveRef = useRef(false);
@@ -640,7 +1292,7 @@ function OverlayApp() {
 		if (timeoutRef.current) clearTimeout(timeoutRef.current);
 		timeoutRef.current = setTimeout(() => {
 			if (!splashActiveRef.current) setMode("idle");
-		}, 2000);
+		}, 2500);
 	}, []);
 
 	// Load scale from settings
@@ -656,6 +1308,31 @@ function OverlayApp() {
 				}
 				if (settings && settings["bloom-volume-overlay-enabled"] !== undefined) {
 					setVolumeOverlayEnabled(settings["bloom-volume-overlay-enabled"] === "true");
+				}
+				if (settings && settings["bloom-free-drag-enabled"] !== undefined) {
+					setFreeDragEnabled(settings["bloom-free-drag-enabled"] === "true");
+				}
+				if (settings && settings["bloom-volume-overlay-position"]) {
+					try {
+						const pos = typeof settings["bloom-volume-overlay-position"] === "string"
+							? JSON.parse(settings["bloom-volume-overlay-position"])
+							: settings["bloom-volume-overlay-position"];
+						if (typeof pos?.x === "number" && typeof pos?.y === "number") {
+							setVolumePosition(pos);
+							volumePositionRef.current = pos;
+						}
+					} catch {}
+				}
+				if (settings && settings["bloom-brightness-overlay-position"]) {
+					try {
+						const pos = typeof settings["bloom-brightness-overlay-position"] === "string"
+							? JSON.parse(settings["bloom-brightness-overlay-position"])
+							: settings["bloom-brightness-overlay-position"];
+						if (typeof pos?.x === "number" && typeof pos?.y === "number") {
+							setBrightnessPosition(pos);
+							brightnessPositionRef.current = pos;
+						}
+					} catch {}
 				}
 			})
 			.catch(console.error);
@@ -743,7 +1420,7 @@ function OverlayApp() {
 				if (timeoutRef.current) clearTimeout(timeoutRef.current);
 				timeoutRef.current = setTimeout(
 					() => setMode("idle"),
-					mixerExpandedRef.current ? 700 : 1500
+					mixerExpandedRef.current ? 700 : 2500
 				);
 			}
 		});
@@ -764,7 +1441,7 @@ function OverlayApp() {
 				if (timeoutRef.current) clearTimeout(timeoutRef.current);
 			} else {
 				if (timeoutRef.current) clearTimeout(timeoutRef.current);
-				timeoutRef.current = setTimeout(() => setMode("idle"), 1500);
+				timeoutRef.current = setTimeout(() => setMode("idle"), 2500);
 			}
 		});
 
@@ -808,7 +1485,36 @@ function OverlayApp() {
 		"bloom-volume-edge-enabled": setVolumeEdgeEnabled,
 		"bloom-brightness-overlay-enabled": setBrightnessOverlayEnabled,
 		"bloom-brightness-edge-enabled": setBrightnessEdgeEnabled,
-		"bloom-scale": setScale
+		"bloom-scale": setScale,
+		"bloom-free-drag-enabled": setFreeDragEnabled,
+		"bloom-volume-overlay-position": (val: any) => {
+			if (!val) {
+				setVolumePosition(null);
+				volumePositionRef.current = null;
+				return;
+			}
+			try {
+				const p = typeof val === "string" ? JSON.parse(val) : val;
+				if (typeof p?.x === "number" && typeof p?.y === "number") {
+					setVolumePosition(p);
+					volumePositionRef.current = p;
+				}
+			} catch {}
+		},
+		"bloom-brightness-overlay-position": (val: any) => {
+			if (!val) {
+				setBrightnessPosition(null);
+				brightnessPositionRef.current = null;
+				return;
+			}
+			try {
+				const p = typeof val === "string" ? JSON.parse(val) : val;
+				if (typeof p?.x === "number" && typeof p?.y === "number") {
+					setBrightnessPosition(p);
+					brightnessPositionRef.current = p;
+				}
+			} catch {}
+		}
 	});
 
 	// Side effects: reset overlay mode to idle when overlay is disabled
@@ -821,6 +1527,28 @@ function OverlayApp() {
 		if (splashActiveRef.current) return;
 		if (!brightnessOverlayEnabled && mode === "brightness") setMode("idle");
 	}, [brightnessOverlayEnabled, mode]);
+
+	// Clear overlay hit-test rects in Rust as soon as each mode leaves active state.
+	useEffect(() => {
+		if (mode !== "volume") {
+			invoke("update_volume_overlay_rect", { rect: null }).catch(() => {});
+		}
+		if (mode !== "brightness") {
+			invoke("update_brightness_overlay_rect", { rect: null }).catch(() => {});
+		}
+	}, [mode]);
+
+	// Global mouse hook dismissal when clicking outside volume/brightness overlay
+	useEffect(() => {
+		const unlisten = listen("overlay-dismiss", () => {
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
+			if (timeoutRef.current) clearTimeout(timeoutRef.current);
+			setMode("idle");
+		});
+		return () => {
+			unlisten.then((f) => f());
+		};
+	}, []);
 
 	// ── Window Visibility Management ──
 	useEffect(() => {
@@ -919,7 +1647,51 @@ function OverlayApp() {
 		[resetHideTimeout, sendBrightness]
 	);
 
-	const isLeft = mode === "volume";
+	const handleDragStart = useCallback(() => {
+		if (timeoutRef.current) {
+			clearTimeout(timeoutRef.current);
+			timeoutRef.current = null;
+		}
+	}, []);
+
+	const handleVolumePositionChange = useCallback((pos: OverlayPosition) => {
+		volumePositionRef.current = pos;
+		setVolumePosition(pos);
+	}, []);
+
+	const handleVolumeDragEnd = useCallback(() => {
+		const pos = volumePositionRef.current;
+		if (pos) {
+			localStorage.setItem("bloom-volume-overlay-position", JSON.stringify(pos));
+			invoke("save_setting", { key: "bloom-volume-overlay-position", value: JSON.stringify(pos) }).catch(() => {});
+		}
+		resetHideTimeout();
+	}, [resetHideTimeout]);
+
+	const handleBrightnessPositionChange = useCallback((pos: OverlayPosition) => {
+		brightnessPositionRef.current = pos;
+		setBrightnessPosition(pos);
+	}, []);
+
+	const handleBrightnessDragEnd = useCallback(() => {
+		const pos = brightnessPositionRef.current;
+		if (pos) {
+			localStorage.setItem("bloom-brightness-overlay-position", JSON.stringify(pos));
+			invoke("save_setting", { key: "bloom-brightness-overlay-position", value: JSON.stringify(pos) }).catch(() => {});
+		}
+		resetHideTimeout();
+	}, [resetHideTimeout]);
+
+	const activeVolumePosition = freeDragEnabled ? volumePosition : null;
+	const activeBrightnessPosition = freeDragEnabled ? brightnessPosition : null;
+
+	const viewport = useViewportSize();
+	const safeScale = scale > 0 ? scale : 1;
+	const screenW = viewport.width / safeScale;
+	const screenH = viewport.height / safeScale;
+	const activeVolumeEdge = resolveOverlayEdge(activeVolumePosition, "left", screenW);
+	const activeBrightnessEdge = resolveOverlayEdge(activeBrightnessPosition, "right", screenW);
+	const activeModeEdge = mode === "volume" ? activeVolumeEdge : activeBrightnessEdge;
 
 	const sendOverlayRegion = useMemo(
 		() =>
@@ -935,26 +1707,75 @@ function OverlayApp() {
 	// clipped; with the mixer open the left zone spans the widest mixer. The
 	// HUDs and the mixer panel are measured on top, padded for their shadows.
 	useEffect(() => {
-		const width = window.innerWidth;
-		const height = window.innerHeight;
+		const width = viewport.width;
+		const height = viewport.height;
 		if (mode === "splash" || mode === "updating") {
 			sendOverlayRegion([{ x: 0, y: 0, width, height }]);
 			return;
 		}
-		const pad = 24 * scale;
-		const cardWidth = HUD_CARD_WIDTH * scale;
-		const cardHeight = HUD_CARD_HEIGHT * scale;
+		const pad = 24 * safeScale;
+		const cardWidth = HUD_CARD_WIDTH * safeScale;
+		const cardHeight = HUD_CARD_HEIGHT * safeScale;
 		const leftWidth =
-			(mixerExpanded ? HUD_CARD_WIDTH + MIXER_MAX_PANEL_WIDTH : HUD_CARD_WIDTH) * scale;
+			(mixerExpanded ? HUD_CARD_WIDTH + MIXER_MAX_PANEL_WIDTH : HUD_CARD_WIDTH) * safeScale;
 		const zone = (x: number, w: number): RegionRect => ({
 			x,
 			y: (height - cardHeight) / 2 - pad,
 			width: w,
 			height: cardHeight + pad * 2
 		});
+		const customRects: RegionRect[] = [];
+		if (mode === "volume" && activeVolumePosition) {
+			const isVolTop = activeVolumeEdge === "top";
+			const w = isVolTop
+				? mixerExpanded
+					? Math.max(HUD_HORIZONTAL_WIDTH, MIXER_MAX_PANEL_WIDTH)
+					: HUD_HORIZONTAL_WIDTH
+				: mixerExpanded
+					? HUD_CARD_WIDTH + MIXER_MAX_PANEL_WIDTH
+					: HUD_CARD_WIDTH;
+			const h = isVolTop
+				? mixerExpanded
+					? HUD_HORIZONTAL_HEIGHT + MIXER_TOP_PANEL_HEIGHT
+					: HUD_HORIZONTAL_HEIGHT
+				: HUD_CARD_HEIGHT;
+			const dockedVol = computeDockedOverlayGeometry(
+				activeVolumeEdge,
+				activeVolumePosition,
+				w,
+				h,
+				screenW,
+				screenH
+			);
+			customRects.push({
+				x: Math.max(0, dockedVol.x * safeScale - pad),
+				y: Math.max(0, dockedVol.y * safeScale - pad),
+				width: w * safeScale + pad * 2,
+				height: h * safeScale + pad * 2
+			});
+		} else if (mode === "brightness" && activeBrightnessPosition) {
+			const isBrightTop = activeBrightnessEdge === "top";
+			const w = isBrightTop ? HUD_HORIZONTAL_WIDTH : HUD_CARD_WIDTH;
+			const h = isBrightTop ? HUD_HORIZONTAL_HEIGHT : HUD_CARD_HEIGHT;
+			const dockedBright = computeDockedOverlayGeometry(
+				activeBrightnessEdge,
+				activeBrightnessPosition,
+				w,
+				h,
+				screenW,
+				screenH
+			);
+			customRects.push({
+				x: Math.max(0, dockedBright.x * safeScale - pad),
+				y: Math.max(0, dockedBright.y * safeScale - pad),
+				width: w * safeScale + pad * 2,
+				height: h * safeScale + pad * 2
+			});
+		}
 		sendOverlayRegion([
 			zone(0, leftWidth + pad),
 			zone(width - cardWidth - pad, cardWidth + pad),
+			...customRects,
 			...measureElements([
 				[".volume-notch-wrapper", 24],
 				[".volume-mixer-panel", 24],
@@ -962,6 +1783,29 @@ function OverlayApp() {
 			])
 		]);
 	});
+
+	// Click-outside dismissal: when volume or brightness slider is active, clicking outside immediately hides it
+	useEffect(() => {
+		if (mode === "idle" || mode === "splash" || mode === "updating") return;
+		const handleOverlayOutsideClick = (e: MouseEvent | PointerEvent) => {
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
+			const overlayEl =
+				document.querySelector(".volume-notch-wrapper") ||
+				document.querySelector(".brightness-notch-wrapper") ||
+				document.querySelector(".volume-mixer-panel");
+			if (overlayEl && !overlayEl.contains(e.target as Node)) {
+				if (timeoutRef.current) {
+					clearTimeout(timeoutRef.current);
+					timeoutRef.current = null;
+				}
+				setMode("idle");
+			}
+		};
+		window.addEventListener("pointerdown", handleOverlayOutsideClick, true);
+		return () => {
+			window.removeEventListener("pointerdown", handleOverlayOutsideClick, true);
+		};
+	}, [mode]);
 
 	return (
 		<div className="overlay-container">
@@ -1027,9 +1871,29 @@ function OverlayApp() {
 						zoom: scale,
 						height: "100%",
 						display: "flex",
-						alignItems: "center",
-						justifyContent: isLeft ? "flex-start" : "flex-end",
-						width: "100%"
+						alignItems: activeModeEdge === "top" ? "flex-start" : "center",
+						justifyContent:
+							activeModeEdge === "left"
+								? "flex-start"
+								: activeModeEdge === "right"
+									? "flex-end"
+									: "center",
+						width: "100%",
+						position: "relative"
+					}}
+					onMouseEnter={() => {
+						// While hovering over volume/brightness sliders, cancel auto-hide
+						if (timeoutRef.current) {
+							clearTimeout(timeoutRef.current);
+							timeoutRef.current = null;
+						}
+					}}
+					onMouseLeave={() => {
+						// When unhovering, start 2.5s auto-hide countdown
+						if (!mixerExpandedRef.current && !splashActiveRef.current) {
+							if (timeoutRef.current) clearTimeout(timeoutRef.current);
+							timeoutRef.current = setTimeout(() => setMode("idle"), 2500);
+						}
 					}}
 				>
 					<AnimatePresence
@@ -1045,6 +1909,12 @@ function OverlayApp() {
 								onVolumeChange={handleVolumeChange}
 								mixerExpanded={mixerExpanded}
 								onMixerExpandedChange={handleMixerExpandedChange}
+								freeDragEnabled={freeDragEnabled}
+								scale={scale}
+								position={activeVolumePosition}
+								onPositionChange={handleVolumePositionChange}
+								onDragStart={handleDragStart}
+								onDragEnd={handleVolumeDragEnd}
 								key="volume-island"
 							/>
 						)}
@@ -1052,6 +1922,12 @@ function OverlayApp() {
 							<BrightnessNotch
 								brightness={brightness}
 								onBrightnessChange={handleBrightnessChange}
+								freeDragEnabled={freeDragEnabled}
+								scale={scale}
+								position={activeBrightnessPosition}
+								onPositionChange={handleBrightnessPositionChange}
+								onDragStart={handleDragStart}
+								onDragEnd={handleBrightnessDragEnd}
 								key="brightness-island"
 							/>
 						)}

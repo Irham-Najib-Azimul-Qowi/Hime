@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 
 mod battery;
 mod bluetooth;
@@ -37,11 +37,32 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
         set_taskbar_visibility(true, true);
         NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
         set_native_osd_suppressed(false);
+        restore_native_notifications();
     }
     BOOL(0)
 }
 
+fn setup_memory_optimizer() {
+    std::thread::spawn(|| {
+        use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            if crate::state::SHUTTING_DOWN.load(Ordering::Relaxed) {
+                break;
+            }
+            unsafe {
+                let _ = EmptyWorkingSet(GetCurrentProcess());
+            }
+        }
+    });
+}
+
 fn main() {
+    // Optimize WebView2 RAM footprint and Chromium multi-process overhead
+    let webview2_args = "--renderer-process-limit=2 --disable-features=CalculateNativeWinOcclusion,TranslateUI,MediaSessionService --js-flags=\"--max-old-space-size=64\"";
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", webview2_args);
+
     let mut args = std::env::args_os();
     if args.nth(1).as_deref() == Some(std::ffi::OsStr::new("--taskbar-watchdog")) {
         if let (Some(pid), Some(marker)) = (args.next(), args.next()) {
@@ -145,6 +166,8 @@ fn main() {
             launch_new_instance,
             update_dock_rect,
             update_notch_rect,
+            update_volume_overlay_rect,
+            update_brightness_overlay_rect,
             window_region::set_window_region,
             set_dock_hovered,
             set_dock_hidden,
@@ -190,7 +213,10 @@ fn main() {
             load_settings,
             settings_file_readable,
             capture_window_thumbnail,
+            commands::get_window_title,
             get_wifi_status,
+            get_ethernet_status,
+            commands::check_internet_connectivity,
             set_wifi_state,
             get_bluetooth_state,
             set_bluetooth_state,
@@ -264,6 +290,7 @@ fn main() {
         .setup(|app| {
             crate::diagnostics::record("debug", "3: inside setup hook");
             init_taskbar_marker(app.handle());
+            init_native_notif_marker(app.handle());
             // Populate the settings cache before anything else: a webview can
             // invoke save_setting as soon as it loads, which happens before the
             // rest of this hook runs.
@@ -276,6 +303,9 @@ fn main() {
             if taskbar_marker_exists() {
                 restore_taskbar_after_crash();
                 NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
+            }
+            if native_notif_marker_exists() {
+                restore_native_notifications_after_crash();
             }
 
             // Update check on startup (non-blocking). Always runs so the UI can
@@ -376,11 +406,20 @@ fn main() {
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } => {
                     let h = handle_for_dock_events.clone();
-                    if DOCK_APPBAR_REGISTERED.load(Ordering::Relaxed) {
+                    if crate::utils::dock_enabled() {
                         let w = dock_for_events.clone();
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            register_dock_appbar(w);
+                            if crate::utils::dock_enabled() && !SHUTTING_DOWN.load(Ordering::Relaxed)
+                            {
+                                if crate::utils::get_setting_str(&h, "bloom-dock-mode").as_deref()
+                                    == Some("fixed")
+                                {
+                                    register_dock_appbar(w);
+                                } else {
+                                    reposition_autohide_dock(&h, w);
+                                }
+                            }
                             sync_overlays(&h);
                         });
                     } else {
@@ -439,6 +478,7 @@ fn main() {
             let _ = COMMAND_SENDER.set(tx.clone());
             services::setup_keyboard_hook(app.handle().clone());
             setup_taskbar_hook();
+            services::setup_native_notification_suppression(app.handle().clone());
             setup_audio_visualization(app.handle().clone());
             setup_settings_watcher(app.handle().clone());
             diagnostics::record("services_ready", "hooks and settings watcher initialized");
@@ -446,6 +486,7 @@ fn main() {
             bluetooth::setup_bluetooth_notifications(app.handle().clone());
             usb::setup_usb_notifications(app.handle().clone());
             jack::setup_jack_notifications(app.handle().clone());
+            setup_memory_optimizer();
 
             // Listen for second-instance signal to open settings
             if let Some(&h_event) = SINGLE_INSTANCE_EVENT_HANDLE.get() {
@@ -477,14 +518,123 @@ fn main() {
                     if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeShowIsland")) } {
                         loop {
                             let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
-                            if res == WAIT_OBJECT_0 {
+                            if res == WAIT_OBJECT_0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
                                 diagnostics::record("hotkey", "source=hime_show_island_event");
                                 if let Some(main_win) = app_handle.get_webview_window("main") {
                                     let _ = main_win.show();
                                     let _ = main_win.unminimize();
-                                    let _ = main_win.set_focus();
-                                    let _ = main_win.emit("hime-show-island", ());
+                                    if let Ok(hwnd) = main_win.hwnd() {
+                                        re_assert_topmost(hwnd);
+                                    }
                                 }
+                                let _ = app_handle.emit_to("main", "hime-show-island", ());
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Listen for Win32 Named Event HimeToggleAssistant
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeToggleAssistant")) } {
+                        loop {
+                            let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                            if res == WAIT_OBJECT_0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                                diagnostics::record("hotkey", "source=hime_toggle_assistant_event");
+                                if let Some(main_win) = app_handle.get_webview_window("main") {
+                                    let _ = main_win.show();
+                                    let _ = main_win.unminimize();
+                                    if let Ok(hwnd) = main_win.hwnd() {
+                                        re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app_handle.emit_to("main", "hime-toggle-assistant", ());
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Listen for Win32 Named Event HimeToggleMusic
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeToggleMusic")) } {
+                        loop {
+                            let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                            if res == WAIT_OBJECT_0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                                diagnostics::record("hotkey", "source=hime_toggle_music_event");
+                                if let Some(main_win) = app_handle.get_webview_window("main") {
+                                    let _ = main_win.show();
+                                    let _ = main_win.unminimize();
+                                    if let Ok(hwnd) = main_win.hwnd() {
+                                        re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app_handle.emit_to("main", "hime-toggle-music", ());
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Listen for Win32 Named Event HimeToggleDock
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeToggleDock")) } {
+                        loop {
+                            let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                            if res == WAIT_OBJECT_0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                                diagnostics::record("hotkey", "source=hime_toggle_dock_event");
+                                let enabled = crate::utils::dock_enabled();
+                                let new_val = !enabled;
+                                let h = app_handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    crate::commands::toggle_dock(h, new_val).await;
+                                });
+                                let _ = app_handle.emit_to("main", "hime-toggle-dock", new_val);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Listen for Win32 Named Event HimeShowShortcuts
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use windows::core::w;
+                    use windows::Win32::Foundation::WAIT_OBJECT_0;
+                    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+                    if let Ok(h_event) = unsafe { CreateEventW(None, false, false, w!("HimeShowShortcuts")) } {
+                        loop {
+                            let res = unsafe { WaitForSingleObject(h_event, INFINITE) };
+                            if res == WAIT_OBJECT_0 && !SHUTTING_DOWN.load(Ordering::Relaxed) {
+                                diagnostics::record("hotkey", "source=hime_show_shortcuts_event");
+                                if let Some(main_win) = app_handle.get_webview_window("main") {
+                                    let _ = main_win.show();
+                                    let _ = main_win.unminimize();
+                                    if let Ok(hwnd) = main_win.hwnd() {
+                                        re_assert_topmost(hwnd);
+                                    }
+                                }
+                                let _ = app_handle.emit_to("main", "hime-show-shortcuts", ());
                             }
                         }
                     }
@@ -542,6 +692,7 @@ fn main() {
                             set_taskbar_visibility(true, true);
                             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
                             set_native_osd_suppressed(false);
+                            restore_native_notifications();
                             close_single_instance_handles();
 
                             ah.restart();
@@ -575,6 +726,7 @@ fn main() {
             set_taskbar_visibility(true, true);
             NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
             set_native_osd_suppressed(false);
+            restore_native_notifications();
         }
     });
 }

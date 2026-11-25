@@ -12,7 +12,7 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::client::{connect_named_pipe, rpc_call};
 
@@ -65,6 +65,11 @@ impl HimeBridgeService {
         let default_token = std::env::var("HIME_AUTH_TOKEN")
             .unwrap_or_else(|_| "hime-default-dev-token".to_string());
 
+        let initial_nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
         let service = Arc::new(Self {
             app,
             state: Mutex::new(CoreConnectionState::Offline),
@@ -72,7 +77,7 @@ impl HimeBridgeService {
             start_time: Instant::now(),
             last_ping_ms: Mutex::new(None),
             session_token: Mutex::new(default_token),
-            nonce_counter: AtomicU64::new(1),
+            nonce_counter: AtomicU64::new(initial_nonce),
             approvals: Mutex::new(HashMap::new()),
             core_child: Mutex::new(None),
             shutdown_flag: AtomicBool::new(false),
@@ -97,7 +102,13 @@ impl HimeBridgeService {
             candidates.push(dir.join("hime-core.exe"));
             candidates.push(dir.join("../../core/target/debug/hime-core.exe"));
             candidates.push(dir.join("../../core/target/release/hime-core.exe"));
+            candidates.push(dir.join("../../../core/target/debug/hime-core.exe"));
+            candidates.push(dir.join("../../../core/target/release/hime-core.exe"));
         }
+
+        // Robust explicit workspace candidate paths
+        candidates.push(PathBuf::from(r"X:\folder_ai\Hime\core\target\debug\hime-core.exe"));
+        candidates.push(PathBuf::from(r"X:\folder_ai\Hime\core\target\release\hime-core.exe"));
 
         // Relative to current working directory
         candidates.push(PathBuf::from("core/target/debug/hime-core.exe"));
@@ -147,10 +158,21 @@ impl HimeBridgeService {
             return;
         }
 
+        // Check if our tracked child process is still running
+        {
+            let mut lock = self.core_child.lock().unwrap();
+            if let Some(child) = lock.as_mut() {
+                if let Ok(None) = child.try_wait() {
+                    return;
+                }
+            }
+        }
+
         if let Some(binary) = self.locate_core_binary() {
             let token = self.session_token.lock().unwrap().clone();
             let mut cmd = Command::new(&binary);
             cmd.env("HIME_AUTH_TOKEN", &token);
+            cmd.env("HIME_SUPERADMIN", "1");
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -162,7 +184,7 @@ impl HimeBridgeService {
                     let mut lock = self.core_child.lock().unwrap();
                     *lock = Some(child);
                     // Give Core a brief moment to create the Named Pipe
-                    std::thread::sleep(Duration::from_millis(300));
+                    std::thread::sleep(Duration::from_millis(500));
                 }
                 Err(e) => {
                     eprintln!(
@@ -176,14 +198,28 @@ impl HimeBridgeService {
 
     /// Attempts connection and authentication handshake with Hime Core.
     pub fn connect_and_handshake(&self) -> Result<File, String> {
-        let mut file =
-            connect_named_pipe(None).map_err(|e| format!("Named Pipe connection failed: {}", e))?;
+        let mut conn = connect_named_pipe(None);
+        if conn.is_err() {
+            // First attempt failed: ensure core is running, give it 500ms to initialize Named Pipe, and retry
+            self.ensure_core_running();
+            std::thread::sleep(Duration::from_millis(500));
+            conn = connect_named_pipe(None);
+        }
+        let mut file = conn.map_err(|e| format!("Named Pipe connection failed: {}", e))?;
 
         let token = self.session_token.lock().unwrap().clone();
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        let prev = self.nonce_counter.load(Ordering::SeqCst);
+        let candidate = if now_micros > prev { now_micros } else { prev.saturating_add(1) };
+        let _ = self.nonce_counter.fetch_max(candidate, Ordering::SeqCst);
         let nonce = self.nonce_counter.fetch_add(1, Ordering::SeqCst);
 
         let handshake_params = json!({
-            "client_id": "bloom-shell-bridge",
+            "client_id": "hime-shell-bridge",
             "auth_token": token,
             "nonce": nonce,
         });
@@ -253,7 +289,7 @@ impl HimeBridgeService {
 
     /// Resolves an approval decision ("approve" | "deny") with Hime Core.
     pub fn resolve_approval(&self, request_id: &str, decision: &str) -> Result<String, String> {
-        let mut file = connect_named_pipe(None)
+        let mut file = self.connect_and_handshake()
             .map_err(|e| format!("Cannot resolve approval: Hime Core is offline ({})", e))?;
 
         let params = json!({
@@ -261,7 +297,7 @@ impl HimeBridgeService {
             "decision": decision,
         });
 
-        let resp = rpc_call(&mut file, "approvals.resolve", Some(params))?;
+        let resp = rpc_call(&mut file, "approval.resolve", Some(params))?;
         let status = resp
             .get("status")
             .and_then(|v| v.as_str())
@@ -332,7 +368,7 @@ impl HimeBridgeService {
             "conversation.create",
             Some(json!({
                 "title": "Hime Assistant Chat",
-                "model": model.unwrap_or("hermes-3-llama-3.1-8b")
+                "model": model.unwrap_or("openrouter/deepseek/deepseek-chat")
             })),
         )?;
 
@@ -347,7 +383,7 @@ impl HimeBridgeService {
             Some(json!({
                 "conversation_id": conv_id,
                 "prompt": prompt,
-                "model": model.unwrap_or("hermes-3-llama-3.1-8b")
+                "model": model.unwrap_or("openrouter/deepseek/deepseek-chat")
             })),
         )?;
 
@@ -452,39 +488,536 @@ impl HimeBridgeService {
         )
     }
 
+    /// Fetches lyrics from Hime Core (cached or LRCLIB).
+    pub fn get_lyrics(
+        &self,
+        title: &str,
+        artist: &str,
+        album: Option<&str>,
+        duration_sec: Option<u32>,
+        allow_online: bool,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "lyrics.get",
+            Some(json!({
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "duration_sec": duration_sec,
+                "allow_online": allow_online,
+            })),
+        )
+    }
+
+    /// Sets user offset for lyrics in milliseconds.
+    pub fn set_lyrics_offset(&self, cache_key: &str, offset_ms: i32) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "lyrics.set_offset",
+            Some(json!({
+                "cache_key": cache_key,
+                "offset_ms": offset_ms,
+            })),
+        )
+    }
+
+    /// Clears the lyrics cache in Hime Core.
+    pub fn clear_lyrics_cache(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "lyrics.clear_cache", Some(json!({})))
+    }
+
+    // --- Tasks / Productivity ---
+
+    /// Lists tasks from Core's productivity board.
+    pub fn list_tasks(&self, board_id: Option<&str>) -> Result<serde_json::Value, String> {
+        let mut file = match self.connect_and_handshake() {
+            Ok(f) => f,
+            Err(e) => {
+                crate::diagnostics::record("tasks_list_fallback", &format!("error={}", e));
+                return Ok(json!([]));
+            }
+        };
+        match rpc_call(
+            &mut file,
+            "productivity.tasks.list",
+            Some(json!({ "board_id": board_id.unwrap_or("board-default") })),
+        ) {
+            Ok(val) => Ok(val),
+            Err(e) => {
+                crate::diagnostics::record("tasks_rpc_fallback", &format!("error={}", e));
+                Ok(json!([]))
+            }
+        }
+    }
+
+    /// Creates a new task on the productivity board.
+    pub fn create_task(
+        &self,
+        title: &str,
+        priority: &str,
+        due_date: Option<i64>,
+        labels: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.tasks.create",
+            Some(json!({
+                "title": title,
+                "priority": priority,
+                "due_date": due_date,
+                "labels": labels,
+                "description": description,
+            })),
+        )
+    }
+
+    /// Updates an existing task (partial update — only provided fields change).
+    pub fn update_task(
+        &self,
+        task_id: &str,
+        title: Option<&str>,
+        priority: Option<&str>,
+        status: Option<&str>,
+        due_date: Option<i64>,
+        labels: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        let mut params = json!({ "task_id": task_id });
+        if let Some(t) = title { params["title"] = json!(t); }
+        if let Some(p) = priority { params["priority"] = json!(p); }
+        if let Some(s) = status { params["status"] = json!(s); }
+        if let Some(d) = due_date { params["due_date"] = json!(d); }
+        if let Some(l) = labels { params["labels"] = json!(l); }
+        if let Some(d) = description { params["description"] = json!(d); }
+        rpc_call(&mut file, "productivity.tasks.update", Some(params))
+    }
+
+    /// Deletes a task by ID.
+    pub fn delete_task(&self, task_id: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.tasks.delete",
+            Some(json!({ "task_id": task_id })),
+        )
+    }
+
+    /// Parses natural language into task fields (title, priority, due_date).
+    pub fn parse_task_natural(&self, text: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.tasks.parse_natural",
+            Some(json!({ "text": text })),
+        )
+    }
+
+    // --- Translation ---
+
+    /// Translates explicit text via Core's translation service.
+    pub fn translate_text(&self, text: &str, target_lang: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "translate.selection",
+            Some(json!({ "text": text, "target_lang": target_lang })),
+        )
+    }
+
+    /// Captures current system selection and translates it.
+    pub fn translate_selection(&self, target_lang: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "translate.selection",
+            Some(json!({ "target_lang": target_lang })),
+        )
+    }
+
+    /// Gets translation opt-in state.
+    pub fn get_translate_opt_in(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "translate.get_opt_in", None)
+    }
+
+    /// Sets translation opt-in state.
+    pub fn set_translate_opt_in(&self, enabled: bool) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "translate.set_opt_in",
+            Some(json!({ "enabled": enabled })),
+        )
+    }
+
+    // --- Stage U3: Routines, Commitments, Enforcement & Screen-Time ---
+
+    pub fn list_routines(&self, active_only: bool) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.list",
+            Some(json!({ "active_only": active_only })),
+        )
+    }
+
+    pub fn create_routine(&self, routine: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.create",
+            Some(json!({ "routine": routine })),
+        )
+    }
+
+    pub fn update_routine(&self, routine: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.update",
+            Some(json!({ "routine": routine })),
+        )
+    }
+
+    pub fn delete_routine(&self, id: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.delete",
+            Some(json!({ "id": id })),
+        )
+    }
+
+    pub fn start_routine_session(
+        &self,
+        routine_id: &str,
+        scheduled_for: Option<i64>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.start_session",
+            Some(json!({
+                "routine_id": routine_id,
+                "scheduled_for": scheduled_for,
+            })),
+        )
+    }
+
+    pub fn complete_routine_session(&self, session_id: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.complete_session",
+            Some(json!({ "session_id": session_id })),
+        )
+    }
+
+    pub fn skip_routine_session(&self, session_id: &str, reason: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.routines.skip_session",
+            Some(json!({
+                "session_id": session_id,
+                "reason": reason,
+            })),
+        )
+    }
+
+    pub fn snooze_routine_session(
+        &self,
+        session_id: &str,
+        minutes: u32,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        let mut params = json!({
+            "session_id": session_id,
+            "minutes": minutes,
+        });
+        if let Some(r) = reason {
+            params["reason"] = json!(r);
+        }
+        rpc_call(&mut file, "productivity.routines.snooze_session", Some(params))
+    }
+
+    pub fn list_commitments(&self, active_only: bool) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.commitments.list",
+            Some(json!({ "active_only": active_only })),
+        )
+    }
+
+    pub fn create_commitment(&self, commitment: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.commitments.create",
+            Some(json!({ "commitment": commitment })),
+        )
+    }
+
+    pub fn request_commitment_weakening(
+        &self,
+        id: &str,
+        delay_seconds: Option<i64>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.commitments.request_weakening",
+            Some(json!({
+                "id": id,
+                "delay_seconds": delay_seconds,
+            })),
+        )
+    }
+
+    pub fn trigger_emergency_pause(&self, duration_min: i64, reason: &str) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.enforce.emergency_pause",
+            Some(json!({
+                "duration_min": duration_min,
+                "reason": reason,
+            })),
+        )
+    }
+
+    pub fn get_emergency_pause_status(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "productivity.enforce.get_pause_status", None)
+    }
+
+    pub fn get_enforcement_history(&self, limit: usize) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.enforce.get_history",
+            Some(json!({ "limit": limit })),
+        )
+    }
+
+    pub fn record_screentime(
+        &self,
+        app_name: &str,
+        title: Option<&str>,
+        category: &str,
+        duration_secs: i64,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.screentime.record",
+            Some(json!({
+                "app_name": app_name,
+                "window_title": title,
+                "category": category,
+                "duration_secs": duration_secs,
+            })),
+        )
+    }
+
+    pub fn list_screentime(&self, limit: usize) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.screentime.list",
+            Some(json!({ "limit": limit })),
+        )
+    }
+
+    pub fn clear_screentime(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "productivity.screentime.clear_all", None)
+    }
+
+    pub fn get_screentime_settings(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "productivity.screentime.get_settings", None)
+    }
+
+    pub fn set_screentime_opt_in(&self, opt_in: bool) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "productivity.screentime.set_opt_in",
+            Some(json!({ "opt_in": opt_in })),
+        )
+    }
+
+    // --- Proactive & Interaction Engine ---
+
+    pub fn get_proactive_settings(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "proactive.settings.get", None)
+    }
+
+    pub fn set_proactive_settings(
+        &self,
+        is_enabled: bool,
+        cooldown_minutes: i64,
+        mute_hours: Option<i64>,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "proactive.settings.set",
+            Some(json!({
+                "is_enabled": is_enabled,
+                "cooldown_minutes": cooldown_minutes,
+                "mute_hours": mute_hours,
+            })),
+        )
+    }
+
+    pub fn list_proactive_suggestions(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "proactive.suggestions.list",
+            Some(json!({
+                "status": status,
+                "limit": limit,
+            })),
+        )
+    }
+
+    pub fn respond_proactive_suggestion(
+        &self,
+        suggestion_id: &str,
+        action: &str,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "proactive.suggestions.respond",
+            Some(json!({
+                "suggestion_id": suggestion_id,
+                "action": action,
+            })),
+        )
+    }
+
+    pub fn evaluate_proactive_suggestions(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "proactive.suggestions.evaluate", None)
+    }
+
+    pub fn register_periodic_reminder(
+        &self,
+        id: &str,
+        title: &str,
+        message: &str,
+        interval_secs: u64,
+        is_active: bool,
+    ) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(
+            &mut file,
+            "proactive.reminders.register",
+            Some(json!({
+                "id": id,
+                "title": title,
+                "message": message,
+                "interval_secs": interval_secs,
+                "is_active": is_active,
+            })),
+        )
+    }
+
+    pub fn list_periodic_reminders(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "proactive.reminders.list", None)
+    }
+
+    pub fn check_proactive_reminders(&self) -> Result<serde_json::Value, String> {
+        let mut file = self.connect_and_handshake()?;
+        rpc_call(&mut file, "proactive.reminders.check", Some(json!({ "threshold_minutes": 60 })))
+    }
+
     /// Background monitor loop: performs backoff reconnect and health checks.
     pub fn start_supervisor_loop(self: Arc<Self>) {
         std::thread::spawn(move || {
             let mut backoff = Duration::from_millis(500);
-            while !self.shutdown_flag.load(Ordering::Relaxed) {
-                // Ensure 9Router gateway is running in background
-                self.ensure_9router_running();
+            let mut router_check_counter: usize = 0;
+            let mut idle_poll_counter: usize = 0;
 
-                if connect_named_pipe(None).is_ok() {
-                    if *self.state.lock().unwrap() != CoreConnectionState::Online {
-                        let _ = self.connect_and_handshake();
+            while !self.shutdown_flag.load(Ordering::Relaxed) {
+                let is_online = *self.state.lock().unwrap() == CoreConnectionState::Online;
+                if is_online {
+                    // Periodic check for 9Router (every 30s instead of every 4s to avoid TCP spam)
+                    router_check_counter = router_check_counter.saturating_add(1);
+                    if router_check_counter >= 8 {
+                        router_check_counter = 0;
+                        self.ensure_9router_running();
                     }
 
-                    // Poll for new completed downloads and forward events to UI
-                    if let Ok(mut dl_file) = connect_named_pipe(None) {
-                        if let Ok(val) = rpc_call(&mut dl_file, "storage.download.poll_new", None) {
-                            if let Some(arr) = val.as_array() {
-                                for item in arr {
-                                    let _ = self.app.emit("hime-download-detected", item);
+                    // Check health via ping
+                    match self.ping_core() {
+                        Ok(_) => {
+                            // Poll for new completed downloads with adaptive throttling (every ~8s)
+                            idle_poll_counter = idle_poll_counter.saturating_add(1);
+                            if idle_poll_counter >= 2 {
+                                idle_poll_counter = 0;
+                                if let Ok(mut dl_file) = connect_named_pipe(None) {
+                                    if let Ok(val) = rpc_call(&mut dl_file, "storage.download.poll_new", None) {
+                                        if let Some(arr) = val.as_array() {
+                                            for item in arr {
+                                                let _ = self.app.emit("hime-download-detected", item);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Ok(mut rem_file) = connect_named_pipe(None) {
+                                    if let Ok(val) = rpc_call(&mut rem_file, "proactive.reminders.check", Some(json!({ "threshold_minutes": 60 }))) {
+                                        if let Some(arr) = val.as_array() {
+                                            for item in arr {
+                                                let _ = self.app.emit("hime-reminder", item);
+                                                let _ = self.app.emit("hime-toggle-assistant", ());
+                                                if let Some(main_win) = self.app.get_webview_window("main") {
+                                                    let _ = main_win.show();
+                                                    let _ = main_win.unminimize();
+                                                    let _ = main_win.emit("hime-toggle-assistant", ());
+                                                    let _ = main_win.emit("hime-reminder", item);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                            backoff = Duration::from_secs(4);
+                        }
+                        Err(_) => {
+                            *self.state.lock().unwrap() = CoreConnectionState::Offline;
+                            self.emit_status_change();
+                            backoff = Duration::from_millis(500);
                         }
                     }
-
-                    backoff = Duration::from_secs(4); // healthy interval
                 } else {
-                    if *self.state.lock().unwrap() == CoreConnectionState::Online {
-                        *self.state.lock().unwrap() = CoreConnectionState::Offline;
-                        self.emit_status_change();
-                    }
-                    // Attempt to spawn if missing
+                    // Offline: aggressively ensure 9router and core are started
+                    self.ensure_9router_running();
                     self.ensure_core_running();
-                    backoff = (backoff * 2).min(Duration::from_secs(10));
+                    if self.connect_and_handshake().is_ok() {
+                        backoff = Duration::from_secs(4);
+                    } else {
+                        backoff = (backoff * 2).min(Duration::from_secs(6));
+                    }
                 }
                 std::thread::sleep(backoff);
             }

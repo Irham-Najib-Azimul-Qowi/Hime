@@ -37,38 +37,50 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "6px 4px 8px 4px",
+        padding: "4px 4px 8px 4px",
         borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
         marginBottom: "8px",
-        position: "relative"
+        position: "relative",
+        minHeight: "30px"
       }}
     >
-      {/* Left: Mascot & Title */}
-      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-        <div style={{ display: "flex", alignItems: "center" }}>
-          <HimeEyes size={16} expression={expression} />
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <span
-            style={{
-              fontSize: "13px",
-              fontWeight: 600,
-              color: "#F4F6FA",
-              letterSpacing: "0.2px"
-            }}
-          >
-            Hime
-          </span>
-          <div
-            style={{
-              width: "6px",
-              height: "6px",
-              borderRadius: "50%",
-              backgroundColor: isOnline ? "#34E3A6" : "#6F7785"
-            }}
-            title={isOnline ? "Online" : "Offline"}
-          />
-        </div>
+      {/* Left: Title & Status */}
+      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        <div
+          style={{
+            width: "6px",
+            height: "6px",
+            borderRadius: "50%",
+            backgroundColor: isOnline ? "#34E3A6" : "#6F7785",
+            boxShadow: isOnline ? "0 0 8px rgba(52, 227, 166, 0.5)" : "none"
+          }}
+          title={isOnline ? "Online" : "Offline"}
+        />
+        <span
+          style={{
+            fontSize: "11.5px",
+            fontWeight: 600,
+            color: "#8E96A4",
+            letterSpacing: "0.3px",
+            fontFamily: "Consolas, monospace"
+          }}
+        >
+          HIME
+        </span>
+      </div>
+
+      {/* Center: Hime's Bot Eyes */}
+      <div
+        style={{
+          position: "absolute",
+          left: "50%",
+          transform: "translateX(-50%)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center"
+        }}
+      >
+        <HimeEyes size={22} expression={expression} />
       </div>
 
       {/* Right: Actions */}

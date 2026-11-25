@@ -137,9 +137,12 @@ function SettingsApp() {
 	return (
 		<div className="settings-container" style={{ zoom: settings.scale }} inert={isClosing}>
 			<div className="title-bar" data-tauri-drag-region>
-				<span className="title-text" data-tauri-drag-region>
-					Settings
-				</span>
+				<div style={{ display: "flex", alignItems: "center", gap: "8px" }} data-tauri-drag-region>
+					<img src="/hime.png" alt="Hime Logo" style={{ width: "16px", height: "16px", borderRadius: "4px" }} draggable={false} />
+					<span className="title-text" data-tauri-drag-region>
+						Settings
+					</span>
+				</div>
 				<button className="close-btn" onClick={handleClose} title="Close Settings">
 					<X size={12} strokeWidth={1.5} className="close-btn-icon" />
 				</button>
@@ -148,7 +151,10 @@ function SettingsApp() {
 			<div className="settings-body">
 				<div className="settings-sidebar">
 					<div className="settings-sidebar-intro">
-						<strong>Hime Island</strong>
+						<div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+							<img src="/hime.png" alt="Hime Logo" style={{ width: "22px", height: "22px", borderRadius: "6px" }} draggable={false} />
+							<strong>Hime Island</strong>
+						</div>
 						<span>Make it yours</span>
 					</div>
 					{TABS.map(({ id, label, icon: Icon }) => (
@@ -315,6 +321,12 @@ function SettingsApp() {
 							handleCityClear={settings.handleCityClear}
 							statusWidgets={settings.statusWidgets}
 							handleWidgetsChange={settings.handleWidgetsChange}
+							freeDragEnabled={settings.freeDragEnabled}
+							toggleFreeDrag={settings.toggleFreeDrag}
+							assistantEnabled={settings.assistantEnabled}
+							toggleAssistant={settings.toggleAssistant}
+							suppressNativeNotifications={settings.suppressNativeNotifications}
+							toggleSuppressNativeNotifications={settings.toggleSuppressNativeNotifications}
 						/>
 					)}
 					{activeTab === "dock" && (
@@ -370,6 +382,8 @@ function SettingsApp() {
 							toggleBrightnessOverlay={settings.toggleBrightnessOverlay}
 							brightnessEdgeEnabled={settings.brightnessEdgeEnabled}
 							toggleBrightnessEdge={settings.toggleBrightnessEdge}
+							freeDragEnabled={settings.freeDragEnabled}
+							toggleFreeDrag={settings.toggleFreeDrag}
 						/>
 					)}
 					{activeTab === "hime" && <HimeSettingsTab status={himeStatus} onRefresh={refreshHime} />}

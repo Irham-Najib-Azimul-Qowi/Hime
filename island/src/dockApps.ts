@@ -12,6 +12,8 @@ export interface AppInfo {
 	// A pin keeps its display name, but its icon is cached under the live name.
 	icon_name?: string;
 	icon_path?: string;
+	window_title?: string;
+	title?: string;
 }
 
 export interface TrayApp {
@@ -19,6 +21,117 @@ export interface TrayApp {
 	path: string;
 	tray_ids: string[];
 	window_handles: number[];
+}
+
+export const HOST_PROCESSES = ["msedge.exe", "chrome.exe", "brave.exe", "applicationframehost.exe"];
+
+export function isBrowserHost(path: string) {
+	const p = path.toLowerCase();
+	return HOST_PROCESSES.some((host) => p.includes(host));
+}
+
+export function isBrowserPwa(app: Pick<AppInfo, "path" | "name">): boolean {
+	const p = (app.path || "").toLowerCase();
+	const n = (app.name || "").toLowerCase();
+	if (p.includes("_crx_") || p.includes("!app") || p.includes("extension://")) return true;
+	if (isBrowserHost(p)) {
+		const isChrome = p.includes("chrome");
+		const isEdge = p.includes("msedge") || p.includes("edge");
+		const isBrave = p.includes("brave");
+		if (isChrome && !n.includes("chrome") && !n.includes("google")) return true;
+		if (isEdge && !n.includes("edge") && !n.includes("microsoft")) return true;
+		if (isBrave && !n.includes("brave")) return true;
+	}
+	return false;
+}
+
+export function appIdentity(p: string, executable?: string, name?: string) {
+	if (!p) return "";
+	const normalized = p.toLowerCase().replace(/\\/g, "/");
+	if (!normalized.includes("/")) return normalized;
+	if (name && isBrowserHost(normalized)) {
+		return `${normalized}:${name.toLowerCase()}`;
+	}
+	if (executable) return `${normalized}:${executable.toLowerCase()}`;
+	return normalized;
+}
+
+export const itemKey = (app: AppInfo) =>
+	app.hwnd
+		? `${appIdentity(app.path, app.executable, app.name)}#${app.hwnd}`
+		: appIdentity(app.path, app.executable, app.name);
+
+export const fileOf = (p: string) =>
+	(p.split("/").pop()?.split("\\").pop()?.toLowerCase() || "").replace(/\.lnk$/, "");
+
+export const isIdentifier = (p: string) => !p.includes("/") && !p.includes("\\");
+
+export function isSameApp(a: AppInfo, b: AppInfo): boolean {
+	if (!a.path || !b.path) return false;
+	const aNorm = a.path.toLowerCase().replace(/\\/g, "/");
+	const bNorm = b.path.toLowerCase().replace(/\\/g, "/");
+
+	if (itemKey(a) === itemKey(b)) return true;
+	if (aNorm === bNorm && !isBrowserHost(aNorm)) return true;
+	if (matchesPackagedExecutable(a, b)) return true;
+
+	const aIsHost = isBrowserHost(a.path);
+	const bIsHost = isBrowserHost(b.path);
+	if (aIsHost || bIsHost) {
+		const aExe = (a.executable?.toLowerCase() || fileOf(a.path)).replace(/\.(exe|lnk)$/, "");
+		const bExe = (b.executable?.toLowerCase() || fileOf(b.path)).replace(/\.(exe|lnk)$/, "");
+		const sameBrowserFamily =
+			(aExe.includes("chrome") && bExe.includes("chrome")) ||
+			(aExe.includes("msedge") && bExe.includes("msedge")) ||
+			(aExe.includes("brave") && bExe.includes("brave")) ||
+			aExe === bExe;
+
+		if (!sameBrowserFamily) return false;
+
+		const aPwa = isBrowserPwa(a);
+		const bPwa = isBrowserPwa(b);
+
+		// Both are regular browser instances
+		if (!aPwa && !bPwa) return true;
+
+		// Both are PWAs
+		if (aPwa && bPwa) {
+			return a.name.toLowerCase() === b.name.toLowerCase() || aNorm === bNorm;
+		}
+
+		// One is PWA and the other is main browser -> separate
+		return false;
+	}
+
+	const aId = isIdentifier(a.path);
+	const bId = isIdentifier(b.path);
+	if (aId && bId) return aNorm === bNorm;
+	if (aId !== bId) {
+		const fileSide = aId ? b : a;
+		const idLower = (aId ? a : b).path.toLowerCase();
+		const na = a.name.toLowerCase();
+		const nb = b.name.toLowerCase();
+		if (na !== nb && !na.includes(nb) && !nb.includes(na)) return false;
+		const stem = (fileSide.executable?.toLowerCase() || fileOf(fileSide.path)).replace(
+			/\.(exe|lnk)$/,
+			""
+		);
+		return stem.length >= 3 && idLower.includes(stem);
+	}
+
+	if (appIdentity(a.path, a.executable, a.name) === appIdentity(b.path, b.executable, b.name)) return true;
+
+	const normExe = (s: string) => (s.endsWith(".exe") ? s : `${s}.exe`);
+	const aExe = a.executable?.toLowerCase() || fileOf(a.path);
+	const bExe = b.executable?.toLowerCase() || fileOf(b.path);
+	if (!aExe || !bExe) return false;
+	if (normExe(aExe) === normExe(bExe)) return true;
+
+	if (a.name && b.name && a.name.trim().toLowerCase() === b.name.trim().toLowerCase()) {
+		return true;
+	}
+
+	return false;
 }
 
 export function dockIconKey(
@@ -127,4 +240,11 @@ export function mergeTrayApps(windows: AppInfo[], tray: TrayApp[]): AppInfo[] {
 		});
 	}
 	return result;
+}
+
+export function formatWindowTitle(rawTitle: string | undefined | null, maxLen = 30): string {
+	if (!rawTitle) return "";
+	const trimmed = rawTitle.trim();
+	if (trimmed.length <= maxLen) return trimmed;
+	return trimmed.slice(0, maxLen - 3) + "...";
 }

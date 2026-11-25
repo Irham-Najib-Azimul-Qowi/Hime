@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from "react";
+import { open as openTauriDialog } from "@tauri-apps/plugin-dialog";
 import { AttachmentRef } from "./types";
 import { classifyAttachment } from "./skillsCatalog";
 
@@ -24,6 +25,7 @@ export async function computeBufferSha256(buffer: ArrayBuffer): Promise<string> 
 export function useFileAttachment() {
   const [attachments, setAttachments] = useState<AttachmentRef[]>([]);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const processFile = useCallback(async (file: File): Promise<AttachmentRef> => {
@@ -46,6 +48,24 @@ export function useFileAttachment() {
       }
     }
 
+    let snippet: string | undefined;
+    let content: string | undefined;
+    const isTextLike =
+      file.type.startsWith("text/") ||
+      file.type.includes("json") ||
+      file.type.includes("javascript") ||
+      /\.(txt|md|rs|ts|tsx|js|jsx|json|csv|py|html|css|log|toml|yaml|yml|xml|sh|ps1|bat|ini|conf)$/i.test(file.name);
+
+    if (isTextLike && file.size < 500_000) {
+      try {
+        const text = await file.text();
+        content = text;
+        snippet = text.slice(0, 1500);
+      } catch {
+        // Ignored
+      }
+    }
+
     return {
       id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       name: file.name,
@@ -54,7 +74,9 @@ export function useFileAttachment() {
       category,
       accent,
       sha256,
-      thumbnailUrl
+      thumbnailUrl,
+      snippet,
+      content
     };
   }, []);
 
@@ -82,36 +104,71 @@ export function useFileAttachment() {
     setAttachments([]);
   }, []);
 
-  // Native file dialog picker with web fallback
+  // Adds files from native file paths (e.g. from Tauri dialog or drag-and-drop events)
+  const addFilePaths = useCallback(
+    (paths: string[]) => {
+      if (!paths || paths.length === 0) return;
+      const remainingSlots = MAX_ATTACHMENTS - attachments.length;
+      if (remainingSlots <= 0) return;
+
+      const toProcess = paths.slice(0, remainingSlots);
+      const newRefs: AttachmentRef[] = toProcess.map((p) => {
+        const pathStr = typeof p === "string" ? p : (p as any).path || "";
+        const name = pathStr.split(/[\\/]/).pop() || "berkas";
+        const { category, accent } = classifyAttachment(name);
+        return {
+          id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          name,
+          path: pathStr,
+          size: 0,
+          type: "application/octet-stream",
+          category,
+          accent,
+          sha256: "0".repeat(64),
+          snippet: `[Lokasi: ${pathStr}]`
+        };
+      });
+
+      setAttachments((prev) => [...prev, ...newRefs].slice(0, MAX_ATTACHMENTS));
+    },
+    [attachments.length]
+  );
+
+  // Native file dialog picker with web fallback & dismissal guard
   const openFilePicker = useCallback(async () => {
+    setIsFileDialogOpen(true);
+    if (typeof window !== "undefined") {
+      (window as any).isFileDialogOpen = true;
+      (window as any).__isFileDialogOpen = true;
+      (window as any).__himeFileDialogOpen = true;
+    }
+
+    const resetDialogGuard = () => {
+      setTimeout(() => {
+        setIsFileDialogOpen(false);
+        if (typeof window !== "undefined") {
+          (window as any).isFileDialogOpen = false;
+          (window as any).__isFileDialogOpen = false;
+          (window as any).__himeFileDialogOpen = false;
+        }
+      }, 500);
+    };
+
     try {
-      // Dynamic import to prevent bundler / headless test failures
-      const tauriDialog = await import("@tauri-apps/plugin-dialog");
-      if (tauriDialog && typeof tauriDialog.open === "function") {
-        const selected = await tauriDialog.open({
+      if (typeof openTauriDialog === "function") {
+        const selected = await openTauriDialog({
           multiple: true,
-          directory: false
+          directory: false,
+          title: "Pilih Berkas Lampiran"
         });
         if (selected) {
           const paths = Array.isArray(selected) ? selected : [selected];
-          const tauriRefs: AttachmentRef[] = paths.map((p: any) => {
-            const pathStr = typeof p === "string" ? p : p.path || "";
-            const name = pathStr.split(/[\\/]/).pop() || "berkas";
-            const { category, accent } = classifyAttachment(name);
-            return {
-              id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-              name,
-              path: pathStr,
-              size: 0,
-              type: "application/octet-stream",
-              category,
-              accent,
-              sha256: "0".repeat(64)
-            };
-          });
-          setAttachments((prev) => [...prev, ...tauriRefs].slice(0, MAX_ATTACHMENTS));
+          addFilePaths(paths as string[]);
+          resetDialogGuard();
           return;
         }
+        resetDialogGuard();
+        return;
       }
     } catch {
       // Fallback to DOM input element
@@ -127,12 +184,26 @@ export function useFileAttachment() {
         if (e.target?.files) {
           addFiles(e.target.files);
         }
+        resetDialogGuard();
+      };
+      input.oncancel = () => {
+        resetDialogGuard();
       };
       document.body.appendChild(input);
       fileInputRef.current = input;
     }
     fileInputRef.current?.click();
-  }, [addFiles]);
+
+    if (typeof window !== "undefined") {
+      window.addEventListener(
+        "focus",
+        () => {
+          resetDialogGuard();
+        },
+        { once: true }
+      );
+    }
+  }, [addFiles, addFilePaths]);
 
   // Drag and drop event handlers
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -173,7 +244,9 @@ export function useFileAttachment() {
   return {
     attachments,
     isDraggingOver,
+    isFileDialogOpen,
     addFiles,
+    addFilePaths,
     removeAttachment,
     clearAttachments,
     openFilePicker,

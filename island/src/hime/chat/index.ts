@@ -7,3 +7,4 @@ export * from "./ChatMessageItem";
 export * from "./RunCard";
 export * from "./ChatPromptBar";
 export * from "./ChatHeader";
+export * from "./HimeDialogueStream";

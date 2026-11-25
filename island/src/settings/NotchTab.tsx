@@ -12,6 +12,8 @@ import {
 	Archive,
 	Headphones,
 	SlidersHorizontal,
+	Move,
+	Bot,
 	X
 } from "lucide-react";
 import { SettingRow } from "./SettingRow";
@@ -76,6 +78,12 @@ interface NotchTabProps {
 	handleCityClear: () => void;
 	statusWidgets: WidgetConfig;
 	handleWidgetsChange: (config: WidgetConfig) => void;
+	freeDragEnabled?: boolean;
+	toggleFreeDrag?: () => void;
+	assistantEnabled?: boolean;
+	toggleAssistant?: () => void;
+	suppressNativeNotifications?: boolean;
+	toggleSuppressNativeNotifications?: () => void;
 }
 
 export function NotchTab({
@@ -122,7 +130,13 @@ export function NotchTab({
 	selectCity,
 	handleCityClear,
 	statusWidgets,
-	handleWidgetsChange
+	handleWidgetsChange,
+	freeDragEnabled,
+	toggleFreeDrag,
+	assistantEnabled,
+	toggleAssistant,
+	suppressNativeNotifications,
+	toggleSuppressNativeNotifications
 }: NotchTabProps) {
 	const panelOn: Record<NotchPanelChoice, boolean> = {
 		calendar: calendarEnabled,
@@ -173,10 +187,54 @@ export function NotchTab({
 					</SettingRow>
 				)}
 
+				<SettingRow
+					icon={Move}
+					label="Free Position / Draggable Notch"
+					desc="Click-hold to drag the Notch and Overlays anywhere on screen"
+				>
+					<label className="toggle-switch">
+						<input
+							type="checkbox"
+							checked={freeDragEnabled ?? false}
+							onChange={toggleFreeDrag}
+						/>
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
+
+				<SettingRow
+					icon={BellRing}
+					label="Replace Windows Notifications & Calendar"
+					desc="Hide native Windows toasts & calendar flyout and show alerts in Notch"
+					divider={false}
+				>
+					<label className="toggle-switch">
+						<input
+							type="checkbox"
+							checked={suppressNativeNotifications ?? true}
+							onChange={toggleSuppressNativeNotifications}
+						/>
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
 			</div>
 
 			<div className="setting-group-label">Panels</div>
 			<div className="setting-group">
+				<SettingRow
+					icon={Bot}
+					label="Hime AI Assistant"
+					desc="Show AI Assistant panel and mascot dialogue in Notch"
+				>
+					<label className="toggle-switch">
+						<input
+							type="checkbox"
+							checked={assistantEnabled ?? true}
+							onChange={toggleAssistant}
+						/>
+						<span className="slider"></span>
+					</label>
+				</SettingRow>
 				<SettingRow icon={Calendar} label="Calendar & Timer" desc="Enable productivity split-view">
 					<label className="toggle-switch" title={lastPanelTitle(calendarEnabled)}>
 						<input

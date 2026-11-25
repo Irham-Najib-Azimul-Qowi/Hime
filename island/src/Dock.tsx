@@ -11,41 +11,21 @@ import { dockOverlapSpan } from "./dockGeometry";
 
 import {
 	dockIconKey,
-	matchesPackagedExecutable,
 	mergeTrayApps,
 	selectDockTrayApps,
+	isBrowserHost,
+	appIdentity,
+	itemKey,
+	fileOf,
+	isSameApp,
+	formatWindowTitle,
 	type AppInfo,
 	type TrayApp
 } from "./dockApps";
 import { driveLetter, hideDrive, removeCustomFolder, type DockExtra } from "./dockExtras";
 import { createRegionSender, measureElements, padRect, type RegionRect } from "./windowRegion";
 
-// Host processes (Edge/Chrome/Brave/ApplicationFrameHost) run every PWA/UWP
-// window, so their window title must be part of their identity — otherwise two
-// PWAs running under the same browser collapse into a single dock item.
-const HOST_PROCESSES = ["msedge.exe", "chrome.exe", "brave.exe", "applicationframehost.exe"];
-export function isBrowserHost(path: string) {
-	const p = path.toLowerCase();
-	return HOST_PROCESSES.some((host) => p.includes(host));
-}
-
-// Stable identity for a dock item.
-export function appIdentity(p: string, executable?: string, name?: string) {
-	if (!p) return "";
-	const normalized = p.toLowerCase().replace(/\\/g, "/");
-	// Shell application ids (AUMIDs) and bare names are unique on their own.
-	if (!normalized.includes("/")) return normalized;
-	if (name && isBrowserHost(normalized)) {
-		return `${normalized}:${name.toLowerCase()}`;
-	}
-	if (executable) return `${normalized}:${executable.toLowerCase()}`;
-	return normalized;
-}
-
-const itemKey = (app: AppInfo) =>
-	app.hwnd
-		? `${appIdentity(app.path, app.executable, app.name)}#${app.hwnd}`
-		: appIdentity(app.path, app.executable, app.name);
+export { isBrowserHost, appIdentity, isSameApp, formatWindowTitle };
 
 // WinEvent notifications can arrive for windows that do not change the dock.
 // Keep the existing array when its visible content is identical so Framer
@@ -69,52 +49,6 @@ function sameRunningApps(left: AppInfo[], right: AppInfo[]): boolean {
 		})
 	);
 }
-
-// Fuzzy identity: a running window and its installed/pinned entry often carry
-// different paths (exe vs .lnk vs AUMID), so exact keys miss and the same app
-// looks pinnable twice. Mirrors the dock list's own pinned↔running matching.
-export function isSameApp(a: AppInfo, b: AppInfo): boolean {
-	if (!a.path || !b.path) return false;
-	if (itemKey(a) === itemKey(b)) return true;
-	if (matchesPackagedExecutable(a, b)) return true;
-	// Browser hosts run many apps under one exe — only the full identity
-	// (which folds in the window/AUMID name) can match those.
-	if (isBrowserHost(a.path) || isBrowserHost(b.path)) return false;
-	const aId = isIdentifier(a.path);
-	const bId = isIdentifier(b.path);
-	// Two opaque shell ids match only exactly (checked above).
-	if (aId && bId) return false;
-	if (aId !== bId) {
-		// One side is a shell id (AUMID), the other a file path. AUMIDs embed
-		// the product name (ZedIndustries.Zed, com.squirrel.Figma.Figma), so
-		// match on overlapping display names plus id/stem cross-containment.
-		// This is the common shape: installed entries come from the AppsFolder
-		// scan (AUMID) while pinned entries are exe/.lnk paths.
-		const fileSide = aId ? b : a;
-		const idLower = (aId ? a : b).path.toLowerCase();
-		const na = a.name.toLowerCase();
-		const nb = b.name.toLowerCase();
-		if (na !== nb && !na.includes(nb) && !nb.includes(na)) return false;
-		const stem = (fileSide.executable?.toLowerCase() || fileOf(fileSide.path)).replace(
-			/\.(exe|lnk)$/,
-			""
-		);
-		return stem.length >= 3 && idLower.includes(stem);
-	}
-	if (appIdentity(a.path) === appIdentity(b.path)) return true;
-	const normExe = (s: string) => (s.endsWith(".exe") ? s : `${s}.exe`);
-	const aExe = a.executable?.toLowerCase() || fileOf(a.path);
-	const bExe = b.executable?.toLowerCase() || fileOf(b.path);
-	if (!aExe || !bExe) return false;
-	return normExe(aExe) === normExe(bExe);
-}
-
-const fileOf = (p: string) =>
-	(p.split("/").pop()?.split("\\").pop()?.toLowerCase() || "").replace(/\.lnk$/, "");
-
-// Shell application ids (AUMIDs) identify one specific app; two different PWAs
-// running in the same browser must never be matched by their shared exe name.
-const isIdentifier = (p: string) => !p.includes("/") && !p.includes("\\");
 
 // Resolve the configured start-button icon to a public asset, or to the data
 // URI of a user-uploaded icon (stored with a "custom:" prefix).
@@ -145,7 +79,7 @@ const ITEM_ANIMATE = { opacity: 1, scale: 1 };
 const ITEM_EXIT = { opacity: 0, scale: 0 };
 
 // Window dots disabled per user request
-function WindowDots(_props: { count: number; background?: boolean }) {
+function WindowDots(_props: { count?: number; background?: boolean }) {
 	return null;
 }
 
@@ -263,18 +197,29 @@ const Dock = memo(function Dock() {
 
 	const isCurrentlyHovered = isDockHovered || isEdgeHovered;
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
+	const [isUserDismissed, setIsUserDismissed] = useState(false);
 	const isAnyInteraction = isCurrentlyHovered || !!contextMenu || showAddPopup || nativeMenuOpen;
 
+	useEffect(() => {
+		if (isCurrentlyHovered) {
+			setIsUserDismissed(false);
+		}
+	}, [isCurrentlyHovered]);
+
 	const previewTimerRef = useRef<any>(null);
+	const previewLeaveTimerRef = useRef<any>(null);
+	const thumbnailCacheRef = useRef<Map<number, { title: string; image: string; timestamp: number }>>(new Map());
 	const isPreviewHoveredRef = useRef(false);
 	const hoveredAppRef = useRef<string | null>(null);
 
 	useEffect(() => {
 		if (isAnyInteraction) {
 			setInteractionState("active");
+			setIsUserDismissed(false);
 		} else if (interactionState !== "none") {
 			setInteractionState("grace");
-			const timer = setTimeout(() => setInteractionState("none"), 500);
+			// Unhover countdown: 2.5 seconds before hiding
+			const timer = setTimeout(() => setInteractionState("none"), 2500);
 			return () => clearTimeout(timer);
 		}
 	}, [isAnyInteraction]);
@@ -282,10 +227,11 @@ const Dock = memo(function Dock() {
 	const isAutoHiding = dockMode === "auto-hide" || dockMode === "peek";
 	const isHidden =
 		!startupAnimating &&
-		((dockMode !== "fixed" && isForegroundFullscreen) ||
-			isAutoHiding ||
-			(dockMode === "smart" && (isOverlapped || isMaximized))) &&
-		interactionState === "none";
+		((dockMode !== "fixed" && isUserDismissed) ||
+			(((dockMode !== "fixed" && isForegroundFullscreen) ||
+				isAutoHiding ||
+				(dockMode === "smart" && (isOverlapped || isMaximized))) &&
+				interactionState === "none"));
 
 	useEffect(() => {
 		invoke("set_dock_hidden", { hidden: isHidden }).catch(() => {});
@@ -705,22 +651,27 @@ const Dock = memo(function Dock() {
 		}
 	};
 
-	const handleClosePreview = async (e: React.MouseEvent, hwnd: number) => {
+	const handleClosePreview = (e: React.MouseEvent, hwnd: number) => {
 		e.stopPropagation();
-		try {
-			await invoke("close_window", { hwnd });
-			setPreviewData((prev) => {
-				if (!prev) return null;
-				const remaining = prev.previews.filter((p) => p.hwnd !== hwnd);
-				if (remaining.length === 0) {
-					setHoveredApp(null);
-					return null;
-				}
-				return { ...prev, previews: remaining };
-			});
-		} catch (err) {
+		// Invalidate local thumbnail cache
+		thumbnailCacheRef.current.delete(hwnd);
+
+		// Optimistic removal from state immediately so it vanishes without waiting
+		setPreviewData((prev) => {
+			if (!prev) return null;
+			const remaining = prev.previews.filter((p) => p.hwnd !== hwnd);
+			if (remaining.length === 0) {
+				setHoveredApp(null);
+				isPreviewHoveredRef.current = false;
+				return null;
+			}
+			return { ...prev, previews: remaining };
+		});
+
+		// Invoke robust close in backend
+		invoke("close_window", { hwnd }).catch((err) => {
 			console.error("Failed to close window:", err);
-		}
+		});
 	};
 
 	const handleAppClick = async (app: AppInfo) => {
@@ -895,24 +846,68 @@ const Dock = memo(function Dock() {
 		invoke("set_menu_open", { open: false, rect: null }).catch(() => {});
 	};
 
+
+
 	const closePopup = () => {
 		setShowAddPopup(false);
 		invoke("set_menu_open", { open: false, rect: null }).catch(() => {});
 	};
 
-	// A press outside the dock while a menu or the Add App popup is open. The
-	// click itself goes to whatever is under it (the window region keeps the
-	// dock out of the way), so the backend's mouse hook reports it instead.
+	// Click-outside dismissal: when dock is active or in grace period, clicking outside immediately hides it
 	useEffect(() => {
-		const unlisten = listen("dock-dismiss-menu", () => {
+		if (interactionState === "none" && !isUserDismissed) return;
+		const handleDockOutsideClick = (e: MouseEvent | PointerEvent) => {
+			const dockEl = document.querySelector(".dock-container") || document.querySelector(".dock");
+			if (dockEl && !dockEl.contains(e.target as Node)) {
+				setHoveredApp(null);
+				setPreviewData(null);
+				isPreviewHoveredRef.current = false;
+				closeMenu();
+				closePopup();
+				if (dockMode !== "fixed") {
+					setInteractionState("none");
+					setIsUserDismissed(true);
+				}
+			}
+		};
+		window.addEventListener("pointerdown", handleDockOutsideClick, true);
+		return () => {
+			window.removeEventListener("pointerdown", handleDockOutsideClick, true);
+		};
+	}, [interactionState, isUserDismissed, dockMode]);
+
+	// A press outside the dock while a menu, popup, or the dock itself is open.
+	// The backend's low-level mouse hook reports it, dismissing menus and the dock.
+	useEffect(() => {
+		const unlistenMenu = listen("dock-dismiss-menu", () => {
 			setContextMenu(null);
 			setActiveSubmenu(null);
 			setShowAddPopup(false);
+			setHoveredApp(null);
+			setPreviewData(null);
+			isPreviewHoveredRef.current = false;
+		});
+		const unlistenDismiss = listen("dock-dismiss", () => {
+			setContextMenu(null);
+			setActiveSubmenu(null);
+			setShowAddPopup(false);
+			setHoveredApp(null);
+			setPreviewData(null);
+			isPreviewHoveredRef.current = false;
+			if (dockMode !== "fixed") {
+				setInteractionState("none");
+				setIsUserDismissed(true);
+			}
+		});
+		const unlistenToggle = listen("hime-toggle-dock", () => {
+			setIsUserDismissed(false);
 		});
 		return () => {
-			unlisten.then((f) => f());
+			unlistenMenu.then((f) => f());
+			unlistenDismiss.then((f) => f());
+			unlistenToggle.then((f) => f());
 		};
-	}, []);
+	}, [dockMode]);
 
 	// The tallest the expanded bar has been, which sets the region's bottom band.
 	const dockBandHeightRef = useRef(0);
@@ -995,7 +990,7 @@ const Dock = memo(function Dock() {
 	const dockItems = useMemo(() => {
 		const matchedRunningKeys = new Set<string>();
 
-		const findRunningApp = (p: AppInfo) => {
+		const findFirstRunningApp = (p: AppInfo): AppInfo | undefined => {
 			const found = activeApps.find(
 				(app) => !matchedRunningKeys.has(itemKey(app)) && isSameApp(p, app)
 			);
@@ -1018,16 +1013,18 @@ const Dock = memo(function Dock() {
 				executable: undefined
 			},
 			...pinnedApps.map((p) => {
-				const running = findRunningApp(p);
+				const running = findFirstRunningApp(p);
 				return {
 					...p,
 					is_running: !!running,
-					icon_path: running?.path,
-					icon_name: running?.name,
+					icon_path: running?.path ?? p.path,
+					icon_name: running?.name ?? p.name,
 					hwnd: running?.hwnd,
-					all_hwnds: running?.all_hwnds,
+					all_hwnds: running?.all_hwnds ?? (running?.hwnd ? [[running.hwnd, running.window_title || running.title || running.name]] : undefined),
 					tray_ids: running?.tray_ids,
-					is_background: running?.is_background
+					is_background: running?.is_background,
+					window_title: running?.window_title,
+					title: running?.window_title || running?.title
 				};
 			})
 		];
@@ -1143,24 +1140,71 @@ const Dock = memo(function Dock() {
 
 	useEffect(() => {
 		if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-		isPreviewHoveredRef.current = false;
 		hoveredAppRef.current = hoveredApp;
 
 		if (!hoveredApp) {
-			const timer = setTimeout(() => setPreviewData(null), 100);
+			const timer = setTimeout(() => {
+				if (!isPreviewHoveredRef.current) {
+					setPreviewData(null);
+				}
+			}, 80);
 			return () => clearTimeout(timer);
 		}
 
 		if (hoveredApp && !isDragging) {
 			const app = dockItems.find((a) => itemKey(a) === hoveredApp);
 			if (app && app.is_running && !app.is_background) {
-				const hwndsToCapture = app.all_hwnds || (app.hwnd ? [[app.hwnd, app.name]] : []);
+				const hwndsToCapture =
+					app.all_hwnds && app.all_hwnds.length > 0
+						? app.all_hwnds
+						: app.hwnd
+							? [[app.hwnd, app.window_title || app.title || app.name]]
+							: [];
 
+				if (hwndsToCapture.length === 0) {
+					setPreviewData(null);
+					return;
+				}
+
+				// Check frontend thumbnail cache for instantaneous display (<1ms)
+				const now = Date.now();
+				const instantCached: { hwnd: number; title: string; image: string }[] = [];
+				let allCached = true;
+
+				for (const [rawHwnd, rawTitle] of hwndsToCapture) {
+					const hwnd = typeof rawHwnd === "number" ? rawHwnd : Number(rawHwnd);
+					const initialTitle = typeof rawTitle === "string" ? rawTitle : String(rawTitle);
+					const cached = thumbnailCacheRef.current.get(hwnd);
+					if (cached && now - cached.timestamp < 3500) {
+						instantCached.push({
+							hwnd,
+							title: cached.title || initialTitle || app.name,
+							image: cached.image
+						});
+					} else {
+						allCached = false;
+					}
+				}
+
+				if (allCached && instantCached.length > 0) {
+					setPreviewData({ id: itemKey(app), previews: instantCached });
+				}
+
+				// Debounce backend capture (40ms instead of 80ms for snappy response)
 				previewTimerRef.current = setTimeout(async () => {
 					try {
 						const results = await Promise.all(
-							hwndsToCapture.map(async ([hwnd, title]) => {
+							hwndsToCapture.map(async ([rawHwnd, rawTitle]) => {
 								try {
+									const hwnd = typeof rawHwnd === "number" ? rawHwnd : Number(rawHwnd);
+									let title = typeof rawTitle === "string" ? rawTitle : String(rawTitle);
+									try {
+										const liveTitle = await invoke<string | null>("get_window_title", { hwnd });
+										if (liveTitle && liveTitle.trim().length > 0) {
+											title = liveTitle.trim();
+										}
+									} catch {}
+
 									const res = await invoke<[string, number] | null>("capture_window_thumbnail", {
 										hwnd,
 										maxWidth: 320,
@@ -1168,7 +1212,22 @@ const Dock = memo(function Dock() {
 									});
 									if (res) {
 										const [image, lastFocused] = res;
-										return { hwnd, title, image, lastFocused };
+										const item = {
+											hwnd,
+											title: title || app.window_title || app.title || app.name,
+											image,
+											lastFocused
+										};
+										if (thumbnailCacheRef.current.size > 20) {
+											const oldestKey = thumbnailCacheRef.current.keys().next().value;
+											if (oldestKey !== undefined) thumbnailCacheRef.current.delete(oldestKey);
+										}
+										thumbnailCacheRef.current.set(hwnd, {
+											title: item.title,
+											image: item.image,
+											timestamp: Date.now()
+										});
+										return item;
 									}
 								} catch {}
 								return null;
@@ -1193,7 +1252,7 @@ const Dock = memo(function Dock() {
 						console.error("Failed to capture thumbnails:", e);
 						setPreviewData(null);
 					}
-				}, 300);
+				}, allCached ? 100 : 35);
 			} else {
 				setPreviewData(null);
 			}
@@ -1201,6 +1260,7 @@ const Dock = memo(function Dock() {
 
 		return () => {
 			if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+			if (previewLeaveTimerRef.current) clearTimeout(previewLeaveTimerRef.current);
 		};
 	}, [hoveredApp, isDragging, dockItems]);
 
@@ -1476,12 +1536,22 @@ const Dock = memo(function Dock() {
 												animate={ITEM_ANIMATE}
 												exit={ITEM_EXIT}
 												transition={ITEM_ENTRY_TRANSITION}
-												onMouseEnter={() => setHoveredApp(itemKey(app))}
-												onMouseLeave={() => {
-													if (!isPreviewHoveredRef.current) {
-														setHoveredApp(null);
-														setPressedApp(null);
+												onMouseEnter={() => {
+													if (previewLeaveTimerRef.current) {
+														clearTimeout(previewLeaveTimerRef.current);
+														previewLeaveTimerRef.current = null;
 													}
+													setHoveredApp(itemKey(app));
+												}}
+												onMouseLeave={() => {
+													if (previewLeaveTimerRef.current) clearTimeout(previewLeaveTimerRef.current);
+													previewLeaveTimerRef.current = setTimeout(() => {
+														if (!isPreviewHoveredRef.current) {
+															setHoveredApp(null);
+															setPreviewData(null);
+															setPressedApp(null);
+														}
+													}, 120);
 												}}
 											>
 												<AnimatePresence>
@@ -1497,10 +1567,15 @@ const Dock = memo(function Dock() {
 																transition={{ duration: 0.15 }}
 																onMouseEnter={() => {
 																	isPreviewHoveredRef.current = true;
+																	if (previewLeaveTimerRef.current) {
+																		clearTimeout(previewLeaveTimerRef.current);
+																		previewLeaveTimerRef.current = null;
+																	}
 																}}
 																onMouseLeave={() => {
 																	isPreviewHoveredRef.current = false;
 																	setHoveredApp(null);
+																	setPreviewData(null);
 																	setPressedApp(null);
 																}}
 															>
@@ -1512,7 +1587,9 @@ const Dock = memo(function Dock() {
 																			onClick={() => invoke("focus_window", { hwnd: prev.hwnd })}
 																		>
 																			<img src={prev.image} alt={`Preview ${idx}`} />
-																			<div className="preview-label">{prev.title || app.name}</div>
+																			<div className="preview-label" title={prev.title || app.window_title || app.title || app.name}>
+																				{formatWindowTitle(prev.title || app.window_title || app.title || app.name)}
+																			</div>
 																			<button
 																				className="preview-close-btn"
 																				onClick={(e) => handleClosePreview(e, prev.hwnd)}
@@ -1633,12 +1710,22 @@ const Dock = memo(function Dock() {
 										exit={{ opacity: 0, scale: 0, transition: { duration: 0.12 } }}
 										className="dock-icon-wrapper"
 										onContextMenu={(e) => handleContextMenu(e, app)}
-										onMouseEnter={() => setHoveredApp(itemKey(app))}
-										onMouseLeave={() => {
-											if (!isPreviewHoveredRef.current) {
-												setHoveredApp(null);
-												setPressedApp(null);
+										onMouseEnter={() => {
+											if (previewLeaveTimerRef.current) {
+												clearTimeout(previewLeaveTimerRef.current);
+												previewLeaveTimerRef.current = null;
 											}
+											setHoveredApp(itemKey(app));
+										}}
+										onMouseLeave={() => {
+											if (previewLeaveTimerRef.current) clearTimeout(previewLeaveTimerRef.current);
+											previewLeaveTimerRef.current = setTimeout(() => {
+												if (!isPreviewHoveredRef.current) {
+													setHoveredApp(null);
+													setPreviewData(null);
+													setPressedApp(null);
+												}
+											}, 120);
 										}}
 										onMouseDown={(e) => {
 											if (e.button === 1) e.preventDefault();
@@ -1662,10 +1749,15 @@ const Dock = memo(function Dock() {
 														transition={{ duration: 0.15 }}
 														onMouseEnter={() => {
 															isPreviewHoveredRef.current = true;
+															if (previewLeaveTimerRef.current) {
+																clearTimeout(previewLeaveTimerRef.current);
+																previewLeaveTimerRef.current = null;
+															}
 														}}
 														onMouseLeave={() => {
 															isPreviewHoveredRef.current = false;
 															setHoveredApp(null);
+															setPreviewData(null);
 															setPressedApp(null);
 														}}
 													>
@@ -1677,7 +1769,9 @@ const Dock = memo(function Dock() {
 																	onClick={() => invoke("focus_window", { hwnd: prev.hwnd })}
 																>
 																	<img src={prev.image} alt={`Preview ${idx}`} />
-																	<div className="preview-label">{prev.title || app.name}</div>
+																	<div className="preview-label" title={prev.title || app.window_title || app.title || app.name}>
+																		{formatWindowTitle(prev.title || app.window_title || app.title || app.name)}
+																	</div>
 																	<button
 																		className="preview-close-btn"
 																		onClick={(e) => handleClosePreview(e, prev.hwnd)}

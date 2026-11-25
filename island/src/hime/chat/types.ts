@@ -32,6 +32,8 @@ export interface AttachmentRef {
   accent: PillAccent;
   sha256: string;
   thumbnailUrl?: string;
+  snippet?: string;
+  content?: string;
 }
 
 /**

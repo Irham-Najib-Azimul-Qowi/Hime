@@ -188,6 +188,31 @@ pub async fn update_notch_rect(rect: IntRect) {
     }
 }
 
+fn sanitize_overlay_rect(rect: Option<OverlayRect>) -> Option<OverlayRect> {
+    rect.filter(|r| {
+        r.x.is_finite()
+            && r.y.is_finite()
+            && r.width.is_finite()
+            && r.height.is_finite()
+            && r.width > 0.0
+            && r.height > 0.0
+    })
+}
+
+#[tauri::command]
+pub async fn update_volume_overlay_rect(rect: Option<OverlayRect>) {
+    if let Ok(mut r) = VOLUME_OVERLAY_RECT.lock() {
+        *r = sanitize_overlay_rect(rect);
+    }
+}
+
+#[tauri::command]
+pub async fn update_brightness_overlay_rect(rect: Option<OverlayRect>) {
+    if let Ok(mut r) = BRIGHTNESS_OVERLAY_RECT.lock() {
+        *r = sanitize_overlay_rect(rect);
+    }
+}
+
 #[tauri::command]
 pub fn set_window_height(window: Window, height: f64) {
     if let Ok(scale_factor) = window.scale_factor() {
@@ -239,8 +264,18 @@ pub async fn init_dock(app: AppHandle, mode: String) {
             // Retry until primary_monitor() is available (can fail on autostart before shell).
             let dock_clone = dock_win.clone();
             tauri::async_runtime::spawn(async move {
+                let app_hwnd = dock_clone.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+                if app_hwnd != 0 {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _guard = crate::services::lock_dock_appbar();
+                        unregister_appbar_native(HWND(app_hwnd as *mut _));
+                        crate::services::restore_desktop_workarea();
+                    })
+                    .await;
+                    DOCK_APPBAR_REGISTERED.store(false, Ordering::Relaxed);
+                }
                 for attempt in 0..20 {
-                    if !dock_enabled() {
+                    if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
                         return;
                     }
                     // Wait for monitor and window dimensions to be available.
@@ -306,11 +341,21 @@ pub async fn init_dock(app: AppHandle, mode: String) {
                             }
                             // Ensure visible after positioning
                             if dock_enabled()
+                                && !SHUTTING_DOWN.load(Ordering::Relaxed)
                                 && dock_clone.show().is_ok()
                                 && dock_clone.is_visible().unwrap_or(false)
-                                && set_taskbar_visibility(false, false)
                             {
-                                NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                if set_taskbar_visibility(false, false) {
+                                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                    break;
+                                } else if attempt < 19 {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(200))
+                                        .await;
+                                    continue;
+                                } else {
+                                    // Arm watchdog recovery once transient blocker (e.g. tray) clears.
+                                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                }
                             }
                             break;
                         }
@@ -383,12 +428,21 @@ pub async fn sync_appbar(app: AppHandle) {
     crate::services::reconcile_main_appbar(&app);
     if let Some(dock_win) = app.get_webview_window("dock") {
         // Skip dock re-registration if dock is disabled in settings.
-        if dock_enabled() && DOCK_APPBAR_REGISTERED.load(Ordering::Relaxed) {
-            register_dock_appbar(dock_win);
-        } else {
-            if let Ok(hwnd) = dock_win.hwnd() {
-                re_assert_topmost(hwnd);
+        if dock_enabled() {
+            if get_setting_str(&app, "bloom-dock-mode").as_deref() == Some("fixed") {
+                register_dock_appbar(dock_win);
+            } else {
+                crate::services::reposition_autohide_dock(&app, dock_win);
             }
+            if !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+                && !SHUTTING_DOWN.load(Ordering::Relaxed)
+                && any_native_taskbar_exposed()
+                && set_taskbar_visibility(false, false)
+            {
+                NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+            }
+        } else if let Ok(hwnd) = dock_win.hwnd() {
+            re_assert_topmost(hwnd);
         }
     }
     sync_overlays(&app);
@@ -398,7 +452,7 @@ pub async fn sync_appbar(app: AppHandle) {
 pub async fn change_dock_mode(app: AppHandle, mode: String) {
     // A disabled dock keeps the new mode in settings (init_dock applies it on
     // re-enable) but must not be shown or replace the native taskbar now.
-    if !dock_enabled() {
+    if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
         return;
     }
     if let Some(dock_win) = app.get_webview_window("dock") {
@@ -406,18 +460,24 @@ pub async fn change_dock_mode(app: AppHandle, mode: String) {
             register_dock_appbar(dock_win.clone());
         } else {
             let _ = dock_win.show();
-            if let Ok(hwnd) = dock_win.hwnd() {
-                let hwnd_val = hwnd.0 as isize;
-                tauri::async_runtime::spawn_blocking(move || {
+            if let Some(hwnd_val) = dock_win.hwnd().ok().map(|h| h.0 as isize) {
+                // Wait for AppBar unregistration + workarea restore before
+                // hiding the native taskbar so SPI_SETWORKAREA cannot wake Explorer after us.
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    let _guard = crate::services::lock_dock_appbar();
                     unregister_appbar_native(HWND(hwnd_val as *mut _));
                     crate::services::restore_desktop_workarea();
-                });
+                })
+                .await;
                 DOCK_APPBAR_REGISTERED.store(false, Ordering::Relaxed);
 
                 // Retry primary_monitor() — can fail on autostart before shell initializes
                 let dock_clone = dock_win.clone();
                 tauri::async_runtime::spawn(async move {
                     for attempt in 0..10 {
+                        if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+                            return;
+                        }
                         // Never fall back to a hardcoded pixel height.
                         // Extract HWND as isize before any await (raw pointer is not Send).
                         let hwnd_val = dock_clone.hwnd().map(|h| h.0 as isize).unwrap_or(0);
@@ -478,11 +538,20 @@ pub async fn change_dock_mode(app: AppHandle, mode: String) {
                                     re_assert_topmost(hwnd);
                                 }
                                 if dock_enabled()
+                                    && !SHUTTING_DOWN.load(Ordering::Relaxed)
                                     && dock_clone.show().is_ok()
                                     && dock_clone.is_visible().unwrap_or(false)
-                                    && set_taskbar_visibility(false, false)
                                 {
-                                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                    if set_taskbar_visibility(false, false) {
+                                        NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                        break;
+                                    } else if attempt < 9 {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(300))
+                                            .await;
+                                        continue;
+                                    } else {
+                                        NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                                    }
                                 }
                                 break;
                             }
@@ -511,10 +580,20 @@ pub async fn change_dock_mode(app: AppHandle, mode: String) {
 
         // Double sync after a short delay to catch any layout changes
         let dock_clone = dock_win.clone();
+        let mode_for_sync = mode;
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if DOCK_APPBAR_REGISTERED.load(Ordering::Relaxed) {
+            if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return;
+            }
+            if mode_for_sync == "fixed" {
                 register_dock_appbar(dock_clone);
+            } else if !TRAY_INTERACTION_ACTIVE.load(Ordering::Acquire)
+                && (NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed) || any_native_taskbar_exposed())
+            {
+                if set_taskbar_visibility(false, false) {
+                    NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                }
             }
         });
     }
@@ -547,9 +626,19 @@ pub async fn change_notch_mode(app: AppHandle, mode: String) {
             let m_size = monitor.size();
             let scale = monitor.scale_factor();
             let bloom_scale = crate::utils::get_bloom_scale(&app);
-            let target_height = (420.0 * bloom_scale * scale) as u32;
+            let target_height = if crate::services::is_free_drag_enabled(&app) {
+                m_size.height
+            } else {
+                (420.0 * bloom_scale * scale) as u32
+            };
             let _ = main_win.set_position(tauri::PhysicalPosition::new(m_pos.x, m_pos.y));
             let _ = main_win.set_size(tauri::PhysicalSize::new(m_size.width, target_height));
+            if let Ok(mut lock) = MAIN_WINDOW_RECT.lock() {
+                *lock = Some((
+                    tauri::PhysicalPosition::new(m_pos.x, m_pos.y),
+                    tauri::PhysicalSize::new(m_size.width, target_height),
+                ));
+            }
         }
 
         let current = CURRENT_NOTCH_OVERLAP.load(Ordering::Relaxed);
@@ -728,7 +817,7 @@ pub async fn open_app(app: AppHandle, app_name: String) {
         return;
     }
 
-    if is_bloom_launch_target(&app_name, &app.config().identifier) {
+    if is_hime_launch_target(&app_name, &app.config().identifier) {
         open_settings_window(app);
         return;
     }
@@ -736,12 +825,16 @@ pub async fn open_app(app: AppHandle, app_name: String) {
     tauri::async_runtime::spawn_blocking(move || launch_path(&app_name));
 }
 
-fn is_bloom_launch_target(target: &str, identifier: &str) -> bool {
-    target == "bloom-settings"
+fn is_hime_launch_target(target: &str, identifier: &str) -> bool {
+    target == "hime-settings"
+        || target == "bloom-settings"
         || target.eq_ignore_ascii_case(identifier)
         || std::path::Path::new(target)
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("bloom.exe"))
+            .is_some_and(|name| {
+                let s = name.to_string_lossy();
+                s.eq_ignore_ascii_case("hime-island.exe") || s.eq_ignore_ascii_case("hime.exe")
+            })
 }
 
 /// Launches another instance of an app instead of focusing an existing window.
@@ -917,7 +1010,18 @@ pub async fn get_active_windows() -> Vec<AppInfo> {
             };
 
             let mut new_app = app.clone();
-            new_app.all_hwnds = Some(vec![(hwnd, app.name.clone())]);
+            let win_title = app
+                .window_title
+                .clone()
+                .or_else(|| {
+                    app.all_hwnds
+                        .as_ref()
+                        .and_then(|h| h.first())
+                        .map(|(_, t)| t.clone())
+                })
+                .unwrap_or_else(|| app.name.clone());
+            new_app.all_hwnds = Some(vec![(hwnd, win_title.clone())]);
+            new_app.window_title = Some(win_title);
             grouped.insert(key, new_app);
         }
 
@@ -2018,6 +2122,7 @@ pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
             hwnd: None,
             executable: Some("explorer.exe".into()),
             all_hwnds: None,
+            window_title: None,
         },
         AppInfo {
             name: "Microsoft Edge".into(),
@@ -2027,6 +2132,7 @@ pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
             hwnd: None,
             executable: Some("msedge.exe".into()),
             all_hwnds: None,
+            window_title: None,
         },
         AppInfo {
             name: "Notepad".into(),
@@ -2036,6 +2142,7 @@ pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
             hwnd: None,
             executable: Some("notepad.exe".into()),
             all_hwnds: None,
+            window_title: None,
         },
         AppInfo {
             name: "Settings".into(),
@@ -2045,6 +2152,7 @@ pub async fn load_pinned_apps(app: AppHandle) -> Vec<AppInfo> {
             hwnd: None,
             executable: None,
             all_hwnds: None,
+            window_title: None,
         },
     ]
 }
@@ -2273,7 +2381,7 @@ pub fn open_settings_window(app: AppHandle) {
             }
         });
         if let Err(error) = result {
-            eprintln!("Failed to open Bloom settings: {error}");
+            eprintln!("Failed to open Hime settings: {error}");
         }
     });
 }
@@ -2352,7 +2460,11 @@ pub fn open_sound_settings() {
 }
 
 #[tauri::command]
-pub fn open_notification_center() {
+pub fn open_notification_center(app: AppHandle) {
+    if crate::utils::suppress_native_notifications_enabled() {
+        let _ = app.emit_to("main", "hime-open-notifications", ());
+        return;
+    }
     unsafe {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::Shell::ShellExecuteA;
@@ -2371,236 +2483,265 @@ pub fn open_notification_center() {
 #[tauri::command]
 pub fn open_system_tray() {
     // The native taskbar is already available when the dock is disabled.
-    if !dock_enabled() {
+    if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
         return;
     }
     tauri::async_runtime::spawn_blocking(move || unsafe {
         use std::sync::atomic::Ordering;
         use windows::core::PCSTR;
+        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN, VK_SPACE,
+        };
+        use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETTASKBARPOS, APPBARDATA};
         use windows::Win32::UI::WindowsAndMessaging::{
             FindWindowA, GetWindowLongA, IsWindowVisible, SetLayeredWindowAttributes,
-            SetWindowLongA, ShowWindow, GWL_EXSTYLE, LWA_ALPHA, SW_SHOW, WS_EX_LAYERED,
+            SetWindowLongA, SetWindowPos, ShowWindow, GWL_EXSTYLE, LWA_ALPHA, SWP_HIDEWINDOW,
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_LAYERED,
             WS_EX_TRANSPARENT,
         };
 
-        if !dock_enabled() {
+        if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
             return;
         }
 
         let tray_class = PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
-        let hwnd = FindWindowA(tray_class, windows::core::PCSTR::null()).unwrap_or_default();
+        let hwnd = FindWindowA(tray_class, PCSTR::null()).unwrap_or_default();
         if hwnd.0.is_null() {
             return;
         }
 
-        let currently_hidden = crate::state::NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed);
-        if currently_hidden {
-            // 1. Make the taskbar completely invisible and click-through
-            let exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
-            let _ = SetWindowLongA(
-                hwnd,
-                GWL_EXSTYLE,
-                exstyle | WS_EX_LAYERED.0 as i32 | WS_EX_TRANSPARENT.0 as i32,
-            );
-            let _ = SetLayeredWindowAttributes(
-                hwnd,
-                windows::Win32::Foundation::COLORREF(0),
-                0,
-                LWA_ALPHA,
-            );
+        // Serialize with tray.rs::TrayExposure and duplicate clicks; never drop
+        // NATIVE_TASKBAR_HIDDEN to false while dock is active.
+        if TRAY_INTERACTION_ACTIVE.swap(true, Ordering::SeqCst) {
+            return;
+        }
 
-            // 2. Show the taskbar window WITHOUT calling ABM_SETSTATE (prevents work-area
-            //    recalculation which would displace the notch/dock appbars).
-            use crate::utils::ORIGINAL_TRAY_RECT;
-            use windows::Win32::UI::WindowsAndMessaging::{
-                SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-            };
-            if let Ok(guard) = ORIGINAL_TRAY_RECT.lock() {
-                if let Some(rect) = *guard {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        rect.left,
-                        rect.top,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
-            }
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            crate::state::NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
+        struct OpenTrayGuard {
+            hwnd: HWND,
+            orig_exstyle: i32,
+            prev_hidden: bool,
+        }
 
-            // Give Windows a moment to realize the taskbar is "there"
-            std::thread::sleep(std::time::Duration::from_millis(50));
-
-            // 3. Send the Win+B and Space macro to open the tray chevron
-            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                SendInput, INPUT, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN,
-                VK_SPACE,
-            };
-            let b_key = VIRTUAL_KEY(0x42); // 'B' key
-
-            let inputs = [
-                // Win+B
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VK_LWIN,
-                            wScan: 0,
-                            dwFlags: Default::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: b_key,
-                            wScan: 0,
-                            dwFlags: Default::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: b_key,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VK_LWIN,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-            ];
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-
-            std::thread::sleep(std::time::Duration::from_millis(150));
-
-            // Space to open the popup
-            let space_inputs = [
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VK_SPACE,
-                            wScan: 0,
-                            dwFlags: Default::default(),
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-                INPUT {
-                    r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: VK_SPACE,
-                            wScan: 0,
-                            dwFlags: KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-            ];
-            SendInput(&space_inputs, std::mem::size_of::<INPUT>() as i32);
-
-            // 4. Start monitoring for the tray popup to close
-            std::thread::spawn(move || {
-                let overflow_class =
-                    PCSTR(c"TopLevelWindowForOverflowXamlIsland".as_ptr() as *const u8);
-                let win10_overflow_class = PCSTR(c"NotifyIconOverflowWindow".as_ptr() as *const u8);
-
-                // Wait for it to appear
-                let mut found = false;
-                for _ in 0..50 {
-                    let h1 = FindWindowA(overflow_class, PCSTR::null()).unwrap_or_default();
-                    let h2 = FindWindowA(win10_overflow_class, PCSTR::null()).unwrap_or_default();
-                    if (!h1.0.is_null() && IsWindowVisible(h1).as_bool())
-                        || (!h2.0.is_null() && IsWindowVisible(h2).as_bool())
-                    {
-                        found = true;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-
-                if found {
-                    // Wait for it to disappear
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        let h1 = FindWindowA(overflow_class, PCSTR::null()).unwrap_or_default();
-                        let h2 =
-                            FindWindowA(win10_overflow_class, PCSTR::null()).unwrap_or_default();
-                        let visible = (!h1.0.is_null() && IsWindowVisible(h1).as_bool())
-                            || (!h2.0.is_null() && IsWindowVisible(h2).as_bool());
-                        if !visible {
-                            break;
+        impl Drop for OpenTrayGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    let should_hide = dock_enabled() && !SHUTTING_DOWN.load(Ordering::Relaxed);
+                    if should_hide {
+                        let _ = ShowWindow(self.hwnd, SW_HIDE);
+                        let _ = SetWindowPos(
+                            self.hwnd,
+                            None,
+                            -10000,
+                            -10000,
+                            0,
+                            0,
+                            SWP_HIDEWINDOW | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                        TRAY_INTERACTION_ACTIVE.store(false, Ordering::SeqCst);
+                        let hidden = crate::utils::set_taskbar_visibility(false, false);
+                        if hidden || self.prev_hidden {
+                            NATIVE_TASKBAR_HIDDEN.store(true, Ordering::Relaxed);
+                        }
+                        if !IsWindowVisible(self.hwnd).as_bool() {
+                            let _ = SetLayeredWindowAttributes(
+                                self.hwnd,
+                                COLORREF(0),
+                                255,
+                                LWA_ALPHA,
+                            );
+                            let _ = SetWindowLongA(self.hwnd, GWL_EXSTYLE, self.orig_exstyle);
+                        }
+                    } else {
+                        TRAY_INTERACTION_ACTIVE.store(false, Ordering::SeqCst);
+                        let _ =
+                            SetLayeredWindowAttributes(self.hwnd, COLORREF(0), 255, LWA_ALPHA);
+                        let _ = SetWindowLongA(self.hwnd, GWL_EXSTYLE, self.orig_exstyle);
+                        if !dock_enabled() {
+                            let _ = crate::utils::set_taskbar_visibility(true, true);
                         }
                     }
                 }
+            }
+        }
 
-                // Once closed, hide the taskbar only if the dock is still enabled.
-                if dock_enabled() {
-                    let hidden = crate::utils::set_taskbar_visibility(false, false);
-                    crate::state::NATIVE_TASKBAR_HIDDEN.store(hidden, Ordering::Relaxed);
-                }
+        let orig_exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
+        let prev_hidden = NATIVE_TASKBAR_HIDDEN.load(Ordering::Relaxed);
+        let _guard = OpenTrayGuard {
+            hwnd,
+            orig_exstyle,
+            prev_hidden,
+        };
 
-                // Revert transparency
-                let tray_class = PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
-                let hwnd = FindWindowA(tray_class, PCSTR::null()).unwrap_or_default();
-                if !hwnd.0.is_null() {
-                    let exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
-                    let _ = SetLayeredWindowAttributes(
-                        hwnd,
-                        windows::Win32::Foundation::COLORREF(0),
-                        255,
-                        LWA_ALPHA,
-                    );
-                    let _ = SetWindowLongA(
-                        hwnd,
-                        GWL_EXSTYLE,
-                        exstyle & !(WS_EX_LAYERED.0 as i32) & !(WS_EX_TRANSPARENT.0 as i32),
-                    );
-                }
-            });
-        } else {
-            // If already toggled on manually, toggle off
-            let hidden = crate::utils::set_taskbar_visibility(false, false);
-            crate::state::NATIVE_TASKBAR_HIDDEN.store(hidden, Ordering::Relaxed);
+        // 1. Keep the native taskbar invisible (alpha=0) and click-through while Win+B runs.
+        let _ = SetWindowLongA(
+            hwnd,
+            GWL_EXSTYLE,
+            orig_exstyle | WS_EX_LAYERED.0 as i32 | WS_EX_TRANSPARENT.0 as i32,
+        );
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
 
-            let exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
-            let _ = SetLayeredWindowAttributes(
+        // 2. Move back to its original rect (fallback ABM_GETTASKBARPOS) without
+        //    calling ABM_SETSTATE or activating the taskbar.
+        let mut target_rect = crate::utils::ORIGINAL_TRAY_RECT
+            .lock()
+            .ok()
+            .and_then(|g| *g);
+        if target_rect.is_none() {
+            let mut pos_abd = APPBARDATA {
+                cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                hWnd: hwnd,
+                ..Default::default()
+            };
+            if SHAppBarMessage(ABM_GETTASKBARPOS, &mut pos_abd) != 0
+                && pos_abd.rc.right > pos_abd.rc.left
+                && pos_abd.rc.bottom > pos_abd.rc.top
+                && pos_abd.rc.left > -9000
+                && pos_abd.rc.top > -9000
+            {
+                target_rect = Some(pos_abd.rc);
+            }
+        }
+        if let Some(rect) = target_rect {
+            let _ = SetWindowPos(
                 hwnd,
-                windows::Win32::Foundation::COLORREF(0),
-                255,
-                LWA_ALPHA,
+                None,
+                rect.left,
+                rect.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
-            let _ = SetWindowLongA(
-                hwnd,
-                GWL_EXSTYLE,
-                exstyle & !(WS_EX_LAYERED.0 as i32) & !(WS_EX_TRANSPARENT.0 as i32),
-            );
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+
+        // Give Windows a moment to realize the taskbar is "there"
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // 3. Send the Win+B and Space macro to open the tray chevron
+        let b_key = VIRTUAL_KEY(0x42); // 'B' key
+        let inputs = [
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_LWIN,
+                        wScan: 0,
+                        dwFlags: Default::default(),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: b_key,
+                        wScan: 0,
+                        dwFlags: Default::default(),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: b_key,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_LWIN,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let space_inputs = [
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_SPACE,
+                        wScan: 0,
+                        dwFlags: Default::default(),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_SPACE,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        SendInput(&space_inputs, std::mem::size_of::<INPUT>() as i32);
+
+        // 4. Wait up to 1.5s for the overflow popup to appear, then stay open until dismissed.
+        let overflow_class = PCSTR(c"TopLevelWindowForOverflowXamlIsland".as_ptr() as *const u8);
+        let win10_overflow_class = PCSTR(c"NotifyIconOverflowWindow".as_ptr() as *const u8);
+
+        let mut found = false;
+        for _ in 0..15 {
+            if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return;
+            }
+            let h1 = FindWindowA(overflow_class, PCSTR::null()).unwrap_or_default();
+            let h2 = FindWindowA(win10_overflow_class, PCSTR::null()).unwrap_or_default();
+            if (!h1.0.is_null() && IsWindowVisible(h1).as_bool())
+                || (!h2.0.is_null() && IsWindowVisible(h2).as_bool())
+            {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        if found {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if !dock_enabled() || SHUTTING_DOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                let h1 = FindWindowA(overflow_class, PCSTR::null()).unwrap_or_default();
+                let h2 = FindWindowA(win10_overflow_class, PCSTR::null()).unwrap_or_default();
+                let visible = (!h1.0.is_null() && IsWindowVisible(h1).as_bool())
+                    || (!h2.0.is_null() && IsWindowVisible(h2).as_bool());
+                if !visible {
+                    break;
+                }
+            }
         }
     });
 }
@@ -3119,12 +3260,42 @@ pub fn release_appbars(handle: &AppHandle) {
 /// handlers so that any shutdown path (including Task Manager's WM_CLOSE) behaves
 /// identically.
 pub fn restore_taskbar_and_exit(handle: &AppHandle) {
+    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
     crate::diagnostics::record("shutdown", "restoring taskbar and releasing AppBars");
-    SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    if let Some(s) = crate::hime::HimeBridgeService::global() {
+        s.shutdown();
+    }
     release_appbars(handle);
     set_taskbar_visibility(true, true);
     NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
     crate::services::set_native_osd_suppressed(false);
+    crate::services::restore_native_notifications();
+
+    // Shutdown discrimination: Check if OS is shutting down / logging off.
+    // When user-initiated quit (GetSystemMetrics(SM_SHUTTINGDOWN) == 0):
+    // delete marker file %APPDATA%\ai.hime.desktop\hime.active and signal HimeQuit.
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+    let is_os_shutting_down = unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) } != 0;
+    if !is_os_shutting_down {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let marker = std::path::PathBuf::from(appdata)
+                .join("ai.hime.desktop")
+                .join("hime.active");
+            let _ = std::fs::remove_file(marker);
+        }
+        unsafe {
+            use windows::core::w;
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+            if let Ok(h) = OpenEventW(EVENT_MODIFY_STATE, false, w!("HimeQuit")) {
+                let _ = SetEvent(h);
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
     // Destroy all webview windows before exiting so Chromium's UnregisterClass for
     // Chrome_WidgetWin_0 finds no open windows (avoids the harmless Error=1412 log).
     for (_, w) in handle.webview_windows() {
@@ -3149,6 +3320,7 @@ pub async fn restart_bloom(handle: AppHandle) {
     set_taskbar_visibility(true, true);
     NATIVE_TASKBAR_HIDDEN.store(false, Ordering::Relaxed);
     crate::services::set_native_osd_suppressed(false);
+    crate::services::restore_native_notifications();
     close_single_instance_handles();
     handle.restart();
 }
@@ -3156,8 +3328,16 @@ pub async fn restart_bloom(handle: AppHandle) {
 #[tauri::command]
 pub async fn close_window(hwnd: isize) {
     tauri::async_runtime::spawn_blocking(move || unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE, WM_SYSCOMMAND};
         let hwnd = HWND(hwnd as *mut _);
+        // Post SC_CLOSE (0xF060) via WM_SYSCOMMAND first so standard desktop apps, UWP, and dialogs close properly
+        let _ = PostMessageW(
+            Some(hwnd),
+            WM_SYSCOMMAND,
+            windows::Win32::Foundation::WPARAM(0xF060),
+            windows::Win32::Foundation::LPARAM(0),
+        );
+        // Follow up with WM_CLOSE as reliable fallback
         let _ = PostMessageW(
             Some(hwnd),
             WM_CLOSE,
@@ -3211,6 +3391,19 @@ pub fn save_setting(app: AppHandle, key: String, value: serde_json::Value) -> Re
 
     if key == "bloom-scale" {
         re_register_appbars(&app, &settings);
+    } else if key == "bloom-free-drag-enabled" {
+        let enabled = value.as_str() == Some("true") || value.as_bool() == Some(true);
+        if !enabled {
+            if let Ok(mut r) = VOLUME_OVERLAY_RECT.lock() {
+                *r = None;
+            }
+            if let Ok(mut r) = BRIGHTNESS_OVERLAY_RECT.lock() {
+                *r = None;
+            }
+        }
+        crate::services::reconcile_main_appbar(&app);
+    } else if key == "bloom-notch-position" {
+        crate::services::ensure_main_window_spans_monitor(&app);
     } else if key == "bloom-dock-enabled" {
         let enabled = value.as_str() == Some("true") || value.as_bool() == Some(true);
         let app_handle = app.clone();
@@ -3225,6 +3418,8 @@ pub fn save_setting(app: AppHandle, key: String, value: serde_json::Value) -> Re
                 change_dock_mode(app_handle, mode_str).await;
             });
         }
+    } else if key == "bloom-suppress-native-notifications" {
+        crate::services::sync_native_notifications_suppression(&app);
     }
     Ok(())
 }
@@ -3273,20 +3468,20 @@ pub async fn capture_window_thumbnail(
             }
         }
 
+        // Check cache with 2500ms TTL first for instant response (<1ms) without heavy PrintWindow
+        if let Some(cache) = crate::state::THUMBNAIL_CACHE.get() {
+            if let Ok(guard) = cache.lock() {
+                if let Some((img, timestamp)) = guard.get(&hwnd_key) {
+                    let now = crate::utils::get_now_ms();
+                    if is_minimized || (now - timestamp < 2500) {
+                        return Some((img.clone(), focus_time));
+                    }
+                }
+            }
+        }
+
         if is_minimized {
-            // Never restore a minimized window to capture it: that briefly
-            // un-minimizes it on screen. Thumbnails are kept warm by the
-            // minimize/focus window hooks, so minimized windows normally have
-            // a cached image already; without one we simply show no preview.
-            let cached_img = if let Some(cache) = crate::state::THUMBNAIL_CACHE.get() {
-                cache
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.get(&hwnd_key).map(|(img, _)| img.clone()))
-            } else {
-                None
-            };
-            return cached_img.map(|img| (img, focus_time));
+            return None;
         }
 
         let result = crate::utils::capture_hwnd_to_base64(hwnd, max_width, max_height);
@@ -3299,6 +3494,24 @@ pub async fn capture_window_thumbnail(
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_window_title(hwnd: isize) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, IsWindow};
+
+    let hwnd = HWND(hwnd as *mut _);
+    if unsafe { !IsWindow(Some(hwnd)).as_bool() } {
+        return None;
+    }
+    let mut text = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut text) };
+    if len > 0 {
+        Some(String::from_utf16_lossy(&text[..len as usize]))
+    } else {
+        None
+    }
 }
 
 // ── Radio helpers — Windows Runtime Windows.Devices.Radios ───────────────────
@@ -3409,26 +3622,65 @@ pub fn get_brightness() -> u32 {
     crate::state::CURRENT_BRIGHTNESS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+pub(crate) fn build_wifi_status(
+    radio_enabled: Result<bool, String>,
+    ssid_lookup: impl FnOnce() -> Option<String>,
+    ethernet: (bool, Option<String>),
+    internet_lookup: impl FnOnce() -> bool,
+) -> WifiStatus {
+    let raw_ssid = match &radio_enabled {
+        Ok(false) => None,
+        Ok(true) | Err(_) => ssid_lookup().filter(|s| !s.trim().is_empty()),
+    };
+    let enabled = match radio_enabled {
+        Ok(v) => v,
+        Err(_) => raw_ssid.is_some(),
+    };
+    let (is_ethernet, raw_eth_name) = ethernet;
+    let ethernet_name = if is_ethernet {
+        raw_eth_name.filter(|s| !s.trim().is_empty())
+    } else {
+        None
+    };
+    let connected = raw_ssid.is_some() || is_ethernet;
+    let has_internet = if connected { internet_lookup() } else { false };
+    WifiStatus {
+        enabled,
+        connected,
+        ssid: raw_ssid,
+        is_ethernet,
+        ethernet_name,
+        has_internet,
+    }
+}
+
 /// Wi-Fi radio and association state, so the notch quick settings tile can show
 /// Off / On / the connected network. The radio state alone only says Wi-Fi is
 /// on, so the WLAN API supplies the association.
 #[tauri::command]
 pub async fn get_wifi_status() -> Result<WifiStatus, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<WifiStatus, String> {
-        let enabled = get_radio_state_sync(windows::Devices::Radios::RadioKind::WiFi)?;
-        let ssid = if enabled {
-            crate::wifi::connected_ssid()
-        } else {
-            None
-        };
-        Ok(WifiStatus {
-            enabled,
-            connected: ssid.is_some(),
-            ssid,
-        })
+        let ethernet = crate::wifi::is_ethernet_connected();
+        let radio_enabled = get_radio_state_sync(windows::Devices::Radios::RadioKind::WiFi);
+        Ok(build_wifi_status(
+            radio_enabled,
+            crate::wifi::connected_ssid,
+            ethernet,
+            crate::wifi::check_internet_access,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_ethernet_status() -> (bool, Option<String>) {
+    crate::wifi::is_ethernet_connected()
+}
+
+#[tauri::command]
+pub fn check_internet_connectivity() -> bool {
+    crate::wifi::check_internet_access()
 }
 
 #[tauri::command]
@@ -3788,8 +4040,8 @@ pub async fn export_settings_to_file(
         app.dialog()
             .file()
             .set_parent(&window)
-            .set_title("Export Bloom Settings")
-            .set_file_name("bloom-settings.json")
+            .set_title("Export Hime Island Settings")
+            .set_file_name("hime-settings.json")
             .add_filter("JSON", &["json"])
             .blocking_save_file()
     })
@@ -3819,7 +4071,7 @@ pub async fn import_settings_from_file(
             app.dialog()
                 .file()
                 .set_parent(&window)
-                .set_title("Import Bloom Settings")
+                .set_title("Import Hime Island Settings")
                 .add_filter("JSON", &["json"])
                 .blocking_pick_file()
         }
@@ -3904,6 +4156,7 @@ fn apply_imported_settings(app: &AppHandle, settings: &str) -> Result<(), String
     if imported.get("bloom-scale").is_some() {
         re_register_appbars(app, &imported);
     }
+    crate::services::sync_native_notifications_suppression(app);
 
     Ok(())
 }
@@ -3948,6 +4201,7 @@ pub fn reset_settings(app: AppHandle) -> Result<(), String> {
             serde_json::json!({ "key": key, "value": null }),
         );
     }
+    crate::services::sync_native_notifications_suppression(&app);
     Ok(())
 }
 
@@ -4056,12 +4310,34 @@ pub fn setup_settings_watcher(app: AppHandle) {
                             "settings-external-changed",
                             serde_json::json!({ "key": key, "value": value }),
                         );
+                        if key == "bloom-free-drag-enabled" {
+                            let enabled =
+                                value.as_str() == Some("true") || value.as_bool() == Some(true);
+                            if !enabled {
+                                if let Ok(mut r) = VOLUME_OVERLAY_RECT.lock() {
+                                    *r = None;
+                                }
+                                if let Ok(mut r) = BRIGHTNESS_OVERLAY_RECT.lock() {
+                                    *r = None;
+                                }
+                            }
+                            crate::services::reconcile_main_appbar(&app);
+                        } else if key == "bloom-scale" {
+                            crate::services::reconcile_main_appbar(&app);
+                        } else if key == "bloom-notch-position" {
+                            crate::services::ensure_main_window_spans_monitor(&app);
+                        } else if key == "bloom-suppress-native-notifications" {
+                            crate::services::sync_native_notifications_suppression(&app);
+                        }
                     }
                     for key in removed {
                         let _ = app.emit(
                             "settings-external-changed",
                             serde_json::json!({ "key": key, "value": null }),
                         );
+                        if key == "bloom-suppress-native-notifications" {
+                            crate::services::sync_native_notifications_suppression(&app);
+                        }
                     }
                 }
             }
@@ -4208,16 +4484,17 @@ mod pwa_icon_tests {
     use super::*;
 
     #[test]
-    fn bloom_launch_targets_reuse_the_running_settings_window() {
-        let identifier = "com.sehaz.bloom";
-        assert!(is_bloom_launch_target(identifier, identifier));
-        assert!(is_bloom_launch_target("bloom-settings", identifier));
-        assert!(is_bloom_launch_target(
-            "C:\\Users\\test\\AppData\\Local\\bloom\\bloom.exe",
+    fn hime_launch_targets_reuse_the_running_settings_window() {
+        let identifier = "local.hime.island";
+        assert!(is_hime_launch_target(identifier, identifier));
+        assert!(is_hime_launch_target("bloom-settings", identifier));
+        assert!(is_hime_launch_target("hime-settings", identifier));
+        assert!(is_hime_launch_target(
+            "C:\\Users\\test\\AppData\\Local\\hime\\hime-island.exe",
             identifier
         ));
-        assert!(!is_bloom_launch_target("C:\\Apps\\Discord.exe", identifier));
-        assert!(!is_bloom_launch_target("com.other.app", identifier));
+        assert!(!is_hime_launch_target("C:\\Apps\\Discord.exe", identifier));
+        assert!(!is_hime_launch_target("com.other.app", identifier));
     }
 
     #[test]
@@ -4331,6 +4608,7 @@ mod pwa_icon_tests {
             hwnd: None,
             executable: Some("brave.exe".into()),
             all_hwnds: None,
+            window_title: None,
         };
         assert!(is_pwa_shortcut_for(&app, "youtube", "brave.exe"));
         assert!(is_pwa_shortcut_for(&app, "YouTube", "BRAVE.EXE"));
@@ -4371,6 +4649,7 @@ mod pwa_icon_tests {
                 hwnd: None,
                 executable: Some("brave.exe".into()),
                 all_hwnds: None,
+                window_title: None,
             },
             AppInfo {
                 name: "Netflix".into(),
@@ -4380,6 +4659,7 @@ mod pwa_icon_tests {
                 hwnd: None,
                 executable: Some("msedge.exe".into()),
                 all_hwnds: None,
+                window_title: None,
             },
         ]));
         assert_eq!(
@@ -4403,6 +4683,45 @@ mod pwa_icon_tests {
             ),
             Some("C:\\Start Menu\\Netflix.lnk".into())
         );
+    }
+
+    #[test]
+    fn build_wifi_status_filters_stale_or_empty_values() {
+        let offline = super::build_wifi_status(
+            Ok(true),
+            || Some("   ".into()),
+            (false, Some("Stale Ethernet".into())),
+            || true,
+        );
+        assert!(offline.enabled);
+        assert!(!offline.connected);
+        assert_eq!(offline.ssid, None);
+        assert!(!offline.is_ethernet);
+        assert_eq!(offline.ethernet_name, None);
+        assert!(!offline.has_internet);
+
+        let wifi_only = super::build_wifi_status(
+            Ok(true),
+            || Some("HomeWiFi".into()),
+            (false, None),
+            || true,
+        );
+        assert!(wifi_only.connected);
+        assert_eq!(wifi_only.ssid.as_deref(), Some("HomeWiFi"));
+        assert!(!wifi_only.is_ethernet);
+        assert!(wifi_only.has_internet);
+
+        let eth_with_radio_err = super::build_wifi_status(
+            Err("no wifi".into()),
+            || None,
+            (true, Some("Ethernet".into())),
+            || false,
+        );
+        assert!(!eth_with_radio_err.enabled);
+        assert!(eth_with_radio_err.connected);
+        assert!(eth_with_radio_err.is_ethernet);
+        assert_eq!(eth_with_radio_err.ethernet_name.as_deref(), Some("Ethernet"));
+        assert!(!eth_with_radio_err.has_internet);
     }
 }
 

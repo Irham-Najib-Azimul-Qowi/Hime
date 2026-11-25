@@ -73,6 +73,7 @@ export function useTasks() {
 	const [error, setError] = useState<string | null>(null);
 	const [activeTab, setActiveTab] = useState<TaskTab>("today");
 	const mountedRef = useRef(true);
+	const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	const fetchTasks = useCallback(async () => {
 		try {
@@ -83,7 +84,28 @@ export function useTasks() {
 			}
 		} catch (e) {
 			if (mountedRef.current) {
-				setError(String(e));
+				const raw = String(e);
+				// If Named Pipe or Core is initializing/connecting, show friendly status instead of raw pipe error
+				if (
+					raw.toLowerCase().includes("named pipe") ||
+					raw.toLowerCase().includes("cannot find the file specified") ||
+					raw.toLowerCase().includes("connection failed") ||
+					raw.toLowerCase().includes("the system can") ||
+					raw.toLowerCase().includes("broken pipe") ||
+					raw.toLowerCase().includes("os error 232") ||
+					raw.toLowerCase().includes("hime core")
+				) {
+					setError("Menghubungkan ke layanan Hime...");
+					// Auto retry after 1.5s
+					if (!retryTimerRef.current) {
+						retryTimerRef.current = setTimeout(() => {
+							retryTimerRef.current = null;
+							if (mountedRef.current) void fetchTasks();
+						}, 1500);
+					}
+				} else {
+					setError(raw);
+				}
 			}
 		} finally {
 			if (mountedRef.current) setLoading(false);
@@ -93,7 +115,13 @@ export function useTasks() {
 	useEffect(() => {
 		mountedRef.current = true;
 		fetchTasks();
-		return () => { mountedRef.current = false; };
+		return () => {
+			mountedRef.current = false;
+			if (retryTimerRef.current) {
+				clearTimeout(retryTimerRef.current);
+				retryTimerRef.current = null;
+			}
+		};
 	}, [fetchTasks]);
 
 	const createTask = useCallback(async (

@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UpdateCheckResult } from "./updater";
 import { batteryTooltip, type BatteryDetails } from "./batteryTooltip";
-import { createRegionSender, measureElements, notchPillBox, type RegionRect } from "./windowRegion";
+import { createRegionSender, measureElements, type RegionRect } from "./windowRegion";
 import "./App.css";
 import { initTheme } from "./theme";
 import {
@@ -57,6 +57,7 @@ import {
 	ChevronRight,
 	Inbox,
 	Music,
+	Keyboard,
 	Zap,
 	VolumeX,
 	Volume,
@@ -64,15 +65,20 @@ import {
 	Volume2,
 	SunDim,
 	SunMedium,
-	Sun
+	Sun,
+	Network,
+	Plane,
+	Wifi,
+	WifiOff
 } from "lucide-react";
 import { useHimeEvents } from "./hime/events/useHimeEvents";
 import { HimeAssistantPanel } from "./hime/panels/HimeAssistantPanel";
-import { HimeTasksPanel } from "./hime/tasks";
+import { HimeTasksPanel, useTasks } from "./hime/tasks";
+import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
 import { ApprovalDetailCard } from "./hime/panels/ApprovalDetailCard";
 import { ApprovalBubble } from "./hime/bubbles/ApprovalBubble";
-import { HimeEyes } from "./hime/ui/HimeEyes";
-import { useNCM } from "./hime/ncm";
+import { HimeEyes, type EyeExpression } from "./hime/ui/HimeEyes";
+import { useNCM, PriorityLevel } from "./hime/ncm";
 import type { ApprovalItem } from "./hime/types";
 
 /**
@@ -85,8 +91,8 @@ import type { ApprovalItem } from "./hime/types";
  *   Dragging files onto the notch also opens the shelf. Wheel/swipe switches
  *   between tool panels, including when a live activity occupies the pill.
  */
-type NotchPanel = "calendar" | "command-center" | "devices" | "hime" | "tasks";
-const NOTCH_PANELS: readonly NotchPanel[] = ["calendar", "command-center", "devices", "hime", "tasks"];
+type NotchPanel = "command-center" | "calendar" | "tasks" | "devices" | "hime";
+const NOTCH_PANELS: readonly NotchPanel[] = ["command-center", "calendar", "tasks", "devices", "hime"];
 const asNotchPanel = (value: unknown): NotchPanel | null =>
 	NOTCH_PANELS.includes(value as NotchPanel) ? (value as NotchPanel) : null;
 
@@ -427,6 +433,9 @@ interface WifiStatus {
 	enabled: boolean;
 	connected: boolean;
 	ssid: string | null;
+	is_ethernet?: boolean;
+	ethernet_name?: string | null;
+	has_internet?: boolean;
 }
 
 // A shelf file's preview from the backend: a picture when one can be made,
@@ -460,7 +469,8 @@ type BloomMode =
 	| "device"
 	| "hime"
 	| "hime-approval"
-	| "tasks";
+	| "tasks"
+	| "shortcuts";
 
 // A device that just connected or disconnected, shown briefly in the pill.
 interface DeviceAlert {
@@ -628,6 +638,16 @@ function App() {
 	}, []);
 
 	const [time, setTime] = useState("");
+	const [clockParts, setClockParts] = useState<{ hour: string; minute: string; period: string }>(() => {
+		const now = new Date();
+		const h24 = localStorage.getItem("bloom-time-format-24h") === "true";
+		const rawH = now.getHours();
+		return {
+			hour: String(h24 ? rawH : rawH % 12 || 12).padStart(2, "0"),
+			minute: String(now.getMinutes()).padStart(2, "0"),
+			period: h24 ? "" : rawH >= 12 ? "PM" : "AM"
+		};
+	});
 	const [isHovered, setIsHovered] = useState(false);
 	// Expanded into a panel by a click. Hover alone only peeks.
 	const [isOpen, setIsOpen] = useState(false);
@@ -651,6 +671,7 @@ function App() {
 		id: string;
 		side: "below" | "left" | "right";
 		offset: number;
+		align?: "center" | "start" | "end";
 	} | null>(null);
 	const statusTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	// Width the hovered status strip needs so neither side runs into the clock.
@@ -732,10 +753,38 @@ function App() {
 	const [wifiStatus, setWifiStatus] = useState<WifiStatus | null>(null);
 	const wifiEnabled = wifiStatus?.enabled ?? false;
 	const wifiConnected = wifiStatus?.connected ?? false;
+	const isEthernetConnected = wifiStatus?.is_ethernet ?? false;
+	const isEthActive = isEthernetConnected && !wifiConnected;
+	const isNetworkOffline = !wifiConnected && !isEthernetConnected;
+	const isInternetDown = isNetworkOffline || wifiStatus?.has_internet === false;
 	const [bluetoothEnabled, setBluetoothEnabled] = useState(true);
 	// Names of connected Bluetooth devices, for the controls tile.
 	const [btConnectedNames, setBtConnectedNames] = useState<string[]>([]);
 	const [batterySaverEnabled, setBatterySaverEnabled] = useState(false);
+	const [airplaneModeEnabled, setAirplaneModeEnabled] = useState(false);
+	const [dndEnabled, setDndEnabled] = useState(false);
+	const [hotspotEnabled, setHotspotEnabled] = useState(false);
+	const [nightLightEnabled, setNightLightEnabled] = useState(false);
+
+	const toggleAirplaneMode = useCallback(async () => {
+		setAirplaneModeEnabled((prev) => !prev);
+		invoke("open_airplane_mode_settings").catch(console.error);
+	}, []);
+
+	const toggleDnd = useCallback(async () => {
+		setDndEnabled((prev) => !prev);
+		invoke("open_app", { appName: "ms-settings:notifications" }).catch(console.error);
+	}, []);
+
+	const toggleHotspot = useCallback(async () => {
+		setHotspotEnabled((prev) => !prev);
+		invoke("open_app", { appName: "ms-settings:network-mobilehotspot" }).catch(console.error);
+	}, []);
+
+	const toggleNightLight = useCallback(async () => {
+		setNightLightEnabled((prev) => !prev);
+		invoke("open_app", { appName: "ms-settings:nightlight" }).catch(console.error);
+	}, []);
 	const [currentBrightness, setCurrentBrightness] = useState(50);
 	const previousVolume = useRef(0.5);
 	const previousBrightness = useRef(50);
@@ -751,9 +800,10 @@ function App() {
 	const [netUpSpeed, setNetUpSpeed] = useState(0);
 	const [netDownSpeed, setNetDownSpeed] = useState(0);
 	const [statusWidgets, setStatusWidgets] = useState<WidgetConfig>({
-		left: ["weather"],
+		left: ["net"],
 		right: ["battery"]
 	});
+	const [isCenterHovered, setIsCenterHovered] = useState(false);
 
 	const [windowLabel, setWindowLabel] = useState<string>("");
 	useEffect(() => {
@@ -843,6 +893,20 @@ function App() {
 	const [isImpacted, setIsImpacted] = useState(true);
 	const [isExpanded, setIsExpanded] = useState(true);
 	const [startupAnimating, setStartupAnimating] = useState(false);
+	const [viewportSize, setViewportSize] = useState(() => ({
+		width: typeof window !== "undefined" ? window.innerWidth : 1920,
+		height: typeof window !== "undefined" ? window.innerHeight : 1080
+	}));
+	useEffect(() => {
+		const handleViewportResize = () => {
+			setViewportSize({
+				width: window.innerWidth,
+				height: window.innerHeight
+			});
+		};
+		window.addEventListener("resize", handleViewportResize);
+		return () => window.removeEventListener("resize", handleViewportResize);
+	}, []);
 
 	const [dockMode, setDockMode] = useState(() => {
 		const raw = localStorage.getItem("bloom-dock-mode") || "smart";
@@ -864,6 +928,26 @@ function App() {
 	const [isOverlapped, setIsOverlapped] = useState(false);
 	const [isForegroundFullscreen, setIsForegroundFullscreen] = useState(false);
 	const [interactionState, setInteractionState] = useState<"active" | "grace" | "none">("none");
+	const [freeDragEnabled, setFreeDragEnabled] = useState(
+		() => localStorage.getItem("bloom-free-drag-enabled") === "true"
+	);
+	const [notchPosition, setNotchPosition] = useState<{ x: number; y: number } | null>(() => {
+		if (localStorage.getItem("bloom-free-drag-enabled") !== "true") return null;
+		try {
+			const raw = localStorage.getItem("bloom-notch-position");
+			if (raw) {
+				const p = JSON.parse(raw);
+				if (typeof p?.x === "number" && typeof p?.y === "number") {
+					if (p.edge === "bottom") return null;
+					return p;
+				}
+			}
+		} catch {}
+		return null;
+	});
+	const isDraggingRef = useRef(false);
+	const [isDragging, setIsDragging] = useState(false);
+	const wasJustDraggedRef = useRef(false);
 	const bloomRef = useRef<HTMLDivElement>(null);
 	// Measured to fit the hovered status strip; see statusFitWidth.
 	const leftWidgetsRef = useRef<HTMLDivElement>(null);
@@ -888,6 +972,15 @@ function App() {
 	// refs and the DOM, so it is safe to call from any callback.
 	const updateNotchRegion = () => {
 		const wanted: RegionRect[] = [];
+		if (bloomRef.current) {
+			const r = bloomRef.current.getBoundingClientRect();
+			wanted.push({
+				x: r.left - 24 * scale,
+				y: r.top - 24 * scale,
+				width: r.width + 48 * scale,
+				height: r.height + 48 * scale
+			});
+		}
 		if (pillTargetRef.current) wanted.push(pillTargetRef.current);
 		// Each floating part, padded to cover what it paints outside its box: a
 		// tooltip card's shadow reaches 20px out plus a 6px drop, a bubble's
@@ -992,7 +1085,7 @@ function App() {
 			window.removeEventListener("resize", updateRect);
 			observer.disconnect();
 		};
-	}, [isExpanded, isHidden, windowLabel, scale]);
+	}, [isExpanded, isHidden, isOpen, isDragging, freeDragEnabled, windowLabel, scale, notchPosition]);
 
 	useEffect(() => {
 		if (!windowLabel) return;
@@ -1013,6 +1106,12 @@ function App() {
 	}, [windowLabel]);
 
 	// Settings state
+	const [settingsAssistantEnabled, setSettingsAssistantEnabled] = useState(
+		() => localStorage.getItem("bloom-assistant-enabled") !== "false"
+	);
+	const settingsAssistantEnabledRef = useRef(settingsAssistantEnabled);
+	settingsAssistantEnabledRef.current = settingsAssistantEnabled;
+
 	const [settingsWeatherEnabled, setSettingsWeatherEnabled] = useState(
 		() => localStorage.getItem("bloom-weather-enabled") !== "false"
 	);
@@ -1022,6 +1121,8 @@ function App() {
 	const [settingsCalendarEnabled, setSettingsCalendarEnabled] = useState(
 		() => localStorage.getItem("bloom-calendar-enabled") !== "false"
 	);
+	const settingsCalendarEnabledRef = useRef(settingsCalendarEnabled);
+	settingsCalendarEnabledRef.current = settingsCalendarEnabled;
 	// Which panels the notch shows. Calendar and Controls are on by default;
 	// Connected devices (and panels added later) are opt-in.
 	const [settingsControlsPanelEnabled, setSettingsControlsPanelEnabled] = useState(
@@ -1079,18 +1180,13 @@ function App() {
 		() => localStorage.getItem("bloom-edge-shine-enabled") !== "false"
 	);
 	const [mediaLayout, setMediaLayout] = useState<"classic" | "compact">(
-		() => (localStorage.getItem("bloom-media-layout") as "classic" | "compact") || "classic"
+		() => (localStorage.getItem("bloom-media-layout") as "classic" | "compact") || "compact"
 	);
 	const [compactVolumeExpanded, setCompactVolumeExpanded] = useState(false);
+	const [isLyricsExpanded, setIsLyricsExpanded] = useState(false);
 
 	// Weather hook
-	const {
-		temperature,
-		weatherCondition,
-		weatherIcon: WeatherIcon,
-		cityName,
-		tempUnit
-	} = useWeather(settingsWeatherEnabled);
+	useWeather(settingsWeatherEnabled);
 
 	useEffect(() => {
 		if (!windowLabel) return;
@@ -1134,6 +1230,22 @@ function App() {
 					getVal("bloom-media-compact-glow-enabled", "true") !== "false"
 				);
 				setSettingsCornersEnabled(getVal("bloom-corners-enabled", "false") === "true");
+				setSettingsAssistantEnabled(getVal("bloom-assistant-enabled", "true") !== "false");
+				const fd = getVal("bloom-free-drag-enabled", "false") === "true";
+				setFreeDragEnabled(fd);
+				if (fd) {
+					const np = getVal("bloom-notch-position");
+					if (np) {
+						try {
+							const p = typeof np === "string" ? JSON.parse(np) : np;
+							if (typeof p?.x === "number" && typeof p?.y === "number" && p.edge !== "bottom") {
+								setNotchPosition(p);
+							}
+						} catch {}
+					}
+				} else {
+					setNotchPosition(null);
+				}
 				setEdgeShineEnabled(getVal("bloom-edge-shine-enabled", "true") !== "false");
 				setTimeFormat24h(getVal("bloom-time-format-24h") === "true");
 
@@ -1167,7 +1279,8 @@ function App() {
 					try {
 						const parsed = JSON.parse(widgetsVal);
 						if (parsed && Array.isArray(parsed.left) && Array.isArray(parsed.right)) {
-							setStatusWidgets(parsed);
+							const migratedLeft = parsed.left.map((w: string) => (w === "weather" ? "net" : w));
+							setStatusWidgets({ ...parsed, left: migratedLeft });
 						}
 					} catch {}
 				}
@@ -1217,10 +1330,12 @@ function App() {
 		// the webview still thinks the pointer is inside the notch (it cannot
 		// receive the mouseleave once the window is click-through).
 		const unlistenNotchPointerLeft = listen("notch-pointer-left", () => {
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
 			handlePointerLeftRef.current();
 		});
 
 		const unlistenNotchDismiss = listen("notch-dismiss", () => {
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
 			setIsOpen(false);
 			setBloomMode(restingModeRef.current);
 			setIsHovered(false);
@@ -1240,6 +1355,86 @@ function App() {
 			}
 		});
 
+		const unlistenShowShortcuts = listen("hime-show-shortcuts", () => {
+			if (isOpenRef.current && bloomModeRef.current === "shortcuts") {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
+			} else {
+				setIsOpen(true);
+				setBloomMode("shortcuts");
+				notchPinnedRef.current = true;
+				releaseDeferredRef.current = false;
+			}
+		});
+
+		const unlistenToggleAssistant = listen("hime-toggle-assistant", () => {
+			if (!settingsAssistantEnabledRef.current) return;
+			if (isOpenRef.current && bloomModeRef.current === "hime") {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+			} else {
+				setIsOpen(true);
+				setBloomMode("hime");
+				notchPinnedRef.current = true;
+			}
+		});
+
+		const unlistenToggleMusic = listen("hime-toggle-music", () => {
+			if (isOpenRef.current && bloomModeRef.current === "music") {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
+			} else {
+				setIsOpen(true);
+				setBloomMode("music");
+			}
+		});
+
+		const unlistenToggleCalendar = listen("hime-toggle-calendar", () => {
+			if (windowLabel !== "main") return;
+			if (!settingsCalendarEnabledRef.current) {
+				toggleCalendarModeRef.current?.();
+				return;
+			}
+			if (isOpenRef.current && bloomModeRef.current === "calendar") {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+			} else {
+				setIsOpen(true);
+				setBloomMode("calendar");
+				notchPinnedRef.current = true;
+			}
+		});
+
+		const unlistenOpenNotifications = listen("hime-open-notifications", () => {
+			if (windowLabel !== "main") return;
+			const targetPanel: NotchPanel = settingsAssistantEnabledRef.current ? "tasks" : "calendar";
+			if (isOpenRef.current && (bloomModeRef.current === "tasks" || bloomModeRef.current === "hime")) {
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+			} else {
+				setIsOpen(true);
+				setBloomMode(targetPanel);
+				notchPinnedRef.current = true;
+			}
+		});
+
 		return () => {
 			unlistenVisibility.then((f) => f());
 			unlistenFs.then((f) => f());
@@ -1248,6 +1443,11 @@ function App() {
 			unlistenNotchPointerLeft.then((f) => f());
 			unlistenNotchDismiss.then((f) => f());
 			unlistenShowIsland.then((f) => f());
+			unlistenShowShortcuts.then((f) => f());
+			unlistenToggleAssistant.then((f) => f());
+			unlistenToggleMusic.then((f) => f());
+			unlistenToggleCalendar.then((f) => f());
+			unlistenOpenNotifications.then((f) => f());
 			document.removeEventListener("contextmenu", preventContext);
 		};
 	}, [windowLabel]);
@@ -1256,6 +1456,8 @@ function App() {
 	useEffect(() => {
 		if (!isOpen) return;
 		const handleOutsideClick = (e: MouseEvent) => {
+			if (isDraggingRef.current) return;
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
 			if (bloomRef.current && !bloomRef.current.contains(e.target as Node)) {
 				setIsOpen(false);
 				setBloomMode(restingModeRef.current);
@@ -1269,6 +1471,38 @@ function App() {
 			window.removeEventListener("pointerdown", handleOutsideClick);
 		};
 	}, [isOpen]);
+
+	// Global keydown handler for shortcuts cheatsheet (F1 / Ctrl+Shift+/)
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "F1" || (e.ctrlKey && e.shiftKey && (e.key === "?" || e.key === "/" || e.code === "Slash"))) {
+				e.preventDefault();
+				if (isOpenRef.current && bloomModeRef.current === "shortcuts") {
+					setIsOpen(false);
+					setBloomMode(restingModeRef.current);
+					setIsHovered(false);
+					setIsNotchHovered(false);
+					notchPinnedRef.current = false;
+					releaseDeferredRef.current = false;
+				} else {
+					setIsOpen(true);
+					setBloomMode("shortcuts");
+					notchPinnedRef.current = true;
+					releaseDeferredRef.current = false;
+				}
+			} else if (e.key === "Escape" && isOpenRef.current && bloomModeRef.current === "shortcuts") {
+				e.preventDefault();
+				setIsOpen(false);
+				setBloomMode(restingModeRef.current);
+				setIsHovered(false);
+				setIsNotchHovered(false);
+				notchPinnedRef.current = false;
+				releaseDeferredRef.current = false;
+			}
+		};
+		window.addEventListener("keydown", handleKeyDown);
+		return () => window.removeEventListener("keydown", handleKeyDown);
+	}, []);
 
 	// Settings sync — consolidated dispatch for all settings events
 	useSettingsSync(
@@ -1302,12 +1536,37 @@ function App() {
 				try {
 					const parsed = JSON.parse(value);
 					if (parsed && Array.isArray(parsed.left) && Array.isArray(parsed.right)) {
-						setStatusWidgets(parsed);
+						const migratedLeft = parsed.left.map((w: string) => (w === "weather" ? "net" : w));
+						setStatusWidgets({ ...parsed, left: migratedLeft });
 					}
 				} catch {}
 			},
 			"bloom-show-update-indicator": (value) => setShowUpdateIndicator(String(value) === "true"),
-			"bloom-time-format-24h": setTimeFormat24h
+			"bloom-time-format-24h": setTimeFormat24h,
+			"bloom-assistant-enabled": setSettingsAssistantEnabled,
+			"bloom-free-drag-enabled": (val: unknown) => {
+				const enabled = val === true || val === "true";
+				setFreeDragEnabled(enabled);
+				if (!enabled) {
+					setNotchPosition(null);
+				}
+			},
+			"bloom-notch-position": (val: unknown) => {
+				try {
+					if (!val) {
+						setNotchPosition(null);
+						return;
+					}
+					const p = typeof val === "string" ? JSON.parse(val) : val;
+					if (typeof p?.x === "number" && typeof p?.y === "number") {
+						if (p.edge === "bottom") {
+							setNotchPosition(null);
+							return;
+						}
+						setNotchPosition(p);
+					}
+				} catch {}
+			}
 		},
 		[windowLabel]
 	);
@@ -1426,14 +1685,243 @@ function App() {
 	const [activeApproval, setActiveApproval] = useState<ApprovalItem | null>(null);
 
 	// Notch Compose Manager (NCM) - foundational presentation arbiter
-	const { slotState: ncmSlotState } = useNCM({
+	const emptyApprovals = useMemo<ApprovalItem[]>(() => [], []);
+	const {
+		slotState: ncmSlotState,
+		submitPresentation,
+		retractPresentation,
+		triggerAmbientPeek
+	} = useNCM({
 		isOnline: himeStatus.is_online,
-		approvals: himeApprovals,
+		approvals: settingsAssistantEnabled ? himeApprovals : emptyApprovals,
 		approvalJustResolved
 	});
 
-	// Dynamically derived mascot expression for closed notch pill
-	const himeExpression = ncmSlotState.mascotExpression;
+	// Task state integration for contextual eyes
+	const { allTasks, totalActive } = useTasks();
+	const hasOverdueTasks = useMemo(() => {
+		const nowSec = Math.floor(Date.now() / 1000);
+		return allTasks.some(
+			(t) => t.status !== "done" && t.due_date != null && t.due_date < nowSec
+		);
+	}, [allTasks]);
+	const hasPendingTasks = totalActive > 0;
+
+	// Periodic Hime eyes ambient glance in the resting notch
+	const [periodicEyesActive, setPeriodicEyesActive] = useState(false);
+	const [randomGlanceExpr, setRandomGlanceExpr] = useState<EyeExpression>("senyum");
+	const glanceIndexRef = useRef(0);
+
+	const idleGlanceCatalog: readonly EyeExpression[] = useMemo(
+		() => [
+			"senyum",
+			"kedip",
+			"penasaran",
+			"lirik_kiri",
+			"lirik_kanan",
+			"netral",
+			"semangat",
+			"nakal"
+		],
+		[]
+	);
+
+	const [expressionOverride, setExpressionOverride] = useState<EyeExpression | null>(null);
+
+	const notchEyeExpression: EyeExpression = useMemo(() => {
+		if (expressionOverride) return expressionOverride;
+		if (ncmSlotState.mascotExpression && ncmSlotState.mascotExpression !== "netral") {
+			return ncmSlotState.mascotExpression;
+		}
+		// 1. Network offline / error
+		if (!wifiConnected && !isEthernetConnected) {
+			return "offline";
+		}
+		if (wifiStatus?.has_internet === false) {
+			return "khawatir";
+		}
+		// 2. Low battery (< threshold and not charging)
+		if (batteryLevel !== null && batteryLevel < lowBatteryThreshold && !isCharging) {
+			return "panik";
+		}
+		// 3. Charging
+		if (isCharging) {
+			return "senang";
+		}
+		// 4. Overdue tasks
+		if (hasOverdueTasks) {
+			return "waspada";
+		}
+		// 5. Active pending tasks
+		if (hasPendingTasks) {
+			return "fokus";
+		}
+		// 6. Music / audio playing
+		if (isPlaying) {
+			return "dengar";
+		}
+		// 7. Periodic idle glance
+		return randomGlanceExpr;
+	}, [
+		expressionOverride,
+		ncmSlotState.mascotExpression,
+		wifiConnected,
+		isEthernetConnected,
+		wifiStatus?.has_internet,
+		batteryLevel,
+		lowBatteryThreshold,
+		isCharging,
+		hasOverdueTasks,
+		hasPendingTasks,
+		isPlaying,
+		randomGlanceExpr
+	]);
+
+	const himeExpression = notchEyeExpression;
+
+	const offlineCenterLabel = isNetworkOffline
+		? "Tanpa Jaringan"
+		: wifiStatus?.has_internet === false
+			? "Tanpa Internet"
+			: null;
+	const centerAlertText: string | null = ncmSlotState.centerSlot
+		? ncmSlotState.centerSlot.slice(0, 36)
+		: offlineCenterLabel;
+	const centerAlertExpression: EyeExpression = ncmSlotState.centerSlot
+		? ncmSlotState.mascotExpression && ncmSlotState.mascotExpression !== "netral"
+			? ncmSlotState.mascotExpression
+			: himeExpression
+		: isNetworkOffline
+			? "offline"
+			: "khawatir";
+
+	// Periodic glance timer: every ~18s for ~3 seconds in resting notch
+	useEffect(() => {
+		const interval = setInterval(() => {
+			if (!isOpen && !isHovered && !isCenterHovered && settingsAssistantEnabled) {
+				glanceIndexRef.current = (glanceIndexRef.current + 1) % idleGlanceCatalog.length;
+				setRandomGlanceExpr(idleGlanceCatalog[glanceIndexRef.current]);
+				triggerAmbientPeek();
+				setPeriodicEyesActive(true);
+				setTimeout(() => {
+					setPeriodicEyesActive(false);
+				}, 3000);
+			}
+		}, 18000);
+		return () => clearInterval(interval);
+	}, [isOpen, isHovered, isCenterHovered, triggerAmbientPeek, idleGlanceCatalog]);
+
+	// Default clock preservation: showCenterEyes is strictly periodicEyesActive
+	const showCenterEyes = periodicEyesActive;
+
+	// Network drop notification handler (Wi-Fi / Internet drop)
+	const triggerNetworkDropAlert = useCallback(() => {
+		setExpressionOverride("khawatir");
+		submitPresentation({
+			id: "network-drop-alert",
+			module: "network",
+			kind: "alert",
+			priority: PriorityLevel.P0_CRITICAL,
+			ttl: 7000,
+			expression: "khawatir",
+			payload: {
+				title: "Koneksi Terputus",
+				description: "Wi-Fi atau internet terputus"
+			}
+		});
+		if (notchMode === "peek") {
+			triggerEventPeek(7000);
+		}
+		setTimeout(() => {
+			setExpressionOverride((prev) => (prev === "khawatir" ? null : prev));
+		}, 7000);
+	}, [submitPresentation, notchMode, triggerEventPeek]);
+
+	// Captured Windows / system notifications -> Main Notch clock slot only
+	useEffect(() => {
+		if (windowLabel !== "main") return;
+		let disposed = false;
+		let unlistenFn: (() => void) | undefined;
+
+		listen<{
+			id?: string;
+			app?: string;
+			title?: string;
+			body?: string;
+			timestamp?: number;
+		}>("hime-system-notification", (event) => {
+			const payload = event.payload || {};
+			const app = (payload.app || "").replace(/\s+/g, " ").trim();
+			const title = (payload.title || "").replace(/\s+/g, " ").trim();
+			const body = (payload.body || "").replace(/\s+/g, " ").trim();
+			const primary = title || body;
+			const rawText = app && primary && !primary.toLowerCase().startsWith(app.toLowerCase())
+				? `${app}: ${primary}`
+				: primary || app || "Notifikasi baru";
+			const conciseText = rawText.slice(0, 36);
+			const lower = `${app} ${title} ${body}`.toLowerCase();
+			let expr: EyeExpression = "penasaran";
+			if (/error|fail|gagal|warning|peringatan|alert|bahaya|disconnect|putus|low/.test(lower)) {
+				expr = /disconnect|putus/.test(lower) ? "khawatir" : "waspada";
+			} else if (/kalender|calendar|jadwal|reminder|pengingat|meeting|deadline/.test(lower)) {
+				expr = "fokus";
+			} else if (/selesai|berhasil|success|done|complete|whatsapp|telegram|discord|pesan|chat|mail|slack/.test(lower)) {
+				expr = "senang";
+			}
+
+			submitPresentation({
+				id: `sys-notif-${payload.id || Date.now()}`,
+				module: "system-notification",
+				kind: "alert",
+				priority: PriorityLevel.P1_TIME_SENSITIVE,
+				ttl: 7000,
+				expression: expr,
+				payload: {
+					title: conciseText,
+					description: conciseText,
+					app,
+					body
+				}
+			});
+			if (notchMode === "peek") {
+				triggerEventPeek(7000);
+			}
+		}).then((fn) => {
+			if (disposed) fn();
+			else unlistenFn = fn;
+		});
+
+		return () => {
+			disposed = true;
+			unlistenFn?.();
+		};
+	}, [windowLabel, submitPresentation, notchMode, triggerEventPeek]);
+
+	// Network drop detection: Wi-Fi or Internet disconnection
+	const prevWifiConnectedRef = useRef<boolean | null>(null);
+	const prevHasInternetRef = useRef<boolean | null>(null);
+
+	useEffect(() => {
+		const isConn = Boolean(wifiStatus && ((wifiStatus.enabled && wifiStatus.connected) || wifiStatus.is_ethernet));
+		const hasNet = Boolean(isConn && wifiStatus?.has_internet !== false);
+
+		if (prevWifiConnectedRef.current !== null) {
+			if (
+				(prevWifiConnectedRef.current && wifiStatus && !wifiStatus.connected && !wifiStatus.is_ethernet) ||
+				(prevHasInternetRef.current === true && isConn && wifiStatus?.has_internet === false)
+			) {
+				triggerNetworkDropAlert();
+			}
+		}
+		if (hasNet) {
+			retractPresentation("network-drop-alert");
+			setExpressionOverride((prev) => (prev === "khawatir" ? null : prev));
+		}
+		if (wifiStatus) {
+			prevWifiConnectedRef.current = isConn;
+			prevHasInternetRef.current = hasNet;
+		}
+	}, [wifiStatus, triggerNetworkDropAlert, retractPresentation]);
 
 	// Sync pending approval selection
 	useEffect(() => {
@@ -1696,6 +2184,12 @@ function App() {
 	// reports the pointer left the (now click-through) notch window. Closes an
 	// open notch, remembering its panel, and returns to the resting mode.
 	const releaseNotchHover = () => {
+		if (isDraggingRef.current) return;
+		// Do not auto-hide while a file dialog is open
+		if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) {
+			releaseDeferredRef.current = true;
+			return;
+		}
 		// A view being typed into (e.g. Wi-Fi password or chat input) keeps the notch open
 		if (notchPinnedRef.current) {
 			releaseDeferredRef.current = true;
@@ -1732,12 +2226,31 @@ function App() {
 	}, []);
 	const handlePointerLeft = useCallback(() => {
 		cancelPointerLeft();
+		// Unhover auto-hide countdown: 2.5 seconds before hiding
 		pointerLeftTimer.current = setTimeout(() => {
 			releaseNotchHover();
-		}, 350);
+		}, 2500);
 	}, [cancelPointerLeft]);
 	const handlePointerLeftRef = useRef(handlePointerLeft);
 	handlePointerLeftRef.current = handlePointerLeft;
+
+	// Click-outside dismissal: when notch is open or hovered, clicking outside immediately closes it
+	useEffect(() => {
+		if (!isOpen && !isHovered) return;
+		const handleGlobalPointerDown = (e: MouseEvent | PointerEvent) => {
+			if (isDraggingRef.current) return;
+			if ((window as any).__isFileDialogOpen || (window as any).isFileDialogOpen || (window as any).__himeFileDialogOpen) return;
+			const bloomEl = bloomRef.current;
+			if (bloomEl && !bloomEl.contains(e.target as Node)) {
+				cancelPointerLeft();
+				releaseNotchHover();
+			}
+		};
+		window.addEventListener("pointerdown", handleGlobalPointerDown, true);
+		return () => {
+			window.removeEventListener("pointerdown", handleGlobalPointerDown, true);
+		};
+	}, [isOpen, isHovered, cancelPointerLeft]);
 
 	const clearShelfCollapse = () => {
 		if (shelfCollapseTimer.current !== null) {
@@ -1980,34 +2493,88 @@ function App() {
 	const lastScrollTime = useRef(0);
 	const handleWheel = (e: React.WheelEvent) => {
 		const target = e.target as HTMLElement;
+
+		// 1. Prevent panel cycling if cursor is inside scrollable lists or interactive controls:
 		if (
-			target.closest(".calendar-container") ||
-			target.closest(".timer-column") ||
-			target.closest(".shelf-content") ||
-			target.closest(".qp-list") ||
 			target.closest(".hime-chat-scroll") ||
-			target.closest(".hime-assistant-panel") ||
-			target.closest(".hime-panel")
+			target.closest(".chat-message-bubble") ||
+			target.closest(".chat-prompt-bar") ||
+			target.closest(".cmp-lyrics-container") ||
+			target.closest(".lyrics-view") ||
+			target.closest(".qp-list") ||
+			target.closest(".qp-wifi-list") ||
+			target.closest(".qp-devices-list") ||
+			target.closest(".connected-devices-list") ||
+			target.closest(".tasks-list") ||
+			target.closest(".tasks-content") ||
+			target.closest(".tasks-item") ||
+			target.closest(".calendar-grid") ||
+			target.closest(".calendar-column") ||
+			target.closest(".timer-column") ||
+			target.closest(".timer-section-new") ||
+			target.closest(".shelf-content") ||
+			target.closest(".volume-slider-container") ||
+			target.closest(".slider-track-premium") ||
+			target.closest(".cc-classic-sliders-area") ||
+			target.closest(".cc-classic-slider-row") ||
+			target.closest(".cc-classic-slider-track") ||
+			target.closest(".premium-slider") ||
+			target.closest(".cc-pills-grid") ||
+			target.closest(".cc-pill-tile") ||
+			target.closest(".shortcuts-content") ||
+			target.closest(".shortcuts-list") ||
+			target.closest(".shortcuts-category-card")
 		) {
 			return;
 		}
 
+		// 2. When notch is open, only allow cycling if cursor is within the top notch bar / clock / eyes area:
+		if (isOpen) {
+			const rect = e.currentTarget.getBoundingClientRect();
+			const relativeY = e.clientY - rect.top;
+
+			const isHeaderArea =
+				relativeY <= 44 * (scale > 0 ? scale : 1) ||
+				Boolean(
+					target.closest(".time-center") ||
+					target.closest(".main-row") ||
+					target.closest(".main-row-inner") ||
+					target.closest(".hime-assistant-header") ||
+					target.closest(".hime-eyes-container") ||
+					target.closest(".hime-eyes-center") ||
+					target.closest(".qp-header") ||
+					target.closest(".tasks-header") ||
+					target.closest(".tasks-tabs-row") ||
+					target.closest(".shortcuts-header") ||
+					target.closest(".announcement-header")
+				);
+
+			if (!isHeaderArea) {
+				return;
+			}
+		}
+
+		// 3. Debounce
 		const now = Date.now();
-		if (now - lastScrollTime.current < 250) return;
+		if (now - lastScrollTime.current < 200) return;
 
-		// Use absolute values to detect horizontal swipe gestures on trackpad
-		const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-		if (Math.abs(delta) < 5) return; // Ignore tiny movements
+		// 4. Direction: Support both horizontal swipe (deltaX) and mouse wheel (deltaY)
+		const absX = Math.abs(e.deltaX);
+		const absY = Math.abs(e.deltaY);
+		const delta = absX > absY ? e.deltaX : e.deltaY;
+		if (Math.abs(delta) < 4) return;
 
-		if (cycleBloomMode(delta > 0 ? 1 : -1)) lastScrollTime.current = now;
+		if (cycleBloomMode(delta > 0 ? 1 : -1)) {
+			lastScrollTime.current = now;
+		}
 	};
 
 	function panelEnabled(panel: NotchPanel) {
 		if (panel === "calendar") return settingsCalendarEnabled;
 		if (panel === "command-center") return settingsControlsPanelEnabled;
 		if (panel === "devices") return settingsDevicesPanelEnabled;
-		if (panel === "hime") return true;
-		if (panel === "tasks") return true;
+		if (panel === "hime") return settingsAssistantEnabled;
+		if (panel === "tasks") return settingsAssistantEnabled;
 		return false;
 	}
 
@@ -2024,13 +2591,21 @@ function App() {
 		if (bloomMode === "announcement") return false;
 		const panels = NOTCH_PANELS.filter(panelAvailable);
 		if (panels.length < 2) return false;
-		const currentIndex = panels.indexOf(bloomMode as NotchPanel);
-		const nextMode =
-			currentIndex === -1
-				? openingPanel()
-				: panels[(currentIndex + direction + panels.length) % panels.length];
+		let currentIndex = panels.indexOf(bloomMode as NotchPanel);
+		if (currentIndex === -1 && (bloomMode === "wifi" || bloomMode === "bluetooth")) {
+			currentIndex = panels.indexOf("command-center");
+		}
+		let nextMode: NotchPanel;
+		if (currentIndex === -1) {
+			// Scrolling from resting clock (or music/status/shortcuts):
+			nextMode = direction > 0 ? panels[0] : panels[panels.length - 1];
+		} else {
+			const nextIndex = (currentIndex + direction + panels.length) % panels.length;
+			nextMode = panels[nextIndex];
+		}
 		setIsOpen(true);
 		setBloomMode(nextMode);
+		rememberPanel(nextMode);
 		return true;
 	};
 
@@ -2045,6 +2620,7 @@ function App() {
 				: panels[(index + direction + panels.length) % panels.length];
 		setIsOpen(true);
 		setBloomMode(nextMode);
+		rememberPanel(nextMode);
 	};
 
 	// Timer state
@@ -2266,10 +2842,7 @@ function App() {
 		settingsMusicCompactNotch &&
 		mediaInfo.has_media &&
 		musicActivityVisible;
-	const collapsedMode = musicActivity && !timerActive ? "music" : "status";
-	const showMusicBubble = musicActivity && timerActive && !isOpen && isVisible && !isHidden;
-	const showShelfBubble =
-		shelfItems.length > 0 && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
+	const collapsedMode = "status";
 	restingModeRef.current = collapsedMode;
 	bloomModeRef.current = bloomMode;
 
@@ -2333,14 +2906,15 @@ function App() {
 		settingsCalendarEnabled,
 		settingsControlsPanelEnabled,
 		settingsDevicesPanelEnabled,
+		settingsAssistantEnabled,
 		bloomMode,
 		isOpen
 	]);
 
-	// Leave the music view when music is turned off or the player ends its media
-	// session: an open notch falls back to the remembered panel.
+	// Leave the music view when music is turned off, or when collapsed with no media session.
+	// When explicitly opened (Ctrl+Shift+M), keep the panel open so the empty-media prompt stays visible.
 	useEffect(() => {
-		if (bloomMode === "music" && !(settingsMusicModeEnabled && mediaInfo.has_media)) {
+		if (bloomMode === "music" && (!settingsMusicModeEnabled || (!isOpen && !mediaInfo.has_media))) {
 			setBloomMode(isOpen ? openingPanel() : collapsedMode);
 		}
 	}, [settingsMusicModeEnabled, mediaInfo.has_media, bloomMode, isOpen]);
@@ -2526,6 +3100,7 @@ function App() {
 	useEffect(() => {
 		const updateTime = () => {
 			const now = new Date();
+			const rawHours = now.getHours();
 			setTime(
 				now.toLocaleTimeString([], {
 					hour: "2-digit",
@@ -2533,6 +3108,11 @@ function App() {
 					hour12: !timeFormat24h
 				})
 			);
+			setClockParts({
+				hour: String(timeFormat24h ? rawHours : rawHours % 12 || 12).padStart(2, "0"),
+				minute: String(now.getMinutes()).padStart(2, "0"),
+				period: timeFormat24h ? "" : rawHours >= 12 ? "PM" : "AM"
+			});
 		};
 
 		updateTime();
@@ -2836,6 +3416,16 @@ function App() {
 		},
 		[sendVolume, volume, isMuted]
 	);
+
+	const handleVolumeWheel = useCallback(
+		(e: React.WheelEvent) => {
+			e.stopPropagation();
+			const delta = e.deltaY < 0 ? 0.04 : -0.04;
+			const newVol = Math.max(0, Math.min(1, Math.round((displayVolume + delta) * 100) / 100));
+			handleVolumeChange(newVol);
+		},
+		[displayVolume, handleVolumeChange]
+	);
 	const CommandVolumeIcon =
 		displayVolume === 0
 			? VolumeX
@@ -2859,7 +3449,9 @@ function App() {
 		setWifiStatus({
 			enabled: newState,
 			connected: newState ? (previous?.connected ?? false) : false,
-			ssid: newState ? (previous?.ssid ?? null) : null
+			ssid: newState ? (previous?.ssid ?? null) : null,
+			is_ethernet: previous?.is_ethernet,
+			ethernet_name: previous?.ethernet_name
 		});
 		try {
 			await invoke("set_wifi_state", { enabled: newState });
@@ -2895,18 +3487,30 @@ function App() {
 			statusTooltipTimerRef.current = setTimeout(() => {
 				const pill = bloomRef.current?.getBoundingClientRect();
 				const own = widget.getBoundingClientRect();
+				const safeScale = scale > 0 ? scale : 1;
+				const viewW = window.innerWidth;
+				const belowAlign: "center" | "start" | "end" =
+					own.left < 90 ? "start" : own.right > viewW - 90 ? "end" : "center";
 				// Client rects are zoomed by the notch scale; offsets are not.
 				if (!pill) {
-					setStatusTooltip({ id, side: "below", offset: 8 });
+					setStatusTooltip({ id, side: "below", offset: 8, align: belowAlign });
 				} else if (!isOpen) {
-					const gap = (pill.bottom - own.bottom) / scale;
-					setStatusTooltip({ id, side: "below", offset: Math.max(0, gap) + 8 });
+					const gap = (pill.bottom - own.bottom) / safeScale;
+					setStatusTooltip({ id, side: "below", offset: Math.max(0, gap) + 8, align: belowAlign });
 				} else if (own.left + own.width / 2 >= pill.left + pill.width / 2) {
-					const gap = (pill.right - own.right) / scale;
-					setStatusTooltip({ id, side: "right", offset: Math.max(0, gap) + 10 });
+					if (viewW - pill.right < 140 * safeScale) {
+						setStatusTooltip({ id, side: "below", offset: 8, align: "end" });
+					} else {
+						const gap = (pill.right - own.right) / safeScale;
+						setStatusTooltip({ id, side: "right", offset: Math.max(0, gap) + 10 });
+					}
 				} else {
-					const gap = (own.left - pill.left) / scale;
-					setStatusTooltip({ id, side: "left", offset: Math.max(0, gap) + 10 });
+					if (pill.left < 140 * safeScale) {
+						setStatusTooltip({ id, side: "below", offset: 8, align: "start" });
+					} else {
+						const gap = (own.left - pill.left) / safeScale;
+						setStatusTooltip({ id, side: "left", offset: Math.max(0, gap) + 10 });
+					}
 				}
 			}, 400);
 		},
@@ -2976,6 +3580,16 @@ function App() {
 		},
 		[sendBrightness, currentBrightness]
 	);
+
+	const handleBrightnessWheel = useCallback(
+		(e: React.WheelEvent) => {
+			e.stopPropagation();
+			const delta = e.deltaY < 0 ? 4 : -4;
+			const newBright = Math.max(0, Math.min(100, Math.round(currentBrightness + delta)));
+			handleBrightnessChange(newBright);
+		},
+		[currentBrightness, handleBrightnessChange]
+	);
 	const toggleBrightnessLevel = () => {
 		handleBrightnessChange(currentBrightness > 0 ? 0 : previousBrightness.current);
 	};
@@ -3043,8 +3657,10 @@ function App() {
 		setBloomMode("bluetooth");
 	}, []);
 
-	const toggleCalendarMode = (e: React.MouseEvent) => {
-		e.stopPropagation();
+	const toggleCalendarModeRef = useRef<((e?: React.MouseEvent) => void) | null>(null);
+	const toggleCalendarMode = (e?: React.MouseEvent) => {
+		e?.stopPropagation();
+		if (wasJustDraggedRef.current) return;
 		if (isTimerFinished) {
 			resetTimer();
 			return;
@@ -3060,10 +3676,29 @@ function App() {
 			setIsNotchHovered(true);
 		}
 	};
+	toggleCalendarModeRef.current = toggleCalendarMode;
 
 	// Where a status tooltip card sits and how it slides in, by placement.
-	const statusTooltipMotion = (side: "below" | "left" | "right", offset: number) => {
+	const statusTooltipMotion = (
+		side: "below" | "left" | "right",
+		offset: number,
+		align: "center" | "start" | "end" = "center"
+	) => {
 		if (side === "below") {
+			if (align === "start") {
+				return {
+					style: { top: `calc(100% + ${offset}px)`, left: 0 },
+					hidden: { opacity: 0, x: 0, y: -4 },
+					shown: { opacity: 1, x: 0, y: 0 }
+				};
+			}
+			if (align === "end") {
+				return {
+					style: { top: `calc(100% + ${offset}px)`, right: 0 },
+					hidden: { opacity: 0, x: 0, y: -4 },
+					shown: { opacity: 1, x: 0, y: 0 }
+				};
+			}
 			return {
 				style: { top: `calc(100% + ${offset}px)`, left: "50%" },
 				hidden: { opacity: 0, x: "-50%", y: -4 },
@@ -3100,7 +3735,11 @@ function App() {
 			<AnimatePresence>
 				{statusTooltip?.id === id &&
 					(() => {
-						const placed = statusTooltipMotion(statusTooltip.side, statusTooltip.offset);
+						const placed = statusTooltipMotion(
+							statusTooltip.side,
+							statusTooltip.offset,
+							statusTooltip.align
+						);
 						return (
 							<motion.div
 								className="status-tooltip"
@@ -3118,18 +3757,63 @@ function App() {
 		</div>
 	);
 
+	const formatNetSpeed = (bytesPerSec: number) => {
+		if (bytesPerSec < 1024) return `${bytesPerSec} B/s`;
+		if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+		return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+	};
+
+	const formatNetSpeedParts = (bytesPerSec: number) => {
+		if (bytesPerSec < 1024) return { value: `${bytesPerSec}`, unit: "B/s" };
+		if (bytesPerSec < 1024 * 1024) return { value: (bytesPerSec / 1024).toFixed(0), unit: "KB/s" };
+		return { value: (bytesPerSec / (1024 * 1024)).toFixed(1), unit: "MB/s" };
+	};
+
 	// Render a status widget by ID
 	const renderStatusWidget = (id: string) => {
 		switch (id) {
 			case "weather":
-				if (!settingsWeatherEnabled || temperature === null) return null;
+				if (isInternetDown) {
+					return statusWidget(
+						"net",
+						isNetworkOffline
+							? "Tidak ada jaringan (Tanpa Internet)"
+							: `${isEthActive ? "Ethernet" : wifiStatus?.ssid ? `Wi-Fi (${wifiStatus.ssid})` : "Wi-Fi"} (Tanpa Internet)`,
+						<WifiOff size={13} strokeWidth={2} className="net-disconnected-icon" />
+					);
+				}
+				if (isHovered || isCenterHovered) {
+					return statusWidget(
+						"net",
+						isEthActive
+							? `Ethernet (Terhubung ke LAN): ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`
+							: `Network: ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`,
+						<>
+							{isEthActive ? (
+								<Network size={12} strokeWidth={2} />
+							) : (
+								<ArrowUpDown size={12} strokeWidth={2} />
+							)}
+							<span className="label">
+								↓ {formatNetSpeed(netDownSpeed)}
+							</span>
+						</>
+					);
+				}
+				// Default to network speed display instead of weather on the notch left slot
 				return statusWidget(
-					"weather",
-					cityName ? `${weatherCondition} — ${cityName}` : weatherCondition,
+					"net",
+					isEthActive
+						? `Ethernet (Terhubung ke LAN): ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`
+						: `Network: ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`,
 					<>
-						<WeatherIcon size={12} strokeWidth={2.2} />
+						{isEthActive ? (
+							<Network size={12} strokeWidth={2} />
+						) : (
+							<ArrowUpDown size={12} strokeWidth={2} />
+						)}
 						<span className="label">
-							{temperature}°{tempUnit === "fahrenheit" ? "F" : "C"}
+							↓ {formatNetSpeed(netDownSpeed)}
 						</span>
 					</>
 				);
@@ -3178,26 +3862,39 @@ function App() {
 						<span className="label">{diskSpace}GB</span>
 					</>
 				);
-			case "net":
+			case "net": {
+				if (isInternetDown) {
+					return statusWidget(
+						"net",
+						isNetworkOffline
+							? "Tidak ada jaringan (Tanpa Internet)"
+							: `${isEthActive ? "Ethernet" : wifiStatus?.ssid ? `Wi-Fi (${wifiStatus.ssid})` : "Wi-Fi"} (Tanpa Internet)`,
+						<WifiOff size={13} strokeWidth={2} className="net-disconnected-icon" />
+					);
+				}
+				const isWifi = wifiConnected && !!wifiStatus?.ssid;
 				return statusWidget(
 					"net",
-					"Network Speed",
+					isEthActive
+						? `Ethernet: Terhubung ke LAN (↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)})`
+						: isWifi
+							? `Wi-Fi (${wifiStatus.ssid}): ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)} | Wi-Fi: ${wifiStatus.ssid} (↑${formatNetSpeed(netUpSpeed)})`
+							: `Wi-Fi: Connected (↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)})`,
 					<>
-						<ArrowUpDown size={12} strokeWidth={2} />
+						{isEthActive ? (
+							<Network size={12} strokeWidth={2} />
+						) : (
+							<Wifi size={12} strokeWidth={2} />
+						)}
 						<span className="label">
-							↑{formatBytes(netUpSpeed)} ↓{formatBytes(netDownSpeed)}
+							↓ {formatNetSpeed(netDownSpeed)}
 						</span>
 					</>
 				);
+			}
 			default:
 				return null;
 		}
-	};
-
-	const formatBytes = (bytes: number) => {
-		if (bytes < 1024) return `${bytes}B`;
-		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
-		return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
 	};
 
 	// Music mode shows any time we have media info (playing or paused) and music mode setting is enabled
@@ -3211,13 +3908,21 @@ function App() {
 		settingsMusicModeEnabled &&
 		mediaInfo.has_media &&
 		(!musicActivityVisible || !settingsMusicCompactNotch);
-	const showCompactMusicIcons = isMusicMode || showMusicOnStatusHover;
+	const showCompactMusicIcons = isMusicMode || showMusicOnStatusHover || (isPlaying && settingsMusicModeEnabled);
+	// When displaying any menu except music & music lyrics, left and right of clock strictly display network speed and battery
+	const isNonMusicMenu = isOpen && bloomMode !== "music";
+	const showSideMusicIcons = showCompactMusicIcons && !isNonMusicMenu;
 
 	// The 24-hour clock is ~16px narrower than the 12-hour one.
 	const clock24hTrim = timeFormat24h ? 16 : 0;
+	const hasCenterAlert = Boolean(centerAlertText) && !(timerSeconds > 0 || isTimerFinished);
+	const centerAlertWidth = centerAlertText
+		? Math.min(400, Math.max(265, Math.round(175 + centerAlertText.length * 6.5)))
+		: 0;
 
 	// Calculate width dynamically based on enabled features
 	const getDynamicWidth = () => {
+		if (bloomMode === "shortcuts" && isOpen) return 560;
 		if (bloomMode === "hime" || bloomMode === "hime-approval" || bloomMode === "tasks") return 380;
 		if (bloomMode === "announcement" && announcement && !announcementDismissed) return 380;
 		if (bloomMode === "device" && deviceAlert) return 330;
@@ -3231,10 +3936,20 @@ function App() {
 		}
 		if (bloomMode === "status" && isHovered) {
 			const totalWidgets = statusWidgets.left.length + statusWidgets.right.length;
-			return Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
+			const hoverWidth = Math.max(Math.min(200 + totalWidgets * 50, 380) - clock24hTrim, statusFitWidth);
+			return hasCenterAlert ? Math.max(hoverWidth, centerAlertWidth) : hoverWidth;
 		}
-		if (isMusicMode && isOpen) return mediaLayout === "compact" ? 300 : 340;
+		if (bloomMode === "music" && settingsMusicModeEnabled && isOpen) {
+			if (!mediaInfo.has_media) return 340;
+			if (isLyricsExpanded) return 460;
+			return mediaLayout === "compact" ? 360 : 340;
+		}
 		if ((showPowerPulse || showLowBatteryPulse || showUpdatePulse) && !isHovered) return 200;
+
+		if (!isMusicMode) {
+			if (hasCenterAlert) return centerAlertWidth;
+			return 245 - clock24hTrim;
+		}
 
 		let w = 155 - clock24hTrim;
 		if (isMusicMode) {
@@ -3249,6 +3964,7 @@ function App() {
 		if (!isExpanded || !isVisible || isHidden) {
 			return isImpacted ? 28.9 : 44.2;
 		}
+		if (bloomMode === "shortcuts" && isOpen) return 345;
 		if ((bloomMode === "hime" || bloomMode === "tasks") && isOpen) return 380;
 		if (bloomMode === "hime-approval" && isOpen) return 180;
 		// Announcement card: body is line-clamped, so a fixed size fits both cases.
@@ -3267,17 +3983,20 @@ function App() {
 			if (shelfItems.length === 0) return 130;
 			return shelfOverflowing ? 190 : 176;
 		}
-		if (bloomMode === "command-center") return isOpen ? 230 : 36;
+		if (bloomMode === "command-center") return isOpen ? 276 : 36;
 		if (bloomMode === "devices") {
 			return devicesPanelHeight + 36;
 		}
 		if (bloomMode === "wifi" || bloomMode === "bluetooth") return 300;
 		if (bloomMode === "status") return 36;
-		if (isMusicMode && isOpen) {
-			const hasProgressBar = (mediaInfo.duration_ms ?? 0) > 0;
-			let h = mediaLayout === "compact" ? (hasProgressBar ? 132 : 116) : 120;
+		if (bloomMode === "music" && settingsMusicModeEnabled && isOpen) {
+			if (!mediaInfo.has_media) return 156;
+			if (isLyricsExpanded) {
+				return compactVolumeExpanded ? 375 : 340;
+			}
+			let h = mediaLayout === "compact" ? 236 : 190;
 			if (mediaLayout === "compact") {
-				if (compactVolumeExpanded) h += 36;
+				if (compactVolumeExpanded) h = 272;
 			}
 			return h;
 		}
@@ -3286,36 +4005,319 @@ function App() {
 
 	const isCalendarMode = bloomMode === "calendar";
 	// Arrows switch between panels; visible whenever notch is open or hovered
-	const showPanelArrows = (isOpen || isHovered);
+	const showPanelArrows = false;
 
 	// Close compact media player expansions when notch is unhovered or mode changes
 	useEffect(() => {
 		if (mediaLayout === "compact") {
 			setCompactVolumeExpanded(false);
 		}
-	}, [isHovered, mediaLayout, bloomMode]);
+		if (!isOpen || bloomMode !== "music") {
+			setIsLyricsExpanded(false);
+		}
+	}, [isHovered, mediaLayout, bloomMode, isOpen]);
 
 	// The pill's target geometry: the animation springs toward it, and the
 	// window region below is cut from it, so the region is already at the
 	// final size while the pill animates.
+	const safeScale = scale > 0 ? scale : 1;
+	const viewW = viewportSize.width;
+	const viewH = viewportSize.height;
+	const clampVal = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
 	const pillTargetY = !isReady ? 250 : isVisible ? 0 : -150;
+	const dockedEdge: "top" | "left" | "right" = useMemo(() => {
+		if (!notchPosition) return "top";
+		const edge = (notchPosition as { edge?: string }).edge;
+		if (edge === "left" || edge === "right" || edge === "top") {
+			return edge;
+		}
+		if (notchPosition.x <= 80) return "left";
+		if (notchPosition.x >= viewportSize.width - 80) return "right";
+		return "top";
+	}, [notchPosition, viewportSize.width]);
+	const currentEdge: "top" | "left" | "right" = isDragging ? "top" : dockedEdge;
+	const isVertical = currentEdge === "left" || currentEdge === "right";
+	const isCardMode =
+		(bloomMode === "device" && !!deviceAlert) ||
+		(bloomMode === "announcement" && announcementOpen);
+	const isVerticalCollapsed = isVertical && !isOpen && !isCardMode;
+	const showMusicBubble = musicActivity && (timerActive || isVerticalCollapsed) && !isOpen && isVisible && !isHidden;
+	const showShelfBubble =
+		shelfItems.length > 0 && !isOpen && isVisible && !isHidden && bloomMode !== "announcement";
+	const hasVerticalCenterAlert = isVerticalCollapsed && hasCenterAlert;
+	const verticalCollapsedHeight = hasVerticalCenterAlert ? 256 : 196;
+
 	const pillTargetWidth = !isReady
 		? 34
-		: isExpanded && isVisible && !isHidden
-			? getDynamicWidth()
-			: isImpacted
-				? (isHidden ? 80 : 39.1)
-				: (isHidden ? 80 : 30.6);
-	const pillTargetHeight = !isReady ? 34 : (isHidden ? 5 : getDynamicHeight());
-	// Shadow and the edge flares beside the pill (zero padding when collapsed into thin hidden line).
-	pillTargetRef.current = notchPillBox(
-		window.innerWidth,
-		scale,
-		pillTargetY,
-		isHidden ? 48 : pillTargetWidth,
-		pillTargetHeight,
-		isHidden ? 0 : 24
-	);
+		: isVerticalCollapsed
+			? (isHidden ? 5 : 42)
+			: isExpanded && isVisible && !isHidden
+				? Math.min(getDynamicWidth(), Math.max(280, Math.floor(viewW / safeScale)))
+				: isImpacted
+					? (isHidden ? 80 : 39.1)
+					: (isHidden ? 80 : 30.6);
+	const pillTargetHeight = !isReady
+		? 34
+		: isVerticalCollapsed
+			? (isHidden ? 48 : verticalCollapsedHeight)
+			: isHidden
+				? 5
+				: Math.min(getDynamicHeight(), Math.max(200, Math.floor(viewH / safeScale)));
+
+	const effectiveTargetWidth = isVerticalCollapsed ? (isHidden ? 5 : 42) : pillTargetWidth;
+	const effectiveTargetHeight = isVerticalCollapsed ? (isHidden ? 48 : verticalCollapsedHeight) : pillTargetHeight;
+	const targetW_vp = effectiveTargetWidth * safeScale;
+	const targetH_vp = effectiveTargetHeight * safeScale;
+	const collapsedVertH_vp = verticalCollapsedHeight * safeScale;
+
+	const renderCenterX_vp = isDragging && notchPosition
+		? clampVal(notchPosition.x, targetW_vp / 2, Math.max(targetW_vp / 2, viewW - targetW_vp / 2))
+		: !notchPosition
+			? viewW / 2
+			: currentEdge === "left"
+				? targetW_vp / 2
+				: currentEdge === "right"
+					? viewW - targetW_vp / 2
+					: targetW_vp >= viewW
+						? viewW / 2
+						: clampVal(notchPosition.x, targetW_vp / 2, viewW - targetW_vp / 2);
+
+	const renderTopY_vp = isDragging && notchPosition
+		? clampVal(notchPosition.y, 0, Math.max(0, viewH - targetH_vp))
+		: !notchPosition || currentEdge === "top"
+			? 0
+			: isHidden
+				? clampVal(notchPosition.y - targetH_vp / 2, 0, Math.max(0, viewH - targetH_vp))
+				: clampVal(notchPosition.y - collapsedVertH_vp / 2, 0, Math.max(0, viewH - targetH_vp));
+
+	const targetWidthPx = (isHidden && !isVertical ? 48 : effectiveTargetWidth) * safeScale;
+	const targetHeightPx = (isHidden && isVertical ? 48 : effectiveTargetHeight) * safeScale;
+	const padPx = isHidden ? 0 : 24 * safeScale;
+	const targetLeftPx = isVertical
+		? (currentEdge === "left" ? 0 : viewW - targetWidthPx)
+		: renderCenterX_vp - targetWidthPx / 2;
+	const targetTopPx = isVertical
+		? renderTopY_vp
+		: renderTopY_vp + pillTargetY * safeScale;
+	pillTargetRef.current = {
+		x: targetLeftPx - padPx,
+		y: targetTopPx - padPx,
+		width: targetWidthPx + padPx * 2,
+		height: targetHeightPx + padPx * 2
+	};
+
+	const handleNotchPointerDown = (e: React.PointerEvent) => {
+		if (!freeDragEnabled) return;
+		if (e.button !== 0) return;
+		const target = e.target as HTMLElement;
+		if (
+			target.closest("button") ||
+			target.closest("input") ||
+			target.closest("select") ||
+			target.closest("textarea") ||
+			target.closest(".cc-pill-tile") ||
+			target.closest(".cc-slider-container") ||
+			target.closest(".slider") ||
+			target.closest(".interactive") ||
+			target.closest("a") ||
+			target.closest(".hime-chat-scroll") ||
+			target.closest(".qp-list") ||
+			target.closest(".calendar-grid") ||
+			target.closest(".tasks-list") ||
+			target.closest(".shortcuts-list") ||
+			target.closest(".volume-slider-container") ||
+			target.closest(".cmp-progress-bar")
+		) {
+			return;
+		}
+
+		const currentTarget = e.currentTarget as HTMLElement;
+		try {
+			currentTarget.setPointerCapture(e.pointerId);
+		} catch (_) {}
+
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const curScale = scale > 0 ? scale : 1;
+		const startRect = bloomRef.current?.getBoundingClientRect();
+		const dragPillW =
+			(isOpen || isCardMode
+				? getDynamicWidth()
+				: isMusicMode
+					? getDynamicWidth()
+					: 245 - clock24hTrim) * curScale;
+		const dragPillH = (isOpen || isCardMode ? getDynamicHeight() : 36) * curScale;
+		const startViewW = window.innerWidth;
+		const startViewH = window.innerHeight;
+		const initialCenter = startRect && startRect.width > 0 && startRect.height > 0
+			? {
+				x: Math.round(
+					clampVal(
+						startRect.left + startRect.width / 2,
+						dragPillW / 2,
+						Math.max(dragPillW / 2, startViewW - dragPillW / 2)
+					)
+				),
+				y: Math.round(
+					isVerticalCollapsed
+						? clampVal(e.clientY - dragPillH / 2, 0, Math.max(0, startViewH - dragPillH))
+						: startRect.top
+				)
+			}
+			: { x: Math.round(startViewW / 2), y: 0 };
+		let hasMoved = false;
+
+		const onPointerMove = (moveEv: PointerEvent) => {
+			const dx = moveEv.clientX - startX;
+			const dy = moveEv.clientY - startY;
+			if (!hasMoved && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+				hasMoved = true;
+				isDraggingRef.current = true;
+				setIsDragging(true);
+			}
+			if (hasMoved) {
+				const screenW = window.innerWidth;
+				const screenH = window.innerHeight;
+				const r = bloomRef.current?.getBoundingClientRect();
+				const liveW = r && r.width > 0 && !isVerticalCollapsed ? r.width : dragPillW;
+				const liveH = r && r.height > 0 && !isVerticalCollapsed ? r.height : dragPillH;
+				const halfW = liveW / 2;
+
+				const newX = Math.round(Math.max(halfW, Math.min(screenW - halfW, initialCenter.x + dx)));
+				// Constraint: Main Notch CANNOT move or dock to the bottom edge (disallow edge === 'bottom')
+				const maxDragY = Math.max(0, screenH - liveH);
+				const newY = Math.round(Math.max(0, Math.min(maxDragY, initialCenter.y + dy)));
+				setNotchPosition({ x: newX, y: newY });
+
+				// Immediate sync to backend Win32 mouse hook (viewport CSS px)
+				if (bloomRef.current) {
+					invoke("update_notch_rect", {
+						rect: {
+							x: Math.round(newX - halfW),
+							y: Math.round(newY),
+							width: Math.round(liveW),
+							height: Math.round(liveH)
+						}
+					}).catch(() => {});
+				}
+			}
+		};
+
+		const onPointerUp = (upEv: PointerEvent) => {
+			try {
+				currentTarget.releasePointerCapture(e.pointerId);
+			} catch (_) {}
+			window.removeEventListener("pointermove", onPointerMove);
+			window.removeEventListener("pointerup", onPointerUp);
+			window.removeEventListener("pointercancel", onPointerUp);
+			if (hasMoved) {
+				isDraggingRef.current = false;
+				setIsDragging(false);
+				wasJustDraggedRef.current = true;
+				setTimeout(() => {
+					wasJustDraggedRef.current = false;
+				}, 150);
+
+				const dx = upEv.clientX - startX;
+				const dy = upEv.clientY - startY;
+				const releaseX = initialCenter.x + dx;
+				const releaseY = initialCenter.y + dy;
+
+				const screenW = window.innerWidth;
+				const screenH = window.innerHeight;
+				const r = bloomRef.current?.getBoundingClientRect();
+				const pillW = !isVerticalCollapsed && r && r.width > 0 ? r.width : dragPillW;
+				const pillH = !isVerticalCollapsed && r && r.height > 0 ? r.height : dragPillH;
+				const halfW = pillW / 2;
+				const sideTargetH = isOpen || isCardMode ? pillH : verticalCollapsedHeight * curScale;
+				const halfH = sideTargetH / 2;
+
+				const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+				// 4 Screen Edge candidates
+				const topCandidate = {
+					edge: "top" as const,
+					pos: {
+						x: Math.round(clamp(releaseX, halfW, screenW - halfW)),
+						y: 0,
+						edge: "top" as const
+					}
+				};
+				const bottomCandidate = {
+					edge: "bottom" as const,
+					pos: {
+						x: Math.round(clamp(releaseX, halfW, screenW - halfW)),
+						y: Math.max(0, Math.round(screenH - pillH)),
+						edge: "bottom" as const
+					}
+				};
+				const leftCandidate = {
+					edge: "left" as const,
+					pos: {
+						x: Math.round(halfW),
+						y: Math.round(clamp(releaseY, halfH, screenH - halfH)),
+						edge: "left" as const
+					}
+				};
+				const rightCandidate = {
+					edge: "right" as const,
+					pos: {
+						x: Math.round(screenW - halfW),
+						y: Math.round(clamp(releaseY, halfH, screenH - halfH)),
+						edge: "right" as const
+					}
+				};
+
+				// Calculate distance to all 4 screen edges
+				// Constraint: Main Notch CANNOT move or dock to the bottom edge (disallow edge === 'bottom')
+				const candidates = [
+					{ ...topCandidate, dist: Math.hypot(releaseX - topCandidate.pos.x, releaseY - topCandidate.pos.y) },
+					{ ...bottomCandidate, dist: Math.hypot(releaseX - bottomCandidate.pos.x, releaseY - bottomCandidate.pos.y) },
+					{ ...leftCandidate, dist: Math.hypot(releaseX - leftCandidate.pos.x, releaseY - leftCandidate.pos.y) },
+					{ ...rightCandidate, dist: Math.hypot(releaseX - rightCandidate.pos.x, releaseY - rightCandidate.pos.y) }
+				].filter((c) => c.edge !== "bottom");
+
+				candidates.sort((a, b) => a.dist - b.dist);
+				const snappedPos = candidates[0].pos;
+
+				setNotchPosition(snappedPos);
+				localStorage.setItem("bloom-notch-position", JSON.stringify(snappedPos));
+				invoke("save_setting", { key: "bloom-notch-position", value: JSON.stringify(snappedPos) }).catch(() => {});
+
+				// Update Win32 rect in viewport CSS px
+				const isSnappedVertical = candidates[0].edge === "left" || candidates[0].edge === "right";
+				const finalW = isSnappedVertical && !isOpen && !isCardMode ? 42 * curScale : pillW;
+				const finalH = isSnappedVertical && !isOpen && !isCardMode ? verticalCollapsedHeight * curScale : pillH;
+				const finalX = candidates[0].edge === "left"
+					? 0
+					: candidates[0].edge === "right"
+						? Math.round(screenW - finalW)
+						: Math.round(clamp(snappedPos.x - finalW / 2, 0, Math.max(0, screenW - finalW)));
+				const finalY = isSnappedVertical
+					? Math.round(clamp(snappedPos.y - (verticalCollapsedHeight * curScale) / 2, 0, Math.max(0, screenH - finalH)))
+					: Math.round(snappedPos.y);
+
+				invoke("update_notch_rect", {
+					rect: {
+						x: Math.max(0, finalX),
+						y: Math.max(0, finalY),
+						width: Math.round(finalW),
+						height: Math.round(finalH)
+					}
+				}).catch(() => {});
+
+				// Sync final bounds after transition completes
+				setTimeout(() => {
+					reportNotchRect.current();
+				}, 380);
+			}
+		};
+
+		window.addEventListener("pointermove", onPointerMove);
+		window.addEventListener("pointerup", onPointerUp);
+		window.addEventListener("pointercancel", onPointerUp);
+	};
 
 	// Clip the notch window to what it draws (see window_region.rs): outside
 	// these rectangles the window takes no clicks, whatever its click-through
@@ -3330,41 +4332,101 @@ function App() {
 		}
 	}, [isOpen, bloomMode, windowLabel]);
 
+	const notchLeft_vp = isVertical
+		? (currentEdge === "left" ? 0 : viewW - targetW_vp)
+		: renderCenterX_vp - targetW_vp / 2;
+	const notchRight_vp = notchLeft_vp + targetW_vp;
+	const showTopLeftCorner =
+		isVisible &&
+		settingsCornersEnabled &&
+		!isDragging &&
+		!(currentEdge === "left" && renderTopY_vp < 44) &&
+		!(currentEdge === "top" && notchLeft_vp < 44);
+	const showTopRightCorner =
+		isVisible &&
+		settingsCornersEnabled &&
+		!isDragging &&
+		!(currentEdge === "right" && renderTopY_vp < 44) &&
+		!(currentEdge === "top" && notchRight_vp > viewW - 44);
+
+	const tlRadius = isDragging
+		? 20
+		: currentEdge === "left"
+			? 0
+			: currentEdge === "right"
+				? (isHidden ? 3 : isCalendarMode && isOpen ? 28 : 18)
+				: (isImpacted ? 0 : 18);
+	const trRadius = isDragging
+		? 20
+		: currentEdge === "right"
+			? 0
+			: currentEdge === "left"
+				? (isHidden ? 3 : isCalendarMode && isOpen ? 28 : 18)
+				: (isImpacted ? 0 : 18);
+	const blRadius = isDragging
+		? 20
+		: currentEdge === "left"
+			? 0
+			: currentEdge === "right"
+				? (isHidden ? 3 : isCalendarMode && isOpen ? 28 : 18)
+				: (isHidden ? 3 : isCalendarMode ? 28 : 18);
+	const brRadius = isDragging
+		? 20
+		: currentEdge === "right"
+			? 0
+			: currentEdge === "left"
+				? (isHidden ? 3 : isCalendarMode && isOpen ? 28 : 18)
+				: (isHidden ? 3 : isCalendarMode ? 28 : 18);
+
 	return (
-		<div className="screen" style={{ overflow: "hidden", position: "relative", width: "100%", height: "100%" }}>
+		<div className="screen" style={{ overflow: "hidden", position: "relative", width: "100vw", height: "100vh" }}>
 			{/* Screen Corners (Top) */}
 			<AnimatePresence>
-				{isVisible && settingsCornersEnabled && (
-					<>
-						<motion.div
-							className="screen-corner top-left"
-							initial={{ opacity: 0 }}
-							animate={{ opacity: 1, filter: "blur(0px)" }}
-							exit={{ opacity: 0, filter: "blur(10px)" }}
-						/>
-						<motion.div
-							className="screen-corner top-right"
-							initial={{ opacity: 0 }}
-							animate={{ opacity: 1, filter: "blur(0px)" }}
-							exit={{ opacity: 0, filter: "blur(10px)" }}
-						/>
-					</>
+				{showTopLeftCorner && (
+					<motion.div
+						key="corner-top-left"
+						className="screen-corner top-left"
+						initial={{ opacity: 0 }}
+						animate={{ opacity: 1, filter: "blur(0px)" }}
+						exit={{ opacity: 0, filter: "blur(10px)" }}
+					/>
+				)}
+				{showTopRightCorner && (
+					<motion.div
+						key="corner-top-right"
+						className="screen-corner top-right"
+						initial={{ opacity: 0 }}
+						animate={{ opacity: 1, filter: "blur(0px)" }}
+						exit={{ opacity: 0, filter: "blur(10px)" }}
+					/>
 				)}
 			</AnimatePresence>
 
 			<div
+				className={`notch-drag-wrapper ${notchPosition ? "is-free-drag" : ""} ${isDragging ? "is-dragging" : ""} ${isVertical ? `is-vertical is-edge-${currentEdge}` : "is-edge-top"} ${isOpen ? "is-open-panel" : ""} ${isCardMode ? "is-card-mode" : ""} ${isHidden ? "is-hidden" : ""} ${hasCenterAlert ? "has-center-alert" : ""}`}
+				onTransitionEnd={() => reportNotchRect.current()}
 				style={{
 					zoom: scale,
-					width: "100%",
+					width: notchPosition ? (isVerticalCollapsed ? (isHidden ? "5px" : "42px") : "auto") : "100%",
 					display: "flex",
-					justifyContent: "center",
-					position: "relative"
+					justifyContent: currentEdge === "left" ? "flex-start" : currentEdge === "right" ? "flex-end" : "center",
+					position: notchPosition ? "absolute" : "relative",
+					left: notchPosition
+						? (currentEdge === "left" ? 0 : currentEdge === "right" ? undefined : renderCenterX_vp / safeScale)
+						: undefined,
+					right: notchPosition && currentEdge === "right" ? 0 : undefined,
+					top: notchPosition
+						? renderTopY_vp / safeScale
+						: undefined,
+					transform: notchPosition && currentEdge === "top" ? "translateX(-50%)" : undefined,
+					touchAction: "none"
 				}}
 			>
 				<DeviceArtDefs />
 				<motion.div
 					ref={bloomRef}
-					className={`bloom ${isHovered ? "expanded" : ""} ${isImpacted && !isHidden ? "is-impacted" : ""} ${isHidden ? "is-hidden" : ""} ${isDragHovering ? "drag-hover" : ""}`}
+					className={`bloom ${freeDragEnabled ? "free-drag-enabled" : ""} ${isDragging ? "is-floating is-dragging" : ""} ${isVertical ? `is-vertical is-edge-${currentEdge}` : ""} ${isOpen ? "is-open-panel" : ""} ${isCardMode ? "is-card-mode" : ""} ${isCalendarMode && isOpen ? "is-calendar-mode" : ""} ${isHovered || isOpen ? "expanded" : ""} ${isImpacted && !isHidden ? "is-impacted" : ""} ${isHidden ? "is-hidden" : ""} ${hasCenterAlert ? "has-center-alert" : ""} ${isDragHovering ? "drag-hover" : ""}`}
+					onPointerDown={handleNotchPointerDown}
 					onMouseEnter={() => {
 						cancelPointerLeft();
 						setIsHovered(true);
@@ -3373,36 +4435,38 @@ function App() {
 					onMouseLeave={() => setIsNotchHovered(false)}
 					onWheel={handleWheel}
 					initial={{
-						y: pillTargetY,
+						y: isVertical ? 0 : pillTargetY,
 						width: pillTargetWidth,
 						height: pillTargetHeight,
-						borderTopLeftRadius: 0,
-						borderTopRightRadius: 0,
-						borderBottomLeftRadius: 18,
-						borderBottomRightRadius: 18,
+						borderTopLeftRadius: tlRadius,
+						borderTopRightRadius: trRadius,
+						borderBottomLeftRadius: blRadius,
+						borderBottomRightRadius: brRadius,
 						backgroundColor: "rgba(0, 0, 0, 1)",
 						scaleX: 1,
 						scaleY: 1,
 						opacity: 1
 					}}
 					animate={{
-						y: pillTargetY,
+						y: isVertical ? 0 : pillTargetY,
 						width: pillTargetWidth,
 						height: pillTargetHeight,
 						opacity: isVisible ? 1 : 0,
 						backgroundColor: isHidden ? "rgba(0, 0, 0, 0)" : "rgba(0, 0, 0, 1)",
 						scaleX: 1,
 						scaleY: 1,
-						borderTopLeftRadius: isImpacted ? 0 : 18,
-						borderTopRightRadius: isImpacted ? 0 : 18,
-						borderBottomLeftRadius: isHidden ? 3 : isCalendarMode ? 28 : 18,
-						borderBottomRightRadius: isHidden ? 3 : isCalendarMode ? 28 : 18,
+						borderTopLeftRadius: tlRadius,
+						borderTopRightRadius: trRadius,
+						borderBottomLeftRadius: blRadius,
+						borderBottomRightRadius: brRadius,
 						filter: isVisible ? "blur(0px)" : "blur(8px)",
 						pointerEvents: isVisible ? "auto" : "none"
 					}}
+					onAnimationComplete={() => reportNotchRect.current()}
 					onClick={(e) => {
 						e.stopPropagation();
-						if (!isOpen) openNotch("hime");
+						if (wasJustDraggedRef.current) return;
+						if (!isOpen) openNotch(openingPanel());
 					}}
 					onHoverStart={() => {
 						cancelPointerLeft();
@@ -3412,7 +4476,10 @@ function App() {
 						if (bloomMode === "shelf") clearShelfCollapse();
 					}}
 					onHoverEnd={handlePointerLeft}
-					style={{ originY: 0 }}
+					style={{
+						originY: 0,
+						originX: currentEdge === "right" ? 1 : currentEdge === "left" ? 0 : 0.5
+					}}
 					transition={{
 						width: { type: "spring", stiffness: 340, damping: 28, mass: 0.75 },
 						height: { type: "spring", stiffness: 350, damping: 26, mass: 0.75 },
@@ -3427,25 +4494,41 @@ function App() {
 				>
 					{isHidden && (
 						<div
-							style={{
-								position: "absolute",
-								top: 0,
-								left: "50%",
-								transform: "translateX(-50%)",
-								width: 48,
-								height: 3,
-								borderRadius: 2,
-								background: "rgba(255, 255, 255, 0.75)",
-								boxShadow: "0 0 6px rgba(255, 255, 255, 0.4)",
-								zIndex: 10
-							}}
+							style={
+								isVertical
+									? {
+											position: "absolute",
+											top: "50%",
+											left: currentEdge === "left" ? 0 : undefined,
+											right: currentEdge === "right" ? 0 : undefined,
+											transform: "translateY(-50%)",
+											width: 3,
+											height: 48,
+											borderRadius: 2,
+											background: "rgba(255, 255, 255, 0.75)",
+											boxShadow: "0 0 6px rgba(255, 255, 255, 0.4)",
+											zIndex: 10
+										}
+									: {
+											position: "absolute",
+											top: 0,
+											left: "50%",
+											transform: "translateX(-50%)",
+											width: 48,
+											height: 3,
+											borderRadius: 2,
+											background: "rgba(255, 255, 255, 0.75)",
+											boxShadow: "0 0 6px rgba(255, 255, 255, 0.4)",
+											zIndex: 10
+										}
+							}
 						/>
 					)}
-					{!isHidden && (
+					{!isHidden && !isDragging && (
 						<EdgeSurface
-							edge="top"
-							flares={isImpacted}
-							reflective={edgeShineEnabled}
+							edge={currentEdge}
+							flares={isVertical ? true : isImpacted}
+							reflective={currentEdge === "top" ? edgeShineEnabled : false}
 							resolutionScale={scale}
 						/>
 					)}
@@ -3493,7 +4576,7 @@ function App() {
 							>
 								{/* Faster Waiting Transition Area */}
 								<AnimatePresence mode="wait">
-									{isOpen && isMusicMode && !isCalendarMode ? (
+									{isOpen && bloomMode === "music" && settingsMusicModeEnabled && !isCalendarMode ? (
 										<motion.div
 											key="expanded-music"
 											className="expanded-music-container"
@@ -3502,7 +4585,17 @@ function App() {
 											exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.1 } }}
 											transition={{ type: "spring", stiffness: 500, damping: 30 }}
 										>
-											{mediaLayout === "compact" ? (
+											{!mediaInfo.has_media ? (
+												<div className="cmp-empty-state" onClick={(e) => e.stopPropagation()}>
+													<div className="cmp-empty-icon">
+														<MusicNoteIcon size={24} />
+													</div>
+													<div className="cmp-empty-title">Tidak ada media yang sedang diputar</div>
+													<div className="cmp-empty-subtitle">
+														Putar musik di Spotify, YouTube, atau pemutar lain untuk kontrol &amp; lirik
+													</div>
+												</div>
+											) : mediaLayout === "compact" ? (
 												<CompactMediaPlayer
 													mediaInfo={mediaInfo}
 													albumArtUrl={albumArtUrl}
@@ -3511,6 +4604,8 @@ function App() {
 													volume={displayVolume}
 													volumeExpanded={compactVolumeExpanded}
 													onVolumeExpandedChange={setCompactVolumeExpanded}
+													lyricsExpanded={isLyricsExpanded}
+													onLyricsExpandedChange={setIsLyricsExpanded}
 													onTogglePlayPause={togglePlayPause}
 													onVolumeChange={handleVolumeChange}
 													prevFront={prevFront}
@@ -3728,9 +4823,9 @@ function App() {
 															</motion.button>
 														</div>
 
-														<div className="volume-slider-container">
+														<div className="volume-slider-container" onWheel={handleVolumeWheel}>
 															<VolumeLowIcon size={12} style={{ opacity: 0.5 }} />
-															<div className="slider-track-premium">
+															<div className="slider-track-premium" onWheel={handleVolumeWheel}>
 																<input
 																	type="range"
 																	min="0"
@@ -3763,14 +4858,14 @@ function App() {
 											transition={{ duration: 0.15 }}
 											style={{
 												width: "100%",
-												height: "36px",
+												height: isVerticalCollapsed ? "100%" : "36px",
 												position: "relative",
 												zIndex: 10,
 												flexShrink: 0
 											}}
 										>
 											<div
-												className="main-row"
+												className={`main-row ${isVerticalCollapsed ? "is-vertical" : ""}`}
 												// A device alert covers the whole pill.
 												style={{
 													visibility: bloomMode === "device" || deviceAlertOnScreen ? "hidden" : "visible",
@@ -3778,7 +4873,7 @@ function App() {
 													transition: "opacity 0.15s ease",
 													display: "flex",
 													width: "100%",
-													height: "36px",
+													height: isVerticalCollapsed ? "100%" : "36px",
 													position: "relative",
 													zIndex: 10
 												}}
@@ -3786,7 +4881,8 @@ function App() {
 												<AnimatePresence mode="wait">
 													{(showPowerPulse || showLowBatteryPulse || showUpdatePulse) &&
 													!isHovered &&
-													!isOpen ? (
+													!isOpen &&
+													!isVerticalCollapsed ? (
 														showUpdatePulse ? (
 															<motion.div
 																key="update-pulse-view"
@@ -3830,14 +4926,121 @@ function App() {
 													) : (
 														<motion.div
 															key="standard-view"
-															className="main-row-inner"
+															className={`main-row-inner ${isVerticalCollapsed ? "is-vertical" : ""} ${hasCenterAlert ? "has-center-alert" : ""}`}
 															initial={{ opacity: 0 }}
 															animate={{ opacity: 1 }}
 															exit={{ opacity: 0 }}
 														>
+															{isVerticalCollapsed ? (
+																<>
+																	{/* Top: Network speed (stacked) or WifiOff icon-only */}
+																	<div
+																		className="vertical-notch-slot vertical-slot-top"
+																		title={isInternetDown
+																			? (isNetworkOffline
+																				? "Tidak ada jaringan (Tanpa Internet)"
+																				: `${isEthActive ? "Ethernet" : wifiStatus?.ssid ? `Wi-Fi (${wifiStatus.ssid})` : "Wi-Fi"} (Tanpa Internet)`)
+																			: isEthActive
+																				? `Ethernet (Terhubung ke LAN): ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`
+																				: `Network: ↑${formatNetSpeed(netUpSpeed)} ↓${formatNetSpeed(netDownSpeed)}`}
+																	>
+																		{isInternetDown ? (
+																			<WifiOff size={13} strokeWidth={2} className="net-disconnected-icon" />
+																		) : (
+																			(() => {
+																				const speedParts = formatNetSpeedParts(netDownSpeed);
+																				return (
+																					<>
+																						{isEthActive ? (
+																							<Network size={12} strokeWidth={2} />
+																						) : (
+																							<Wifi size={12} strokeWidth={2} />
+																						)}
+																						<span className="vertical-notch-speed">
+																							<span className="vertical-speed-value">{speedParts.value}</span>
+																							<span className="vertical-speed-unit">{speedParts.unit}</span>
+																						</span>
+																					</>
+																				);
+																			})()
+																		)}
+																	</div>
+
+																	{/* Center: Timer, Center Alert/Notification, Eyes, or Vertical Clock */}
+																	<div
+																		className="vertical-notch-slot vertical-slot-center"
+																		onClick={toggleCalendarMode}
+																		onMouseEnter={() => setIsCenterHovered(true)}
+																		onMouseLeave={() => setIsCenterHovered(false)}
+																	>
+																		{timerSeconds > 0 || isTimerFinished ? (
+																			<div className={`vertical-notch-clock vertical-clock-stack ${isTimerFinished ? "timer-finished" : ""}`}>
+																				<span className="vertical-clock-part">
+																					{String(Math.floor(Math.abs(timerSeconds) / 60)).padStart(2, "0")}
+																				</span>
+																				<span className="vertical-clock-part">
+																					{String(Math.abs(timerSeconds) % 60).padStart(2, "0")}
+																				</span>
+																			</div>
+																		) : centerAlertText ? (
+																			<div className="vertical-center-alert" title={centerAlertText}>
+																				<HimeEyes
+																					size={15}
+																					expression={centerAlertExpression}
+																					onClick={() => openNotch("hime")}
+																				/>
+																				<span
+																					className={`vertical-alert-text ${currentEdge === "left" ? "is-left-edge" : "is-right-edge"}`}
+																				>
+																					{centerAlertText}
+																				</span>
+																			</div>
+																		) : showCenterEyes ? (
+																			<HimeEyes
+																				size={15}
+																				expression={notchEyeExpression}
+																				onClick={() => openNotch("hime")}
+																			/>
+																		) : (
+																			<div className="vertical-notch-clock vertical-clock-stack">
+																				<span className="vertical-clock-part">{clockParts.hour}</span>
+																				<span className="vertical-clock-part">{clockParts.minute}</span>
+																				{clockParts.period && (
+																					<span className="vertical-clock-period">{clockParts.period}</span>
+																				)}
+																			</div>
+																		)}
+																	</div>
+
+																	{/* Bottom: Battery */}
+																	<div
+																		className="vertical-notch-slot vertical-slot-bottom"
+																		title={batteryTooltip(
+																			batteryDetails,
+																			{ level: batteryLevel, charging: isCharging },
+																			batterySaverEnabled
+																		)}
+																		onClick={(e) => {
+																			if (wasJustDraggedRef.current) {
+																				e.stopPropagation();
+																				return;
+																			}
+																			refreshBatteryDetails();
+																		}}
+																	>
+																		<BatteryIcon
+																			charging={isCharging}
+																			level={batteryLevel}
+																			threshold={lowBatteryThreshold}
+																		/>
+																		<span className="vertical-notch-battery">{batteryLevel}%</span>
+																	</div>
+																</>
+															) : (
+																<>
 															{/* Left: music on hover while a paused session remains, otherwise status widgets */}
 															<div className="side-content left">
-																{showCompactMusicIcons && settingsVisualizerEnabled ? (
+																{showSideMusicIcons && settingsVisualizerEnabled ? (
 																	<AnimatePresence>
 																		{settingsVisualizerEnabled && (
 																			<motion.div
@@ -3850,8 +5053,7 @@ function App() {
 																			</motion.div>
 																		)}
 																	</AnimatePresence>
-																) : !showCompactMusicIcons &&
-																  (isHovered || isOpen) &&
+																) : !isMusicMode &&
 																  statusWidgets.left.length > 0 ? (
 																	<motion.div
 																		key="left-widgets"
@@ -3868,7 +5070,12 @@ function App() {
 															</div>
 
 															{/* Center - Time (always visible) */}
-															<div className="time-center" ref={timeCenterRef}>
+															<div
+																className="time-center"
+																ref={timeCenterRef}
+																onMouseEnter={() => setIsCenterHovered(true)}
+																onMouseLeave={() => setIsCenterHovered(false)}
+															>
 																<AnimatePresence>
 																	{showPanelArrows && (
 																		<motion.button
@@ -3909,24 +5116,11 @@ function App() {
 																				)}
 																				{formatTimerTime(timerSeconds)}
 																			</motion.span>
-																		) : ncmSlotState.centerSlot ? (
+																		) : centerAlertText ? (
 																			<motion.span
 																				key="ncm-center-slot"
 																				className="time ncm-center-slot"
-																				style={{
-																					display: "inline-flex",
-																					alignItems: "center",
-																					gap: "6px",
-																					position: "relative",
-																					lineHeight: 1,
-																					maxWidth: "240px",
-																					overflow: "hidden",
-																					textOverflow: "ellipsis",
-																					whiteSpace: "nowrap",
-																					fontSize: "12px",
-																					fontWeight: 500,
-																					color: "var(--text-1, #F4F6FA)",
-																				}}
+																				title={centerAlertText}
 																				initial={{ opacity: 0, y: 3 }}
 																				animate={{ opacity: 1, y: 0 }}
 																				exit={{ opacity: 0, y: -3 }}
@@ -3934,18 +5128,45 @@ function App() {
 																			>
 																				<HimeEyes
 																					size={14}
-																					expression={himeExpression}
+																					expression={centerAlertExpression}
 																					onClick={() => openNotch("hime")}
 																				/>
-																				<span>{ncmSlotState.centerSlot.slice(0, 36)}</span>
+																				<span className="ncm-center-slot-text">{centerAlertText}</span>
+																			</motion.span>
+																		) : showCenterEyes ? (
+																			<motion.span
+																				key="hime-eyes"
+																				className="time hime-eyes-center"
+																				style={{
+																					display: "inline-flex",
+																					alignItems: "center",
+																					justifyContent: "center",
+																					position: "relative",
+																					lineHeight: 1
+																				}}
+																				initial={{ opacity: 0, scale: 0.85 }}
+																				animate={{ opacity: 1, scale: 1 }}
+																				exit={{ opacity: 0, scale: 0.85 }}
+																				transition={{ duration: 0.18 }}
+																				onClick={(e) => {
+																					e.stopPropagation();
+																					openNotch("hime");
+																				}}
+																			>
+																				<HimeEyes
+																					size={20}
+																					expression={notchEyeExpression}
+																					onClick={() => openNotch("hime")}
+																				/>
 																			</motion.span>
 																		) : (
 																			<motion.span
 																				key="clock"
-																				className="time"
+																				className="time hime-glitch-in"
 																				style={{
 																					display: "inline-flex",
 																					alignItems: "center",
+																					justifyContent: "center",
 																					gap: "5px",
 																					position: "relative",
 																					lineHeight: 1
@@ -3955,11 +5176,6 @@ function App() {
 																				exit={{ opacity: 0 }}
 																				transition={{ duration: 0.15 }}
 																			>
-																				<HimeEyes
-																					size={14}
-																					expression={himeExpression}
-																					onClick={() => openNotch("hime")}
-																				/>
 																				<span>{time}</span>
 																			</motion.span>
 																		)}
@@ -3989,8 +5205,8 @@ function App() {
 
 															{/* Right: album art on a retained music session, otherwise status widgets */}
 															<div className="side-content right">
-																{showCompactMusicIcons &&
-																(settingsAlbumArtEnabled || showMusicOnStatusHover) ? (
+																{showSideMusicIcons &&
+																(settingsAlbumArtEnabled || showMusicOnStatusHover || isPlaying) ? (
 																	<AnimatePresence mode="wait">
 																		<motion.div
 																			key="album-art"
@@ -4058,8 +5274,7 @@ function App() {
 																			</button>
 																		</motion.div>
 																	</AnimatePresence>
-																) : !showCompactMusicIcons &&
-																  (isHovered || isOpen) &&
+																) : !isMusicMode &&
 																  statusWidgets.right.length > 0 ? (
 																	<motion.div
 																		key="right-widgets"
@@ -4070,11 +5285,54 @@ function App() {
 																		exit={{ opacity: 0 }}
 																		transition={{ duration: 0.2 }}
 																	>
+																		{isOpen && settingsMusicModeEnabled && (
+																			<button
+																				type="button"
+																				className="notch-header-action-btn"
+																				aria-label="Musik & Lirik"
+																				title="Musik & Lirik (Ctrl+Shift+M)"
+																				onClick={(e) => {
+																					e.stopPropagation();
+																					setIsOpen(true);
+																					setBloomMode("music");
+																				}}
+																			>
+																				<Music size={11} strokeWidth={2.2} />
+																			</button>
+																		)}
+																		{isOpen && (
+																			<button
+																				type="button"
+																				className={`notch-header-action-btn ${bloomMode === "shortcuts" ? "active" : ""}`}
+																				aria-label="Daftar Pintasan Keyboard"
+																				title="Daftar Pintasan Keyboard (F1 / Ctrl+Shift+/)"
+																				onClick={(e) => {
+																					e.stopPropagation();
+																					if (bloomMode === "shortcuts") {
+																						setIsOpen(false);
+																						setBloomMode(restingModeRef.current);
+																						setIsHovered(false);
+																						setIsNotchHovered(false);
+																						notchPinnedRef.current = false;
+																						releaseDeferredRef.current = false;
+																					} else {
+																						setIsOpen(true);
+																						setBloomMode("shortcuts");
+																						notchPinnedRef.current = true;
+																						releaseDeferredRef.current = false;
+																					}
+																				}}
+																			>
+																				<Keyboard size={11} strokeWidth={2.2} />
+																			</button>
+																		)}
 																		{statusWidgets.right.map(renderStatusWidget)}
 																	</motion.div>
 																) : null}
 															</div>
-														</motion.div>
+														</>
+													)}
+												</motion.div>
 													)}
 												</AnimatePresence>
 											</div>
@@ -4186,43 +5444,54 @@ function App() {
 										>
 											{/* Pills Grid */}
 											<div className="cc-pills-grid">
-												{/* Wi-Fi Pill */}
-												<div
-													className={`cc-pill-tile ${wifiEnabled ? "active" : ""}`}
-													onClick={(e) => {
-														e.stopPropagation();
-														toggleWifi();
-													}}
-													onContextMenu={handleWifiRightClick}
-													title="Left-click to toggle, Right-click for networks"
-												>
-													<div className="cc-pill-icon-wrapper">
-														<WifiIcon enabled={wifiEnabled} connected={wifiConnected} />
-													</div>
-													<div className="cc-pill-info">
-														<span className="cc-pill-title">Wi-Fi</span>
-														<span className="cc-pill-status">
-															{wifiStatus === null
-																? "…"
-																: !wifiEnabled
-																	? "Off"
-																	: wifiConnected
-																		? (wifiStatus?.ssid ?? "Connected")
-																		: "Not connected"}
-														</span>
-													</div>
-													<button
-														className="cc-pill-more"
-														aria-label="Wi-Fi networks"
-														title="Wi-Fi networks"
-														onClick={(e) => {
-															e.stopPropagation();
-															setBloomMode("wifi");
-														}}
-													>
-														<ChevronRight />
-													</button>
-												</div>
+												{/* Wi-Fi / Ethernet Pill */}
+												{(() => {
+													const isEthActive = isEthernetConnected && !wifiConnected;
+													return (
+														<div
+															className={`cc-pill-tile ${wifiEnabled || isEthActive ? "active" : ""} ${isEthActive ? "is-ethernet" : ""}`}
+															onClick={(e) => {
+																e.stopPropagation();
+																toggleWifi();
+															}}
+															onContextMenu={handleWifiRightClick}
+															title="Left-click to toggle, Right-click for networks"
+														>
+															<div className="cc-pill-icon-wrapper">
+																{isEthActive ? (
+																	<Network size={18} />
+																) : (
+																	<WifiIcon enabled={wifiEnabled} connected={wifiConnected} />
+																)}
+															</div>
+															<div className="cc-pill-info">
+																<span className="cc-pill-title">{isEthActive ? "Ethernet" : "Wi-Fi"}</span>
+																<span className="cc-pill-status">
+																	{isEthActive
+																		? "Terhubung ke LAN"
+																		: wifiStatus === null
+																			? "…"
+																			: !wifiEnabled
+																				? "Off"
+																				: wifiConnected
+																					? wifiStatus?.has_internet === false ? "Terhubung, Tanpa Internet" : (wifiStatus?.ssid ?? "Connected")
+																					: "Not connected"}
+																</span>
+															</div>
+															<button
+																className="cc-pill-more"
+																aria-label="Wi-Fi networks"
+																title="Wi-Fi networks"
+																onClick={(e) => {
+																	e.stopPropagation();
+																	setBloomMode("wifi");
+																}}
+															>
+																<ChevronRight />
+															</button>
+														</div>
+													);
+												})()}
 
 												{/* Dock Mode Pill */}
 												<div
@@ -4302,25 +5571,37 @@ function App() {
 																	: "Peek"}
 														</span>
 													</div>
+													<button
+														className="cc-pill-more"
+														aria-label="Daftar Pintasan Keyboard"
+														title="Daftar Pintasan Keyboard (F1 / Ctrl+Shift+/)"
+														onClick={(e) => {
+															e.stopPropagation();
+															setIsOpen(true);
+															setBloomMode("shortcuts");
+															notchPinnedRef.current = true;
+															releaseDeferredRef.current = false;
+														}}
+													>
+														<Keyboard size={13} />
+													</button>
 												</div>
 											</div>
 
 											{/* Circular Actions Row */}
 											<div className="cc-circular-actions-row">
 												<button
-													className="cc-circular-btn"
+													className={`cc-circular-btn cc-circular-btn--dnd tile-focus tile-dnd ${dndEnabled ? "active" : ""}`}
 													onClick={(e) => {
 														e.stopPropagation();
-														invoke("open_app", { appName: "ms-settings:notifications" }).catch(
-															console.error
-														);
+														toggleDnd();
 													}}
-													title="Do Not Disturb — Open Windows notification settings"
+													title={`Do Not Disturb / Focus: ${dndEnabled ? "On" : "Off"}`}
 												>
 													<MoonIcon />
 												</button>
 												<button
-													className={`cc-circular-btn ${batterySaverEnabled ? "active" : ""}`}
+													className={`cc-circular-btn cc-circular-btn--battery tile-battery ${batterySaverEnabled ? "active" : ""}`}
 													onClick={(e) => {
 														e.stopPropagation();
 														openBatterySaverSettings();
@@ -4328,6 +5609,46 @@ function App() {
 													title={`Energy Saver: ${batterySaverEnabled ? "On" : "Off"} — Click to open Settings`}
 												>
 													<BatterySaverIcon />
+												</button>
+												<button
+													className={`cc-circular-btn cc-circular-btn--airplane tile-airplane ${airplaneModeEnabled ? "active" : ""}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														toggleAirplaneMode();
+													}}
+													title={`Airplane Mode: ${airplaneModeEnabled ? "On" : "Off"}`}
+												>
+													<Plane size={14} />
+												</button>
+												<button
+													className={`cc-circular-btn cc-circular-btn--hotspot tile-hotspot ${hotspotEnabled ? "active" : ""}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														toggleHotspot();
+													}}
+													title={`Hotspot: ${hotspotEnabled ? "On" : "Off"}`}
+												>
+													<Zap size={14} />
+												</button>
+												<button
+													className={`cc-circular-btn cc-circular-btn--nightlight tile-nightlight ${nightLightEnabled ? "active" : ""}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														toggleNightLight();
+													}}
+													title={`Night Light: ${nightLightEnabled ? "On" : "Off"}`}
+												>
+													<SunMedium size={14} />
+												</button>
+												<button
+													className={`cc-circular-btn cc-circular-btn--sound tile-sound tile-mute ${displayVolume === 0 ? "active" : ""}`}
+													onClick={(e) => {
+														e.stopPropagation();
+														toggleVolumeLevel();
+													}}
+													title={displayVolume === 0 ? "Sound Muted (Click to restore)" : "Mute Sound"}
+												>
+													{displayVolume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
 												</button>
 												<button
 													className="cc-circular-btn"
@@ -4374,11 +5695,11 @@ function App() {
 											{/* Classic Sliders Area */}
 											<div className="cc-classic-sliders-area">
 												{/* Volume Slider */}
-												<div className="cc-classic-slider-row">
+												<div className="cc-classic-slider-row cc-volume-slider-row" onWheel={handleVolumeWheel}>
 													<div className="cc-classic-slider-label">
 														<button
 															type="button"
-															className="cc-level-toggle"
+															className={`cc-level-toggle tile-sound ${displayVolume === 0 ? "muted active" : ""}`}
 															onClick={toggleVolumeLevel}
 															aria-label={displayVolume > 0 ? "Mute volume" : "Restore volume"}
 															aria-pressed={displayVolume === 0}
@@ -4388,7 +5709,7 @@ function App() {
 														</button>
 														<span>Volume</span>
 													</div>
-													<div className="cc-classic-slider-track">
+													<div className="cc-classic-slider-track cc-volume-slider-track" onWheel={handleVolumeWheel}>
 														<input
 															type="range"
 															min="0"
@@ -4402,7 +5723,7 @@ function App() {
 															className="cc-classic-input"
 														/>
 														<div
-															className="cc-classic-fill"
+															className="cc-classic-fill cc-volume-fill"
 															style={{ width: `${displayVolume * 100}%` }}
 														/>
 													</div>
@@ -4412,7 +5733,7 @@ function App() {
 												</div>
 
 												{/* Brightness Slider */}
-												<div className="cc-classic-slider-row">
+												<div className="cc-classic-slider-row cc-brightness-slider-row" onWheel={handleBrightnessWheel}>
 													<div className="cc-classic-slider-label">
 														<button
 															type="button"
@@ -4430,7 +5751,7 @@ function App() {
 														</button>
 														<span>Brightness</span>
 													</div>
-													<div className="cc-classic-slider-track">
+													<div className="cc-classic-slider-track cc-brightness-slider-track" onWheel={handleBrightnessWheel}>
 														<input
 															type="range"
 															min="0"
@@ -4444,7 +5765,7 @@ function App() {
 															className="cc-classic-input"
 														/>
 														<div
-															className="cc-classic-fill"
+															className="cc-classic-fill cc-brightness-fill"
 															style={{ width: `${currentBrightness}%` }}
 														/>
 													</div>
@@ -4454,6 +5775,98 @@ function App() {
 										</motion.div>
 									)}
 								</AnimatePresence>
+
+								{/* Wi-Fi networks, opened from the controls panel's Wi-Fi tile */}
+								<AnimatePresence>
+									{bloomMode === "wifi" && (
+										<motion.div
+											key="wifi-view"
+											style={{
+												position: "absolute",
+												top: "36px",
+												left: 0,
+												width: "100%",
+												height: "calc(100% - 36px)",
+												boxSizing: "border-box",
+												zIndex: 2
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<WifiPanel
+												enabled={wifiEnabled}
+												onToggle={toggleWifi}
+												onBack={() => setBloomMode("command-center")}
+												onPinChange={setNotchPinned}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Bluetooth devices, opened from the controls panel's Bluetooth tile */}
+								<AnimatePresence>
+									{bloomMode === "bluetooth" && (
+										<motion.div
+											key="bluetooth-view"
+											style={{
+												position: "absolute",
+												top: "36px",
+												left: 0,
+												width: "100%",
+												height: "calc(100% - 36px)",
+												boxSizing: "border-box",
+												zIndex: 2
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<BluetoothPanel
+												enabled={bluetoothEnabled}
+												onToggle={toggleBluetooth}
+												onBack={() => setBloomMode("command-center")}
+												onPinChange={setNotchPinned}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Connected devices: everything connected, with its battery, by priority */}
+								<AnimatePresence>
+									{bloomMode === "devices" && (
+										<motion.div
+											key="devices-view"
+											style={{
+												position: "absolute",
+												top: "36px",
+												left: 0,
+												width: "100%",
+												height: "calc(100% - 36px)",
+												boxSizing: "border-box",
+												zIndex: 2,
+												overflow: "hidden",
+												borderBottomLeftRadius: 18,
+												borderBottomRightRadius: 18
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<ConnectedDevicesPanel
+												data={connectedDevices}
+												height={devicesPanelHeight}
+												buds={budsById}
+												lowThreshold={lowBatteryThreshold}
+												onContentHeight={setDevicesContentHeight}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
 
 								{/* Device alert: a device connected or disconnected. A
 								    click opens the Bluetooth view. */}
@@ -4796,7 +6209,7 @@ function App() {
 										<motion.div
 											key="hime-panel"
 											onClick={(e) => e.stopPropagation()}
-											onWheel={(e) => e.stopPropagation()}
+											onWheel={handleWheel}
 											style={{
 												position: "absolute",
 												top: "36px",
@@ -4834,7 +6247,7 @@ function App() {
 										<motion.div
 											key="tasks-panel"
 											onClick={(e) => e.stopPropagation()}
-											onWheel={(e) => e.stopPropagation()}
+											onWheel={handleWheel}
 											style={{
 												position: "absolute",
 												top: "36px",
@@ -4859,6 +6272,43 @@ function App() {
 												}}
 												onOpenChat={() => {
 													setBloomMode("hime");
+												}}
+											/>
+										</motion.div>
+									)}
+								</AnimatePresence>
+
+								{/* Keyboard Shortcuts Notch Panel */}
+								<AnimatePresence>
+									{bloomMode === "shortcuts" && (
+										<motion.div
+											key="shortcuts-panel"
+											onClick={(e) => e.stopPropagation()}
+											onWheel={handleWheel}
+											style={{
+												position: "absolute",
+												top: "36px",
+												left: 0,
+												width: "100%",
+												height: "calc(100% - 36px)",
+												boxSizing: "border-box",
+												overflow: "hidden",
+												zIndex: 2,
+												padding: "0 4px 6px 4px"
+											}}
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0, filter: "blur(4px)", transition: { duration: 0.1 } }}
+											transition={{ type: "spring", stiffness: 400, damping: 30 }}
+										>
+											<KeyboardShortcutsModal
+												isOpen={bloomMode === "shortcuts" && isOpen}
+												onClose={() => {
+													setIsOpen(false);
+													setBloomMode(restingModeRef.current);
+													setIsHovered(false);
+													setIsNotchHovered(false);
+													notchPinnedRef.current = false;
 												}}
 											/>
 										</motion.div>
@@ -4903,86 +6353,192 @@ function App() {
 						)}
 					</AnimatePresence>
 				</motion.div>
-				{/* The shelf's items, as a bubble on the left of the collapsed pill */}
-				<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
-					{showShelfBubble && (
-						<motion.button
-							key="shelf-bubble"
-							ref={shelfBubbleRef}
-							type="button"
-							className={`activity-bubble shelf-bubble ${isHovered ? "expanded" : ""}`}
-							aria-label={`Open shelf: ${shelfItems.length} item${shelfItems.length === 1 ? "" : "s"}`}
-							// Anchored at the pill's centre, offset past its left edge.
-							style={{ right: "50%" }}
-							initial={{ opacity: 0, scale: 0.4, x: 28, marginRight: getDynamicWidth() / 2 + 8 }}
-							animate={{ opacity: 1, scale: 1, x: 0, marginRight: getDynamicWidth() / 2 + 8 }}
-							exit={{ opacity: 0, scale: 0.4, x: 28 }}
-							transition={{
-								type: "spring",
-								stiffness: 400,
-								damping: 31,
-								opacity: { duration: 0.15 }
-							}}
-							onAnimationComplete={() => reportNotchRect.current()}
-							onClick={(e) => {
-								e.stopPropagation();
-								setIsHovered(true);
-								openNotch("shelf");
-							}}
-						>
-							<Inbox size={12} strokeWidth={2.4} />
-							<span>{shelfItems.length}</span>
-						</motion.button>
-					)}
-				</AnimatePresence>
-				{/* Music in its own bubble while a timer holds the collapsed pill */}
-				<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
-					{showMusicBubble && (
-						<motion.button
-							key="music-bubble"
-							ref={musicBubbleRef}
-							type="button"
-							className={`activity-bubble ${isHovered ? "expanded" : ""}`}
-							aria-label={mediaInfo.title ? `Open music: ${mediaInfo.title}` : "Open music"}
-							// Anchored at the pill's centre, offset past its right edge.
-							style={{ left: "50%" }}
-							initial={{ opacity: 0, scale: 0.4, x: -28, marginLeft: getDynamicWidth() / 2 + 8 }}
-							animate={{ opacity: 1, scale: 1, x: 0, marginLeft: getDynamicWidth() / 2 + 8 }}
-							exit={{ opacity: 0, scale: 0.4, x: -28 }}
-							transition={{
-								type: "spring",
-								stiffness: 400,
-								damping: 31,
-								opacity: { duration: 0.15 }
-							}}
-							onAnimationComplete={() => reportNotchRect.current()}
-							onClick={(e) => {
-								e.stopPropagation();
-								setIsHovered(true);
-								openNotch("music");
-							}}
-						>
-							{settingsAlbumArtEnabled && albumArtUrl ? (
-								<img src={albumArtUrl} alt="" draggable={false} />
-							) : (
-								<Music size={14} strokeWidth={2.2} />
-							)}
-						</motion.button>
-					)}
-				</AnimatePresence>
-				{/* Approval bubble when there are pending approvals from Hime Core */}
-				<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
-					{himeApprovals.length > 0 && !isOpen && (
-						<ApprovalBubble
-							approval={himeApprovals[0]}
-							onClick={() => {
-								setActiveApproval(himeApprovals[0]);
-								setIsOpen(true);
-								setBloomMode("hime-approval");
-							}}
-						/>
-					)}
-				</AnimatePresence>
+				{/* The shelf's items, as a bubble beside or cleanly anchored near the collapsed pill */}
+				{(() => {
+					const pillW_zoom = pillTargetWidth;
+					const renderLeft_zoom = renderCenterX_vp / safeScale - pillW_zoom / 2;
+					const renderRight_zoom = renderCenterX_vp / safeScale + pillW_zoom / 2;
+					const viewW_zoom = viewW / safeScale;
+					const viewH_zoom = viewH / safeScale;
+					const verticalBubbleBelow = renderTopY_vp / safeScale + 240 <= viewH_zoom;
+					const canPlaceShelfLeft = !isVerticalCollapsed && renderLeft_zoom >= 48;
+					const canPlaceMusicRight = !isVerticalCollapsed && renderRight_zoom <= viewW_zoom - 48;
+
+					return (
+						<>
+							<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
+								{showShelfBubble && (
+									<motion.button
+										key="shelf-bubble"
+										ref={shelfBubbleRef}
+										type="button"
+										className={`activity-bubble shelf-bubble ${isHovered ? "expanded" : ""}`}
+										aria-label={`Open shelf: ${shelfItems.length} item${shelfItems.length === 1 ? "" : "s"}`}
+										style={
+											isVerticalCollapsed
+												? {
+														top: verticalBubbleBelow ? verticalCollapsedHeight + 8 : -38,
+														left: currentEdge === "left" ? 6 : undefined,
+														right: currentEdge === "right" ? 6 : undefined
+													}
+												: canPlaceShelfLeft
+													? { right: "50%" }
+													: { left: "50%" }
+										}
+										initial={
+											isVerticalCollapsed
+												? { opacity: 0, scale: 0.4 }
+												: canPlaceShelfLeft
+													? { opacity: 0, scale: 0.4, x: 28, marginRight: pillW_zoom / 2 + 8 }
+													: { opacity: 0, scale: 0.4, x: -28, marginLeft: pillW_zoom / 2 + 8 }
+										}
+										animate={
+											isVerticalCollapsed
+												? { opacity: 1, scale: 1 }
+												: canPlaceShelfLeft
+													? { opacity: 1, scale: 1, x: 0, marginRight: pillW_zoom / 2 + 8 }
+													: { opacity: 1, scale: 1, x: 0, marginLeft: pillW_zoom / 2 + 8 }
+										}
+										exit={{ opacity: 0, scale: 0.4 }}
+										transition={{
+											type: "spring",
+											stiffness: 400,
+											damping: 31,
+											opacity: { duration: 0.15 }
+										}}
+										onAnimationComplete={() => reportNotchRect.current()}
+										onClick={(e) => {
+											e.stopPropagation();
+											setIsHovered(true);
+											openNotch("shelf");
+										}}
+									>
+										<Inbox size={12} strokeWidth={2.4} />
+										<span>{shelfItems.length}</span>
+									</motion.button>
+								)}
+							</AnimatePresence>
+							{/* Music in its own bubble while a timer holds the collapsed pill */}
+							<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
+								{showMusicBubble && (
+									<motion.button
+										key="music-bubble"
+										ref={musicBubbleRef}
+										type="button"
+										className={`activity-bubble ${isHovered ? "expanded" : ""}`}
+										aria-label={mediaInfo.title ? `Open music: ${mediaInfo.title}` : "Open music"}
+										style={
+											isVerticalCollapsed
+												? {
+														top: verticalBubbleBelow
+															? showShelfBubble
+																? verticalCollapsedHeight + 46
+																: verticalCollapsedHeight + 8
+															: showShelfBubble
+																? -76
+																: -38,
+														left: currentEdge === "left" ? 6 : undefined,
+														right: currentEdge === "right" ? 6 : undefined
+													}
+												: canPlaceMusicRight
+													? { left: "50%" }
+													: { right: "50%" }
+										}
+										initial={
+											isVerticalCollapsed
+												? { opacity: 0, scale: 0.4 }
+												: canPlaceMusicRight
+													? {
+															opacity: 0,
+															scale: 0.4,
+															x: -28,
+															marginLeft: pillW_zoom / 2 + (canPlaceShelfLeft || !showShelfBubble ? 8 : 46)
+														}
+													: {
+															opacity: 0,
+															scale: 0.4,
+															x: 28,
+															marginRight: pillW_zoom / 2 + (showShelfBubble ? 46 : 8)
+														}
+										}
+										animate={
+											isVerticalCollapsed
+												? { opacity: 1, scale: 1 }
+												: canPlaceMusicRight
+													? {
+															opacity: 1,
+															scale: 1,
+															x: 0,
+															marginLeft: pillW_zoom / 2 + (canPlaceShelfLeft || !showShelfBubble ? 8 : 46)
+														}
+													: {
+															opacity: 1,
+															scale: 1,
+															x: 0,
+															marginRight: pillW_zoom / 2 + (showShelfBubble ? 46 : 8)
+														}
+										}
+										exit={{ opacity: 0, scale: 0.4 }}
+										transition={{
+											type: "spring",
+											stiffness: 400,
+											damping: 31,
+											opacity: { duration: 0.15 }
+										}}
+										onAnimationComplete={() => reportNotchRect.current()}
+										onClick={(e) => {
+											e.stopPropagation();
+											setIsHovered(true);
+											openNotch("music");
+										}}
+									>
+										{settingsAlbumArtEnabled && albumArtUrl ? (
+											<img src={albumArtUrl} alt="" draggable={false} />
+										) : (
+											<Music size={14} strokeWidth={2.2} />
+										)}
+									</motion.button>
+								)}
+							</AnimatePresence>
+							{/* Approval bubble when there are pending approvals from Hime Core */}
+							<AnimatePresence onExitComplete={() => reportNotchRect.current()}>
+								{himeApprovals.length > 0 && !isOpen && settingsAssistantEnabled && (
+									isVerticalCollapsed ? (
+										<motion.div
+											key="vertical-approval-anchor"
+											className="vertical-approval-anchor"
+											initial={{ opacity: 0 }}
+											animate={{ opacity: 1 }}
+											exit={{ opacity: 0 }}
+											style={{
+												top: verticalBubbleBelow ? 162 : -80,
+												left: currentEdge === "left" ? 18 : -18
+											}}
+										>
+											<ApprovalBubble
+												approval={himeApprovals[0]}
+												onClick={() => {
+													setActiveApproval(himeApprovals[0]);
+													setIsOpen(true);
+													setBloomMode("hime-approval");
+												}}
+											/>
+										</motion.div>
+									) : (
+										<ApprovalBubble
+											approval={himeApprovals[0]}
+											onClick={() => {
+												setActiveApproval(himeApprovals[0]);
+												setIsOpen(true);
+												setBloomMode("hime-approval");
+											}}
+										/>
+									)
+								)}
+							</AnimatePresence>
+						</>
+					);
+				})()}
 			</div>
 		</div>
 	);

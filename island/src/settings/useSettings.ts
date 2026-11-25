@@ -61,7 +61,16 @@ export function useSettings() {
 	);
 	const [musicCompactNotch, setMusicCompactNotch] = useState(true);
 	const [shelfPersist, setShelfPersist] = useState(
-		() => localStorage.getItem("bloom-shelf-persist") === "true"
+		() => localStorage.getItem("bloom-shelf-persist") !== "false"
+	);
+	const [freeDragEnabled, setFreeDragEnabled] = useState(
+		() => localStorage.getItem("bloom-free-drag-enabled") === "true"
+	);
+	const [assistantEnabled, setAssistantEnabled] = useState(
+		() => localStorage.getItem("bloom-assistant-enabled") !== "false"
+	);
+	const [suppressNativeNotifications, setSuppressNativeNotifications] = useState(
+		() => localStorage.getItem("bloom-suppress-native-notifications") !== "false"
 	);
 	const [volumeOverlayEnabled, setVolumeOverlayEnabled] = useState(true);
 	const [volumeEdgeEnabled, setVolumeEdgeEnabled] = useState(
@@ -233,6 +242,9 @@ export function useSettings() {
 			apply(getVal("bloom-notch-default-panel"), setNotchDefaultPanel, asPanelChoice);
 			apply(getVal("bloom-music-compact-notch"), setMusicCompactNotch, readBool);
 			apply(getVal("bloom-shelf-persist"), setShelfPersist, readBool);
+			apply(getVal("bloom-free-drag-enabled"), setFreeDragEnabled, readBool);
+			apply(getVal("bloom-assistant-enabled"), setAssistantEnabled, readBool);
+			setSuppressNativeNotifications(getVal("bloom-suppress-native-notifications") !== "false");
 			apply(getVal("bloom-volume-overlay-enabled"), setVolumeOverlayEnabled, readBool);
 			apply(getVal("bloom-brightness-overlay-enabled"), setBrightnessOverlayEnabled, readBool);
 			apply(getVal("bloom-media-ambience-enabled"), setMediaAmbienceEnabled, readBool);
@@ -430,6 +442,9 @@ export function useSettings() {
 		"bloom-scale": setScale,
 		"bloom-temp-unit": (v) => setTempUnitFahrenheit(v === "fahrenheit"),
 		"bloom-auto-update": setAutoUpdate,
+		"bloom-free-drag-enabled": setFreeDragEnabled,
+		"bloom-assistant-enabled": setAssistantEnabled,
+		"bloom-suppress-native-notifications": { set: setSuppressNativeNotifications, defaultValue: true },
 		"bloom-volume-overlay-enabled": setVolumeOverlayEnabled,
 		"bloom-volume-edge-enabled": setVolumeEdgeEnabled,
 		"bloom-brightness-overlay-enabled": setBrightnessOverlayEnabled,
@@ -639,6 +654,34 @@ export function useSettings() {
 	const toggleMediaLayout = (layout: "classic" | "compact") => {
 		setMediaLayout(layout);
 		saveSetting("bloom-media-layout", layout);
+	};
+
+	const toggleFreeDrag = () => {
+		const next = !freeDragEnabled;
+		setFreeDragEnabled(next);
+		saveSetting("bloom-free-drag-enabled", String(next));
+		if (!next) {
+			localStorage.removeItem("bloom-notch-position");
+			localStorage.removeItem("bloom-volume-overlay-position");
+			localStorage.removeItem("bloom-brightness-overlay-position");
+			saveSetting("bloom-notch-position", null);
+			saveSetting("bloom-volume-overlay-position", null);
+			saveSetting("bloom-brightness-overlay-position", null);
+		}
+	};
+
+	const toggleAssistant = () => {
+		const next = !assistantEnabled;
+		setAssistantEnabled(next);
+		saveSetting("bloom-assistant-enabled", String(next));
+	};
+
+	const toggleSuppressNativeNotifications = () => {
+		const next = !suppressNativeNotifications;
+		setSuppressNativeNotifications(next);
+		localStorage.setItem("bloom-suppress-native-notifications", String(next));
+		saveSetting("bloom-suppress-native-notifications", String(next));
+		emit("settings-changed", { key: "suppress-native-notifications", value: next }).catch(() => {});
 	};
 
 	const toggleVolumeOverlay = () => {
@@ -1107,6 +1150,14 @@ export function useSettings() {
 		// Widgets
 		statusWidgets,
 		handleWidgetsChange,
+
+		// Free Drag & Assistant
+		freeDragEnabled,
+		toggleFreeDrag,
+		assistantEnabled,
+		toggleAssistant,
+		suppressNativeNotifications,
+		toggleSuppressNativeNotifications,
 
 		// Dock
 		dockEnabled,

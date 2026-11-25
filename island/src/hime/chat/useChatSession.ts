@@ -164,10 +164,31 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
               localStorage.getItem("hime-9router-model")) ||
             undefined;
 
+          let attachmentContext = "";
+          if (run.attachments && run.attachments.length > 0) {
+            const lines: string[] = ["[Lampiran Berkas:]"];
+            for (const att of run.attachments) {
+              const fileInfo = att.path
+                ? `- Berkas: ${att.name} (${att.path})`
+                : `- Berkas: ${att.name}`;
+              lines.push(fileInfo);
+              const textContent = att.content || att.snippet;
+              if (textContent && textContent.trim()) {
+                const snippetText = textContent.slice(0, 1500).trim();
+                lines.push("```\n" + snippetText + "\n```");
+              }
+            }
+            attachmentContext = "\n\n" + lines.join("\n");
+          }
+
+          const promptBody = run.prompt
+            ? `${run.prompt}${attachmentContext}`
+            : `Tolong periksa dan analisis berkas terlampir:${attachmentContext}`;
+
           const formattedPrompt =
             run.skills.length > 0
-              ? `[Mode Spesialis: ${run.skills.join(", ")}]\n${run.prompt}\n\n[Format: Jawablah dengan lugas, profesional, dan rapi dalam Markdown standar. Tanpa emoji berlebihan.]`
-              : `${run.prompt}\n\n[Format: Jawablah dengan lugas, profesional, dan rapi dalam Markdown standar. Tanpa emoji berlebihan.]`;
+              ? `[Mode Spesialis: ${run.skills.join(", ")}]\n${promptBody}\n\n[Format: Jawablah dengan lugas, profesional, dan rapi dalam Markdown standar. Tanpa emoji berlebihan.]`
+              : `${promptBody}\n\n[Format: Jawablah dengan lugas, profesional, dan rapi dalam Markdown standar. Tanpa emoji berlebihan.]`;
 
           // Progress step: Step 2
           setRuns((prev) =>

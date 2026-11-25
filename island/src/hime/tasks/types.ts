@@ -33,13 +33,13 @@ export interface ParsedTaskInput {
 	due_date: number | null;
 }
 
-/** Default category list. Labels stored as comma-sep in `labels` field. */
+/** Default category list with vibrant, luminous accent colors. */
 export const CATEGORIES = [
-	{ id: "kuliah", name: "Kuliah", color: "#6366f1" },
-	{ id: "proyek", name: "Proyek", color: "#f59e0b" },
-	{ id: "organisasi", name: "Organisasi", color: "#10b981" },
-	{ id: "pribadi", name: "Pribadi", color: "#ec4899" },
-	{ id: "lainnya", name: "Lainnya", color: "#6b7280" },
+	{ id: "kuliah", name: "Kuliah", color: "#8B5CF6" },
+	{ id: "proyek", name: "Proyek", color: "#06B6D4" },
+	{ id: "organisasi", name: "Organisasi", color: "#10B981" },
+	{ id: "pribadi", name: "Pribadi", color: "#F43F5E" },
+	{ id: "lainnya", name: "Lainnya", color: "#F59E0B" },
 ] as const;
 
 /** Tab filter for the segmented control. */

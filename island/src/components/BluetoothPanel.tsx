@@ -352,7 +352,7 @@ export function BluetoothPanel({ enabled, onToggle, onBack, onPinChange }: Bluet
 					return (
 						<li
 							key={d.id}
-							className={`qp-row ${expanded ? "expanded" : ""} ${d.connected ? "active" : ""}`}
+							className={`qp-row qp-row--bluetooth ${expanded ? "expanded" : ""} ${d.connected ? "active" : ""}`}
 						>
 							<button
 								className="qp-row-main"
@@ -441,7 +441,7 @@ export function BluetoothPanel({ enabled, onToggle, onBack, onPinChange }: Bluet
 					</button>
 				)}
 				<button
-					className={`qp-switch ${enabled ? "on" : ""}`}
+					className={`qp-switch qp-switch--bluetooth ${enabled ? "on" : ""}`}
 					role="switch"
 					aria-checked={enabled}
 					aria-label="Bluetooth"

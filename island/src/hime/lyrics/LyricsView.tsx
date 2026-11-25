@@ -53,8 +53,9 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     justifyContent: "center",
                     height: "180px",
                     gap: "8px",
-                    color: "var(--text-2, #A7AEBB)",
+                    color: "rgba(255, 255, 255, 0.72)",
                     fontSize: "13px",
+                    textShadow: "0 1px 3px rgba(0, 0, 0, 0.85)",
                 }}
             >
                 <motion.div
@@ -64,7 +65,8 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                         width: "8px",
                         height: "8px",
                         borderRadius: "50%",
-                        background: "var(--accent-mint, #34E3A6)",
+                        background: "#00D2FF",
+                        boxShadow: "0 0 10px rgba(0, 210, 255, 0.8)",
                     }}
                 />
                 <span>Mencari lirik...</span>
@@ -82,8 +84,9 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     justifyContent: "center",
                     height: "180px",
                     gap: "6px",
-                    color: "var(--text-2, #A7AEBB)",
+                    color: "rgba(255, 255, 255, 0.72)",
                     fontSize: "13px",
+                    textShadow: "0 1px 3px rgba(0, 0, 0, 0.85)",
                 }}
             >
                 <span style={{ fontSize: "20px" }}>🎵</span>
@@ -102,8 +105,9 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     justifyContent: "center",
                     height: "180px",
                     gap: "10px",
-                    color: "var(--text-2, #A7AEBB)",
+                    color: "rgba(255, 255, 255, 0.72)",
                     fontSize: "13px",
+                    textShadow: "0 1px 3px rgba(0, 0, 0, 0.85)",
                 }}
             >
                 <span>Lirik tak ditemukan</span>
@@ -113,13 +117,14 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                         onClick={onRetry}
                         style={{
                             padding: "4px 12px",
-                            background: "rgba(255, 255, 255, 0.08)",
-                            border: "1px solid rgba(255, 255, 255, 0.15)",
+                            background: "rgba(0, 210, 255, 0.12)",
+                            border: "1px solid rgba(0, 210, 255, 0.3)",
                             borderRadius: "12px",
-                            color: "var(--text-1, #F4F6FA)",
+                            color: "#FFFFFF",
                             fontSize: "12px",
                             cursor: "pointer",
                             transition: "all 0.2s ease",
+                            boxShadow: "0 0 8px rgba(0, 210, 255, 0.15)",
                         }}
                     >
                         Coba Lagi
@@ -143,10 +148,14 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     style={{
                         flex: 1,
                         overflowY: "auto",
+                        overflowX: "hidden",
+                        scrollbarWidth: "none",
+                        msOverflowStyle: "none",
                         padding: "10px 16px",
                         fontSize: "13px",
                         lineHeight: "1.6",
-                        color: "var(--text-1, #F4F6FA)",
+                        color: "rgba(255, 255, 255, 0.85)",
+                        textShadow: "0 1px 3px rgba(0, 0, 0, 0.85)",
                         whiteSpace: "pre-wrap",
                         textAlign: "center",
                     }}
@@ -162,7 +171,8 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
             style={{
                 display: "flex",
                 flexDirection: "column",
-                height: "240px",
+                height: "100%",
+                minHeight: "160px",
                 width: "100%",
                 position: "relative",
             }}
@@ -173,18 +183,22 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                 style={{
                     flex: 1,
                     overflowY: "auto",
-                    padding: "60px 12px",
+                    overflowX: "hidden",
+                    scrollbarWidth: "none",
+                    msOverflowStyle: "none",
+                    padding: "36px 12px",
                     textAlign: "center",
                     scrollBehavior: "smooth",
                     display: "flex",
                     flexDirection: "column",
-                    gap: "12px",
+                    gap: "10px",
+                    position: "relative",
                 }}
             >
                 <AnimatePresence>
                     {lines.map((line, index) => {
                         const isActive = index === activeLineIndex;
-                        const isPast = index < activeLineIndex;
+                        const isUpcoming = index === activeLineIndex + 1;
 
                         return (
                             <motion.div
@@ -193,11 +207,13 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                                 onClick={() => onSeekLine && onSeekLine(line.ms)}
                                 initial={{ opacity: 0.3, y: 4 }}
                                 animate={{
-                                    opacity: isActive ? 1 : isPast ? 0.35 : 0.45,
-                                    scale: isActive ? 1.04 : 0.98,
+                                    opacity: isActive ? 1 : isUpcoming ? 0.88 : 0.72,
+                                    scale: isActive ? 1.05 : isUpcoming ? 1.0 : 0.98,
                                     color: isActive
-                                        ? "var(--text-1, #F4F6FA)"
-                                        : "var(--text-2, #A7AEBB)",
+                                        ? "#FFFFFF"
+                                        : isUpcoming
+                                        ? "rgba(255, 255, 255, 0.88)"
+                                        : "rgba(255, 255, 255, 0.72)",
                                 }}
                                 transition={{
                                     type: "spring",
@@ -205,12 +221,24 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                                     damping: 32,
                                 }}
                                 style={{
-                                    fontSize: isActive ? "15px" : "13px",
-                                    fontWeight: isActive ? 600 : 400,
+                                    fontSize: isActive ? "16px" : isUpcoming ? "13.5px" : "13px",
+                                    fontWeight: isActive ? 700 : isUpcoming ? 500 : 400,
                                     cursor: onSeekLine ? "pointer" : "default",
-                                    padding: "3px 8px",
-                                    borderRadius: "6px",
-                                    transition: "color 0.2s ease",
+                                    padding: "5px 12px",
+                                    borderRadius: "8px",
+                                    textShadow: isActive
+                                        ? "0 0 12px #00D2FF, 0 0 24px #38D6F5, 0 1px 3px rgba(0, 0, 0, 0.9)"
+                                        : "0 1px 3px rgba(0, 0, 0, 0.85)",
+                                    background: isActive
+                                        ? "rgba(0, 210, 255, 0.12)"
+                                        : "transparent",
+                                    border: isActive
+                                        ? "1px solid rgba(0, 210, 255, 0.35)"
+                                        : "1px solid transparent",
+                                    boxShadow: isActive
+                                        ? "0 0 18px rgba(0, 210, 255, 0.2)"
+                                        : "none",
+                                    transition: "all 0.25s ease",
                                 }}
                             >
                                 {line.text || "♪ ♪ ♪"}
@@ -227,11 +255,11 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     alignItems: "center",
                     justifyContent: "space-between",
                     padding: "6px 12px",
-                    background: "rgba(0, 0, 0, 0.4)",
-                    backdropFilter: "blur(8px)",
+                    background: "rgba(0, 0, 0, 0.55)",
+                    backdropFilter: "blur(10px)",
                     borderTop: "1px solid rgba(255, 255, 255, 0.08)",
                     fontSize: "11px",
-                    color: "var(--text-2, #A7AEBB)",
+                    color: "rgba(255, 255, 255, 0.72)",
                     borderRadius: "0 0 12px 12px",
                 }}
             >
@@ -239,65 +267,146 @@ export const LyricsView: React.FC<LyricsViewProps> = ({
                     <span>Offset:</span>
                     <span
                         style={{
-                            color:
-                                userOffsetMs !== 0
-                                    ? "var(--accent-mint, #34E3A6)"
-                                    : "inherit",
+                            color: userOffsetMs !== 0 ? "#00D2FF" : "inherit",
                             fontFamily: "monospace",
+                            fontWeight: userOffsetMs !== 0 ? 600 : 400,
+                            textShadow:
+                                userOffsetMs !== 0 ? "0 0 8px rgba(0, 210, 255, 0.4)" : "none",
                         }}
                     >
                         {userOffsetMs > 0 ? `+${userOffsetMs}ms` : `${userOffsetMs}ms`}
                     </span>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "3px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                     <button
                         type="button"
                         onClick={() => onAdjustOffset(-500)}
+                        title="Mundurkan 500ms"
                         style={{
-                            padding: "2px 8px",
+                            padding: "2px 6px",
                             background: "rgba(255, 255, 255, 0.06)",
                             border: "1px solid rgba(255, 255, 255, 0.12)",
-                            borderRadius: "8px",
-                            color: "var(--text-1, #F4F6FA)",
-                            fontSize: "11px",
+                            borderRadius: "6px",
+                            color: "#F4F6FA",
+                            fontSize: "10.5px",
                             cursor: "pointer",
+                            transition: "all 0.15s ease",
                         }}
                     >
                         -0.5s
                     </button>
                     <button
                         type="button"
-                        onClick={() => onAdjustOffset(500)}
+                        onClick={() => onAdjustOffset(-200)}
+                        title="Mundurkan 200ms"
                         style={{
-                            padding: "2px 8px",
+                            padding: "2px 6px",
                             background: "rgba(255, 255, 255, 0.06)",
                             border: "1px solid rgba(255, 255, 255, 0.12)",
-                            borderRadius: "8px",
-                            color: "var(--text-1, #F4F6FA)",
-                            fontSize: "11px",
+                            borderRadius: "6px",
+                            color: "#F4F6FA",
+                            fontSize: "10.5px",
                             cursor: "pointer",
+                            transition: "all 0.15s ease",
+                        }}
+                    >
+                        -0.2s
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onAdjustOffset(-50)}
+                        title="Mundurkan presisi 50ms"
+                        style={{
+                            padding: "2px 6px",
+                            background: "rgba(0, 210, 255, 0.08)",
+                            border: "1px solid rgba(0, 210, 255, 0.25)",
+                            borderRadius: "6px",
+                            color: "#00D2FF",
+                            fontSize: "10px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                        }}
+                    >
+                        -50ms
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onAdjustOffset(50)}
+                        title="Majukan presisi 50ms"
+                        style={{
+                            padding: "2px 6px",
+                            background: "rgba(0, 210, 255, 0.08)",
+                            border: "1px solid rgba(0, 210, 255, 0.25)",
+                            borderRadius: "6px",
+                            color: "#00D2FF",
+                            fontSize: "10px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                        }}
+                    >
+                        +50ms
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onAdjustOffset(200)}
+                        title="Majukan 200ms"
+                        style={{
+                            padding: "2px 6px",
+                            background: "rgba(255, 255, 255, 0.06)",
+                            border: "1px solid rgba(255, 255, 255, 0.12)",
+                            borderRadius: "6px",
+                            color: "#F4F6FA",
+                            fontSize: "10.5px",
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                        }}
+                    >
+                        +0.2s
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onAdjustOffset(500)}
+                        title="Majukan 500ms"
+                        style={{
+                            padding: "2px 6px",
+                            background: "rgba(255, 255, 255, 0.06)",
+                            border: "1px solid rgba(255, 255, 255, 0.12)",
+                            borderRadius: "6px",
+                            color: "#F4F6FA",
+                            fontSize: "10.5px",
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
                         }}
                     >
                         +0.5s
                     </button>
-                    {userOffsetMs !== 0 && (
-                        <button
-                            type="button"
-                            onClick={onResetOffset}
-                            style={{
-                                padding: "2px 8px",
-                                background: "rgba(255, 255, 255, 0.06)",
-                                border: "1px solid rgba(255, 255, 255, 0.12)",
-                                borderRadius: "8px",
-                                color: "var(--text-1, #F4F6FA)",
-                                fontSize: "11px",
-                                cursor: "pointer",
-                            }}
-                        >
-                            Reset
-                        </button>
-                    )}
+                    <button
+                        type="button"
+                        onClick={onResetOffset}
+                        disabled={userOffsetMs === 0}
+                        style={{
+                            padding: "2px 8px",
+                            background:
+                                userOffsetMs !== 0
+                                    ? "rgba(0, 210, 255, 0.12)"
+                                    : "rgba(255, 255, 255, 0.04)",
+                            border:
+                                userOffsetMs !== 0
+                                    ? "1px solid rgba(0, 210, 255, 0.3)"
+                                    : "1px solid rgba(255, 255, 255, 0.08)",
+                            borderRadius: "6px",
+                            color: userOffsetMs !== 0 ? "#00D2FF" : "rgba(255, 255, 255, 0.35)",
+                            fontSize: "10.5px",
+                            fontWeight: 500,
+                            cursor: userOffsetMs !== 0 ? "pointer" : "default",
+                            transition: "all 0.15s ease",
+                        }}
+                    >
+                        Reset
+                    </button>
                 </div>
             </div>
         </div>

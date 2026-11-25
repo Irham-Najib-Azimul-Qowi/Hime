@@ -64,11 +64,21 @@ export function arbitrateSlotState(
 		.filter((p) => p.kind === "bubble" && p !== activeAlert)
 		.slice(0, 2);
 
+	const topItem = sorted[0] ?? null;
+	const isRealNotificationWithExpr =
+		topItem !== null &&
+		Boolean(topItem.expression) &&
+		topItem.module !== "network" &&
+		topItem.id !== "network-drop-alert" &&
+		topItem.expression !== "offline";
+
 	// 3. Determine Mascot Expression for Closed Notch Pill
 	let mascotExpression: EyeExpression = "netral";
-	if (!isOnline) {
+	if (!isOnline && !isRealNotificationWithExpr) {
 		mascotExpression = "offline";
-	} else if (activeAlert || approvals.length > 0) {
+	} else if (activeAlert) {
+		mascotExpression = activeAlert.expression ?? "berpikir";
+	} else if (approvals.length > 0) {
 		mascotExpression = "berpikir";
 	} else if (approvalJustResolved) {
 		mascotExpression = "senang";
@@ -100,6 +110,10 @@ export function arbitrateSlotState(
 	let centerSlot: string | null = null;
 	if (activeAlert?.payload?.description) {
 		centerSlot = String(activeAlert.payload.description).slice(0, 36);
+	} else if (activeAlert?.payload?.title) {
+		centerSlot = String(activeAlert.payload.title).slice(0, 36);
+	} else if (activeAlert?.payload?.text) {
+		centerSlot = String(activeAlert.payload.text).slice(0, 36);
 	} else if (sorted.length > 0) {
 		const top = sorted[0];
 		if (top.payload?.description) {
