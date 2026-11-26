@@ -1,28 +1,30 @@
-//! Native macOS-style floating Dock bar (`DockBar`) rendered via Direct2D.
+//! Native macOS-style floating Dock bar (`DockBar`) rendered via Direct2D Liquid Glass.
 //!
 //! Supports:
-//! - [`DockMode`] (`Fixed`, `AutoHide`, `Smart`): when hidden (`is_hidden`), collapses down
-//!   into a sleek `80px x 4px` bottom-edge handle strip that wakes on cursor hover.
+//! - [`DockMode`] (`Fixed`, `AutoHide`, `Smart`): when hidden (`is_hidden`), collapses to a
+//!   100% invisible, 0-pixel / `0x0`-region state that wakes smoothly on bottom-edge cursor hover.
 //! - Pinned apps (left) + grouped running apps (`HICON` -> premultiplied BGRA via
-//!   `draw_bgra_bitmap`), separated by a thin vertical divider when both are present.
-//! - White/cyan active indicator dot underneath running apps + multi-window count badge.
-//! - Right-side utilities after vertical divider: Hime AI, Settings, and System Tray
-//!   (`+N` badge + expandable tray flyout items).
-//! - Pure white (`#FFFFFF`) hover tooltips and full `hit_test_action` / `hit_test_context_action`.
+//!   `draw_bgra_bitmap`), separated by a subtle hairline divider when both are present.
+//! - Monochrome active indicator dot underneath running apps + multi-window count badge.
+//! - Right-side utility cluster after hairline divider: Hime AI (when enabled), Spaces
+//!   (Windows Virtual Desktop Switcher with Liquid Glass flyout), and System Tray (`+N` badge
+//!   + expandable tray flyout).
+//! - Apple Liquid Glass tooltips and full `hit_test_action` / `hit_test_context_action`.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
-use crate::animation::SpringValue;
+use crate::animation::{Spring, SpringValue};
 use crate::d2d::{
-    extract_window_or_exe_icon, HimeExpression, IconRgba, NativeSurface, Rect, TextAlign,
+    extract_window_or_exe_icon, HimeExpression, IconRgba, LiquidGlassStyle, NativeSurface, Rect,
+    SfSymbol, TextAlign,
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
 use crate::theme::{
-    Color, ACCENT_CYAN, CORNER_RADIUS, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_ALERT,
-    SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    CORNER_RADIUS, DIVIDER_HAIRLINE, STATUS_LIVE_RED, SYSTEM_BLUE, TEXT_PRIMARY, TEXT_SECONDARY,
+    TEXT_TERTIARY,
 };
 
 const DOCK_HEIGHT: f32 = 54.0;
@@ -34,7 +36,7 @@ const DIVIDER_WIDTH: f32 = 1.0;
 const DIVIDER_GAP: f32 = 8.0;
 const UTIL_BTN_SIZE: f32 = 34.0;
 const TRAY_BTN_BASE_WIDTH: f32 = 34.0;
-const TRAY_BTN_BADGE_WIDTH: f32 = 44.0;
+const TRAY_BTN_BADGE_WIDTH: f32 = 46.0;
 const HANDLE_STRIP_WIDTH: f32 = 80.0;
 const HANDLE_STRIP_HEIGHT: f32 = 4.0;
 const MIN_MAGNIFY_SCALE: f32 = 1.0;
@@ -46,6 +48,10 @@ const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
 const TRAY_ITEM_SIZE: f32 = 24.0;
 const TRAY_FLYOUT_PAD: f32 = 6.0;
 const TRAY_FLYOUT_GAP: f32 = 6.0;
+const SPACES_FLYOUT_PAD: f32 = 5.0;
+const SPACES_FLYOUT_GAP: f32 = 5.0;
+const SPACES_PILL_HEIGHT: f32 = 26.0;
+const SPACES_NEW_BTN_SIZE: f32 = 26.0;
 
 /// Dock visibility behavior mode matching `Dock.tsx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -88,6 +94,32 @@ impl TrayEntry {
     }
 }
 
+/// Virtual Desktop ("Space") entry rendered inside the Dock's Spaces switcher flyout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceEntry {
+    pub id: String,
+    pub name: String,
+    pub index: usize,
+    pub active: bool,
+}
+
+impl SpaceEntry {
+    /// Creates a new `SpaceEntry`.
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        index: usize,
+        active: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            index,
+            active,
+        }
+    }
+}
+
 /// Clickable / context action emitted by [`DockBar::hit_test_action`] and [`DockBar::hit_test_context_action`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockAction {
@@ -97,13 +129,17 @@ pub enum DockAction {
     TogglePin(usize),
     /// Toggle the Hime AI Drawer.
     ToggleAiDrawer,
-    /// Toggle the Hime Settings panel.
-    ToggleSettings,
+    /// Toggle the Virtual Desktops ("Spaces") flyout.
+    ToggleSpaces,
+    /// Switch to the Virtual Desktop at `index`.
+    SwitchDesktop(usize),
+    /// Create a new Virtual Desktop.
+    NewDesktop,
     /// Open or toggle the System Tray flyout / menu.
     ToggleTray,
     /// Restore or activate the System Tray item at `index`.
     ActivateTrayItem(usize),
-    /// Wake / reveal an auto-hidden Dock from its bottom `80x4` handle strip.
+    /// Wake / reveal an auto-hidden Dock from its bottom-edge wake region.
     WakeHiddenDock,
 }
 
@@ -111,7 +147,9 @@ pub enum DockAction {
 enum DockHoverTarget {
     App(usize),
     AiDrawer,
-    Settings,
+    Spaces,
+    SpaceItem(usize),
+    NewSpace,
     Tray,
     TrayItem(usize),
     HandleStrip,
@@ -141,7 +179,7 @@ pub struct DockItem {
 }
 
 fn default_item_scale() -> SpringValue {
-    SpringValue::snappy(1.0)
+    SpringValue::interactive(1.0)
 }
 
 impl DockItem {
@@ -162,30 +200,36 @@ impl DockItem {
             badge_count: 0,
             hwnds: Vec::new(),
             icon: None,
-            hover_scale: SpringValue::snappy(1.0),
+            hover_scale: SpringValue::interactive(1.0),
             bounce_timer: 0.0,
             bounce_amplitude: 0.0,
         }
     }
 }
 
-/// Floating bottom Dock bar with auto-hide handle strip, pinned + grouped running apps,
-/// real Win32 HICONs, System Tray badge + flyout items, and white hover tooltips.
+/// Floating bottom Dock bar rendered in Apple Liquid Glass with invisible AutoHide/Smart
+/// minimization, pinned + grouped running apps, real Win32 HICONs, Virtual Desktop Switcher
+/// ("Spaces") flyout, System Tray badge + flyout, and Liquid Glass hover tooltips.
 #[derive(Debug, Clone)]
 pub struct DockBar {
     items: Vec<DockItem>,
     icon_cache: HashMap<String, Option<IconRgba>>,
     tray_items: Vec<TrayEntry>,
+    spaces: Vec<SpaceEntry>,
     pub mode: DockMode,
     pub is_hidden: bool,
     pub is_overlapped: bool,
     pub is_edge_hovered: bool,
     pub ai_enabled: bool,
     pub tray_open: bool,
+    pub spaces_open: bool,
     pub system_tray_count: u32,
     pub visible: bool,
     pub visibility: SpringValue,
     pub show_progress: SpringValue,
+    tooltip_progress: SpringValue,
+    spaces_flyout_progress: SpringValue,
+    tray_flyout_progress: SpringValue,
     hovered_index: Option<usize>,
     hovered_target: Option<DockHoverTarget>,
     hover_mouse_x: Option<f32>,
@@ -199,22 +243,27 @@ impl Default for DockBar {
 }
 
 impl DockBar {
-    /// Creates an empty, visible `DockBar` in [`DockMode::Fixed`].
+    /// Creates an empty, visible `DockBar` in [`DockMode::Fixed`] with a default `"Desktop 1"` space.
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
             icon_cache: HashMap::new(),
             tray_items: Vec::new(),
+            spaces: vec![SpaceEntry::new("desktop-0", "Desktop 1", 0, true)],
             mode: DockMode::Fixed,
             is_hidden: false,
             is_overlapped: false,
             is_edge_hovered: false,
             ai_enabled: true,
             tray_open: false,
+            spaces_open: false,
             system_tray_count: 0,
             visible: true,
-            visibility: SpringValue::gentle(1.0),
-            show_progress: SpringValue::snappy(1.0),
+            visibility: SpringValue::emerge(1.0),
+            show_progress: SpringValue::emerge(1.0),
+            tooltip_progress: SpringValue::emerge(0.0),
+            spaces_flyout_progress: SpringValue::emerge(0.0),
+            tray_flyout_progress: SpringValue::emerge(0.0),
             hovered_index: None,
             hovered_target: None,
             hover_mouse_x: None,
@@ -230,11 +279,15 @@ impl DockBar {
         &self.tray_items
     }
 
+    pub fn spaces(&self) -> &[SpaceEntry] {
+        &self.spaces
+    }
+
     pub fn hovered_index(&self) -> Option<usize> {
         self.hovered_index
     }
 
-    /// Returns `true` when any app item, magnification band, utility button, tray item, or handle strip is hovered.
+    /// Returns `true` when any app item, magnification band, utility button, flyout item, or wake zone is hovered.
     pub fn has_hover(&self) -> bool {
         self.hovered_target.is_some() || self.hover_mouse_x.is_some()
     }
@@ -244,15 +297,18 @@ impl DockBar {
         self.hide_grace_timer
     }
 
-    /// Returns `true` if any Dock spring, magnification lerp, click bounce, or auto-hide grace timer is still active.
+    /// Returns `true` if any Dock spring, magnification spring, click bounce, or auto-hide grace timer is still active.
     pub fn is_animating(&self) -> bool {
         !self.visibility.is_settled()
             || !self.show_progress.is_settled()
+            || !self.tooltip_progress.is_settled()
+            || !self.spaces_flyout_progress.is_settled()
+            || !self.tray_flyout_progress.is_settled()
             || self.hide_grace_timer > 0.0
-            || self.items.iter().any(|it| {
-                (it.hover_scale.target - it.hover_scale.value).abs() > 0.002
-                    || it.bounce_timer > 0.0
-            })
+            || self
+                .items
+                .iter()
+                .any(|it| !it.hover_scale.is_settled() || it.bounce_timer > 0.0)
     }
 
     /// Triggers a macOS-style vertical click bounce animation on the item at `index`.
@@ -268,12 +324,38 @@ impl DockBar {
         }
     }
 
-    /// Clears hover state across app items, utility buttons, and tray items.
+    fn should_show_tooltip_for(&self, target: Option<DockHoverTarget>) -> bool {
+        match target {
+            None | Some(DockHoverTarget::HandleStrip) => false,
+            Some(DockHoverTarget::Spaces) => !self.spaces_open,
+            Some(DockHoverTarget::Tray) => !self.tray_open,
+            Some(_) => true,
+        }
+    }
+
+    fn refresh_tooltip_target(&mut self) {
+        let show_tip = self.should_show_tooltip_for(self.hovered_target);
+        let tip_goal = if show_tip { 1.0 } else { 0.0 };
+        if (self.tooltip_progress.target - tip_goal).abs() > 0.001 {
+            if show_tip {
+                self.tooltip_progress.launch_to(1.0, Spring::EMERGE, 1.0);
+            } else {
+                self.tooltip_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            }
+        }
+    }
+
+    fn set_hover_target(&mut self, target: Option<DockHoverTarget>) {
+        self.hovered_target = target;
+        self.refresh_tooltip_target();
+    }
+
+    /// Clears hover state across app items, utility buttons, flyout items, and wake region.
     pub fn clear_hover(&mut self) {
         let was_hovered = self.hovered_target.is_some() || self.hover_mouse_x.is_some();
         self.hovered_index = None;
-        self.hovered_target = None;
         self.hover_mouse_x = None;
+        self.set_hover_target(None);
         self.update_magnification_targets();
         if was_hovered && self.mode != DockMode::Fixed {
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
@@ -287,10 +369,11 @@ impl DockBar {
             return;
         }
         self.hovered_index = None;
-        self.hovered_target = None;
         self.hover_mouse_x = None;
+        self.set_hover_target(None);
         self.is_edge_hovered = false;
-        self.tray_open = false;
+        self.set_tray_open(false);
+        self.set_spaces_open(false);
         self.hide_grace_timer = 0.0;
         for item in &mut self.items {
             item.hover_scale.snap_to(1.0);
@@ -332,18 +415,27 @@ impl DockBar {
     pub fn set_ai_enabled(&mut self, enabled: bool) {
         self.ai_enabled = enabled;
         if !enabled && self.hovered_target == Some(DockHoverTarget::AiDrawer) {
-            self.hovered_target = None;
+            self.set_hover_target(None);
         }
     }
 
-    /// Toggles the inline System Tray flyout strip and returns the new `tray_open` state.
+    /// Toggles the inline System Tray flyout strip (mutually exclusive with Spaces) and returns `tray_open`.
     pub fn toggle_tray(&mut self) -> bool {
         self.tray_open = !self.tray_open;
         if self.tray_open {
+            if self.spaces_open {
+                self.spaces_open = false;
+                self.spaces_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            }
+            self.tray_flyout_progress.launch_to(1.0, Spring::EMERGE, 1.0);
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-        } else if matches!(self.hovered_target, Some(DockHoverTarget::TrayItem(_))) {
-            self.hovered_target = None;
+        } else {
+            self.tray_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            if matches!(self.hovered_target, Some(DockHoverTarget::TrayItem(_))) {
+                self.set_hover_target(None);
+            }
         }
+        self.refresh_tooltip_target();
         self.recompute_hidden();
         self.tray_open
     }
@@ -352,6 +444,47 @@ impl DockBar {
     pub fn set_tray_open(&mut self, open: bool) {
         if self.tray_open != open {
             self.toggle_tray();
+        }
+    }
+
+    /// Toggles the Windows Virtual Desktops ("Spaces") flyout (mutually exclusive with Tray) and returns `spaces_open`.
+    pub fn toggle_spaces(&mut self) -> bool {
+        self.spaces_open = !self.spaces_open;
+        if self.spaces_open {
+            if self.tray_open {
+                self.tray_open = false;
+                self.tray_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            }
+            self.spaces_flyout_progress.launch_to(1.0, Spring::EMERGE, 1.0);
+            self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+        } else {
+            self.spaces_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            if matches!(
+                self.hovered_target,
+                Some(DockHoverTarget::SpaceItem(_) | DockHoverTarget::NewSpace)
+            ) {
+                self.set_hover_target(None);
+            }
+        }
+        self.refresh_tooltip_target();
+        self.recompute_hidden();
+        self.spaces_open
+    }
+
+    /// Explicitly sets `spaces_open`.
+    pub fn set_spaces_open(&mut self, open: bool) {
+        if self.spaces_open != open {
+            self.toggle_spaces();
+        }
+    }
+
+    /// Replaces the Virtual Desktops list displayed inside the Spaces flyout.
+    pub fn set_spaces(&mut self, spaces: Vec<SpaceEntry>) {
+        self.spaces = spaces;
+        if let Some(DockHoverTarget::SpaceItem(idx)) = self.hovered_target {
+            if idx >= self.spaces.len() {
+                self.set_hover_target(None);
+            }
         }
     }
 
@@ -364,12 +497,12 @@ impl DockBar {
         }
         self.system_tray_count = items.len() as u32;
         self.tray_items = items;
-        if self.tray_items.is_empty() {
-            self.tray_open = false;
+        if self.tray_items.is_empty() && self.tray_open {
+            self.set_tray_open(false);
         }
     }
 
-    /// Recomputes `is_hidden` from `mode`, overlap state, hover state, and grace timer.
+    /// Recomputes `is_hidden` from `mode`, overlap state, hover state, open flyouts, and grace timer.
     pub fn recompute_hidden(&mut self) {
         let should_hide = match self.mode {
             DockMode::Fixed => false,
@@ -377,6 +510,7 @@ impl DockBar {
                 !self.has_hover()
                     && !self.is_edge_hovered
                     && !self.tray_open
+                    && !self.spaces_open
                     && self.hide_grace_timer <= 0.0
             }
             DockMode::Smart => {
@@ -384,18 +518,32 @@ impl DockBar {
                     && !self.has_hover()
                     && !self.is_edge_hovered
                     && !self.tray_open
+                    && !self.spaces_open
                     && self.hide_grace_timer <= 0.0
             }
         };
         self.is_hidden = should_hide;
-        self.show_progress
-            .set_target(if should_hide { 0.0 } else { 1.0 });
+        let goal = if should_hide { 0.0 } else { 1.0 };
+        if (self.show_progress.target - goal).abs() > 0.001 {
+            if should_hide {
+                self.show_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            } else {
+                self.show_progress.launch_to(1.0, Spring::EMERGE, 1.0);
+            }
+        }
         if should_hide {
-            self.tray_open = false;
+            if self.tray_open {
+                self.tray_open = false;
+                self.tray_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            }
+            if self.spaces_open {
+                self.spaces_open = false;
+                self.spaces_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
+            }
         }
     }
 
-    /// Resolves a 48px BGRA icon from cache or extracts it once via [`extract_window_or_exe_icon`].
+    /// Resolves a 64px BGRA icon from cache or extracts it once via [`extract_window_or_exe_icon`].
     pub fn resolve_icon(&mut self, hwnd: isize, exe_path: &str) -> Option<IconRgba> {
         let trimmed = exe_path.trim();
         let cache_key = if !trimmed.is_empty() {
@@ -474,7 +622,7 @@ impl DockBar {
             self.items.remove(index);
             self.hovered_index = None;
             if matches!(self.hovered_target, Some(DockHoverTarget::App(_))) {
-                self.hovered_target = None;
+                self.set_hover_target(None);
             }
         } else {
             self.partition_pinned_first();
@@ -600,7 +748,7 @@ impl DockBar {
             if idx >= self.items.len() {
                 self.hovered_index = None;
                 if matches!(self.hovered_target, Some(DockHoverTarget::App(_))) {
-                    self.hovered_target = None;
+                    self.set_hover_target(None);
                 }
             }
         }
@@ -614,7 +762,7 @@ impl DockBar {
             if idx >= self.items.len() {
                 self.hovered_index = None;
                 if matches!(self.hovered_target, Some(DockHoverTarget::App(_))) {
-                    self.hovered_target = None;
+                    self.set_hover_target(None);
                 }
             }
         }
@@ -628,12 +776,15 @@ impl DockBar {
         }
     }
 
-    /// Updates `visible` and animates `visibility` target.
+    /// Updates `visible` and animates `visibility` with Apple `EMERGE` / `RECEDE` springs.
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
-        self.visibility.set_target(if visible { 1.0 } else { 0.0 });
-        if !visible {
-            self.tray_open = false;
+        if visible {
+            self.visibility.launch_to(1.0, Spring::EMERGE, 1.0);
+        } else {
+            self.visibility.launch_to(0.0, Spring::RECEDE, 1.0);
+            self.set_tray_open(false);
+            self.set_spaces_open(false);
             self.clear_hover();
         }
     }
@@ -666,11 +817,12 @@ impl DockBar {
         (left, left + ICON_BASE_SIZE)
     }
 
-    /// Authentic macOS cosine-based magnification targets across `MAGNIFY_EFFECT_WIDTH`.
+    /// Authentic macOS cosine-based magnification targets driven by Apple `Spring` curves.
     fn update_magnification_targets(&mut self) {
         let Some(mouse_pos) = self.hover_mouse_x else {
+            let return_spring = Spring::new(0.26, 0.0);
             for item in &mut self.items {
-                item.hover_scale.set_target(MIN_MAGNIFY_SCALE);
+                item.hover_scale.animate_to(MIN_MAGNIFY_SCALE, return_spring);
             }
             return;
         };
@@ -698,7 +850,7 @@ impl DockBar {
                 let scale_factor = (1.0 - theta.cos()) * 0.5;
                 MIN_MAGNIFY_SCALE + scale_factor * (MAX_MAGNIFY_SCALE - MIN_MAGNIFY_SCALE)
             };
-            item.hover_scale.set_target(target);
+            item.hover_scale.animate_to(target, Spring::INTERACTIVE);
         }
     }
 
@@ -741,8 +893,8 @@ impl DockBar {
     pub fn set_hovered(&mut self, index: Option<usize>) {
         let valid = index.filter(|&i| i < self.items.len());
         self.hovered_index = valid;
-        self.hovered_target = valid.map(DockHoverTarget::App);
         self.hover_mouse_x = valid.map(|i| self.resting_item_center_x(i));
+        self.set_hover_target(valid.map(DockHoverTarget::App));
         if valid.is_some() {
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
             self.recompute_hidden();
@@ -751,12 +903,12 @@ impl DockBar {
     }
 
     /// Performs hit-testing at `(x, y)` and updates hover state, continuous cosine wave magnification,
-    /// utility buttons, tray items, and wake handle strip.
+    /// utility buttons, Spaces/Tray flyout items, and bottom-edge wake region.
     pub fn set_hovered_at(&mut self, x: f32, y: f32, surface_rect: Rect) -> Option<usize> {
         if self.is_hidden && self.show_progress.value <= 0.2 {
             if point_in_rect(x, y, self.wake_hit_rect(surface_rect)) {
                 self.set_edge_hovered(true);
-                self.hovered_target = Some(DockHoverTarget::HandleStrip);
+                self.set_hover_target(Some(DockHoverTarget::HandleStrip));
             } else {
                 self.set_edge_hovered(false);
                 self.clear_hover();
@@ -768,8 +920,8 @@ impl DockBar {
             Some(DockAction::App(idx)) => {
                 let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
                 self.hovered_index = Some(idx);
-                self.hovered_target = Some(DockHoverTarget::App(idx));
                 self.hover_mouse_x = Some(rest_x);
+                self.set_hover_target(Some(DockHoverTarget::App(idx)));
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 self.update_magnification_targets();
@@ -778,16 +930,34 @@ impl DockBar {
             Some(DockAction::ToggleAiDrawer) => {
                 self.hovered_index = None;
                 self.hover_mouse_x = None;
-                self.hovered_target = Some(DockHoverTarget::AiDrawer);
+                self.set_hover_target(Some(DockHoverTarget::AiDrawer));
                 self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 None
             }
-            Some(DockAction::ToggleSettings) => {
+            Some(DockAction::ToggleSpaces) => {
                 self.hovered_index = None;
                 self.hover_mouse_x = None;
-                self.hovered_target = Some(DockHoverTarget::Settings);
+                self.set_hover_target(Some(DockHoverTarget::Spaces));
+                self.update_magnification_targets();
+                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                self.recompute_hidden();
+                None
+            }
+            Some(DockAction::SwitchDesktop(idx)) => {
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
+                self.set_hover_target(Some(DockHoverTarget::SpaceItem(idx)));
+                self.update_magnification_targets();
+                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                self.recompute_hidden();
+                None
+            }
+            Some(DockAction::NewDesktop) => {
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
+                self.set_hover_target(Some(DockHoverTarget::NewSpace));
                 self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
@@ -796,7 +966,7 @@ impl DockBar {
             Some(DockAction::ToggleTray) => {
                 self.hovered_index = None;
                 self.hover_mouse_x = None;
-                self.hovered_target = Some(DockHoverTarget::Tray);
+                self.set_hover_target(Some(DockHoverTarget::Tray));
                 self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
@@ -805,7 +975,7 @@ impl DockBar {
             Some(DockAction::ActivateTrayItem(idx)) => {
                 self.hovered_index = None;
                 self.hover_mouse_x = None;
-                self.hovered_target = Some(DockHoverTarget::TrayItem(idx));
+                self.set_hover_target(Some(DockHoverTarget::TrayItem(idx)));
                 self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
@@ -813,7 +983,7 @@ impl DockBar {
             }
             Some(DockAction::WakeHiddenDock) => {
                 self.set_edge_hovered(true);
-                self.hovered_target = Some(DockHoverTarget::HandleStrip);
+                self.set_hover_target(Some(DockHoverTarget::HandleStrip));
                 None
             }
             Some(DockAction::TogglePin(_)) | None => {
@@ -829,8 +999,8 @@ impl DockBar {
                 if in_items_band {
                     let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
                     self.hovered_index = None;
-                    self.hovered_target = None;
                     self.hover_mouse_x = Some(rest_x);
+                    self.set_hover_target(None);
                     self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                     self.recompute_hidden();
                     self.update_magnification_targets();
@@ -842,8 +1012,8 @@ impl DockBar {
         }
     }
 
-    /// Advances visibility, auto-hide grace timer, `show_progress`, cosine scale lerp,
-    /// and click bounce animation by `dt` seconds.
+    /// Advances visibility, auto-hide grace timer, `show_progress`, flyout & tooltip springs,
+    /// analytic magnification springs, and click bounce animation by `dt` seconds.
     /// Returns `true` if any animation or grace timer is still active.
     pub fn tick(&mut self, dt: f32) -> bool {
         if dt > 0.0
@@ -852,6 +1022,7 @@ impl DockBar {
             && !self.has_hover()
             && !self.is_edge_hovered
             && !self.tray_open
+            && !self.spaces_open
             && self.hide_grace_timer > 0.0
         {
             self.hide_grace_timer = (self.hide_grace_timer - dt).max(0.0);
@@ -862,30 +1033,22 @@ impl DockBar {
 
         self.visibility.tick(dt);
         self.show_progress.tick(dt);
+        self.tooltip_progress.tick(dt);
+        self.spaces_flyout_progress.tick(dt);
+        self.tray_flyout_progress.tick(dt);
+
         let mut animating = !self.visibility.is_settled()
             || !self.show_progress.is_settled()
+            || !self.tooltip_progress.is_settled()
+            || !self.spaces_flyout_progress.is_settled()
+            || !self.tray_flyout_progress.is_settled()
             || self.hide_grace_timer > 0.0;
 
-        let lerp_base = if self.hover_mouse_x.is_some() {
-            0.20_f32
-        } else {
-            0.12_f32
-        };
-        let alpha = if dt > 0.0 && dt.is_finite() {
-            1.0 - (1.0 - lerp_base).powf((dt * 60.0).clamp(0.05, 4.0))
-        } else {
-            0.0
-        };
-
         for item in &mut self.items {
-            let diff = item.hover_scale.target - item.hover_scale.value;
-            if diff.abs() > 0.002 && alpha > 0.0 {
-                item.hover_scale.value += diff * alpha;
+            item.hover_scale.tick(dt);
+            if !item.hover_scale.is_settled() {
                 animating = true;
-            } else {
-                item.hover_scale.value = item.hover_scale.target;
             }
-            item.hover_scale.velocity = 0.0;
 
             if item.bounce_timer > 0.0 && dt > 0.0 && dt.is_finite() {
                 item.bounce_timer = (item.bounce_timer - dt).max(0.0);
@@ -968,22 +1131,22 @@ impl DockBar {
 
     fn utilities_width(&self) -> f32 {
         if self.ai_enabled {
-            // Hime AI + gap + Settings + gap + Tray
+            // Hime AI + gap + Spaces + gap + Tray
             UTIL_BTN_SIZE * 2.0 + self.tray_btn_width() + ITEM_GAP * 2.0
         } else {
-            // Settings + gap + Tray
+            // Spaces + gap + Tray
             UTIL_BTN_SIZE + self.tray_btn_width() + ITEM_GAP
         }
     }
 
-    /// Returns the `80px x 4px` bottom-edge handle strip rectangle used when `is_hidden`.
+    /// Returns the `80px x 4px` bottom-edge wake reference rectangle used when `is_hidden`.
     pub fn handle_strip_rect(&self, surface_rect: Rect) -> Rect {
         let x = surface_rect.x + (surface_rect.width - HANDLE_STRIP_WIDTH) * 0.5;
         let y = surface_rect.y + surface_rect.height - HANDLE_STRIP_HEIGHT - 1.0;
         Rect::new(x, y, HANDLE_STRIP_WIDTH, HANDLE_STRIP_HEIGHT)
     }
 
-    /// Returns a generous wake hit-test band around the `80x4` bottom handle strip.
+    /// Returns a generous wake hit-test band along the bottom edge when hidden (invisible visually).
     pub fn wake_hit_rect(&self, surface_rect: Rect) -> Rect {
         let strip = self.handle_strip_rect(surface_rect);
         Rect::new(
@@ -1017,7 +1180,7 @@ impl DockBar {
         self.layout_items_internal(dock.x, dock.y).0
     }
 
-    /// Returns `(pinned_divider_x, utils_divider_x, ai_rect, settings_rect, tray_rect)`.
+    /// Returns `(pinned_divider_x, utils_divider_x, ai_rect, spaces_rect, tray_rect)`.
     fn utility_rects(&self, dock: Rect) -> (Option<f32>, Option<f32>, Option<Rect>, Rect, Rect) {
         let (_, pinned_div_x, items_w) = self.layout_items_internal(dock.x, dock.y);
 
@@ -1029,26 +1192,30 @@ impl DockBar {
         };
 
         let btn_y = dock.y + (dock.height - UTIL_BTN_SIZE) * 0.5;
-        let (ai_rect, settings_x) = if self.ai_enabled {
+        let (ai_rect, spaces_x) = if self.ai_enabled {
             let r = Rect::new(utils_start_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
             (Some(r), r.x + r.width + ITEM_GAP)
         } else {
             (None, utils_start_x)
         };
 
-        let settings_rect = Rect::new(settings_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
+        let spaces_rect = Rect::new(spaces_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
         let tray_rect = Rect::new(
-            settings_rect.x + settings_rect.width + ITEM_GAP,
+            spaces_rect.x + spaces_rect.width + ITEM_GAP,
             btn_y,
             self.tray_btn_width(),
             UTIL_BTN_SIZE,
         );
-        (pinned_div_x, utils_div_x, ai_rect, settings_rect, tray_rect)
+        (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect)
     }
 
-    /// Computes the System Tray flyout bar rectangle when `tray_open && !tray_items.is_empty()`.
+    /// Computes the System Tray flyout bar rectangle when open or receding.
     pub fn tray_flyout_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
-        if !self.tray_open || self.tray_items.is_empty() || self.is_hidden {
+        let tray_t = self.tray_flyout_progress.value.clamp(0.0, 1.0);
+        if self.tray_items.is_empty()
+            || (self.is_hidden && self.show_progress.value <= 0.08)
+            || (!self.tray_open && tray_t <= 0.02)
+        {
             return None;
         }
         let (_, _, _, _, tray_rect) = self.utility_rects(dock);
@@ -1058,7 +1225,8 @@ impl DockBar {
         let max_x = (surface_rect.x + surface_rect.width - width - 4.0).max(surface_rect.x + 4.0);
         let center_x = tray_rect.x + tray_rect.width * 0.5;
         let x = (center_x - width * 0.5).clamp(surface_rect.x + 4.0, max_x);
-        let y = (dock.y - height - 6.0).max(surface_rect.y + 2.0);
+        let slide_y = (1.0 - tray_t) * 8.0;
+        let y = (dock.y - height - 6.0 + slide_y).max(surface_rect.y + 2.0);
         Some(Rect::new(x, y, width, height))
     }
 
@@ -1076,6 +1244,87 @@ impl DockBar {
                 Rect::new(x, y, TRAY_ITEM_SIZE, TRAY_ITEM_SIZE)
             })
             .collect()
+    }
+
+    fn space_pill_widths(&self, max_flyout_width: f32) -> Vec<f32> {
+        if self.spaces.is_empty() {
+            return Vec::new();
+        }
+        let raw: Vec<f32> = self
+            .spaces
+            .iter()
+            .map(|s| (s.name.chars().count() as f32 * 6.5 + 24.0).clamp(62.0, 120.0))
+            .collect();
+        let n = raw.len();
+        let fixed_chrome = SPACES_FLYOUT_PAD * 2.0
+            + (n.saturating_sub(1) as f32) * SPACES_FLYOUT_GAP
+            + SPACES_FLYOUT_GAP
+            + DIVIDER_WIDTH
+            + SPACES_FLYOUT_GAP
+            + SPACES_NEW_BTN_SIZE;
+        let avail_pills = (max_flyout_width - fixed_chrome).max(40.0 * n as f32);
+        let raw_sum: f32 = raw.iter().sum();
+        if raw_sum <= avail_pills || raw_sum <= 0.0 {
+            raw
+        } else {
+            let scale = avail_pills / raw_sum;
+            raw.into_iter().map(|w| (w * scale).max(36.0)).collect()
+        }
+    }
+
+    /// Computes the Windows Virtual Desktops ("Spaces") Liquid Glass flyout bar above the Dock.
+    pub fn spaces_flyout_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
+        let spaces_t = self.spaces_flyout_progress.value.clamp(0.0, 1.0);
+        if (self.is_hidden && self.show_progress.value <= 0.08)
+            || (!self.spaces_open && spaces_t <= 0.02)
+        {
+            return None;
+        }
+        let (_, _, _, spaces_rect, _) = self.utility_rects(dock);
+        let max_w = (surface_rect.width - 12.0).max(80.0);
+        let pill_widths = self.space_pill_widths(max_w);
+        let pills_w: f32 = pill_widths.iter().sum();
+        let gaps_w = if pill_widths.is_empty() {
+            0.0
+        } else {
+            (pill_widths.len().saturating_sub(1) as f32) * SPACES_FLYOUT_GAP
+                + SPACES_FLYOUT_GAP * 2.0
+                + DIVIDER_WIDTH
+        };
+        let width = (SPACES_FLYOUT_PAD * 2.0 + pills_w + gaps_w + SPACES_NEW_BTN_SIZE).min(max_w);
+        let height = SPACES_PILL_HEIGHT + SPACES_FLYOUT_PAD * 2.0;
+        let max_x = (surface_rect.x + surface_rect.width - width - 4.0).max(surface_rect.x + 4.0);
+        let center_x = spaces_rect.x + spaces_rect.width * 0.5;
+        let x = (center_x - width * 0.5).clamp(surface_rect.x + 4.0, max_x);
+        let slide_y = (1.0 - spaces_t) * 8.0;
+        let y = (dock.y - height - 6.0 + slide_y).max(surface_rect.y + 2.0);
+        Some(Rect::new(x, y, width, height))
+    }
+
+    /// Computes item pill rectangles inside the open Spaces flyout bar.
+    pub fn space_item_rects(&self, surface_rect: Rect, dock: Rect) -> Vec<Rect> {
+        let Some(flyout) = self.spaces_flyout_rect(surface_rect, dock) else {
+            return Vec::new();
+        };
+        let pill_widths = self.space_pill_widths((surface_rect.width - 12.0).max(80.0));
+        let mut cursor = flyout.x + SPACES_FLYOUT_PAD;
+        let y = flyout.y + SPACES_FLYOUT_PAD;
+        pill_widths
+            .into_iter()
+            .map(|w| {
+                let r = Rect::new(cursor, y, w, SPACES_PILL_HEIGHT);
+                cursor += w + SPACES_FLYOUT_GAP;
+                r
+            })
+            .collect()
+    }
+
+    /// Computes the `+` New Desktop pill rectangle inside the open Spaces flyout bar.
+    pub fn new_space_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
+        let flyout = self.spaces_flyout_rect(surface_rect, dock)?;
+        let x = flyout.x + flyout.width - SPACES_FLYOUT_PAD - SPACES_NEW_BTN_SIZE;
+        let y = flyout.y + SPACES_FLYOUT_PAD;
+        Some(Rect::new(x, y, SPACES_NEW_BTN_SIZE, SPACES_PILL_HEIGHT))
     }
 
     /// Returns the index of the application item under `(x, y)`, if any.
@@ -1097,8 +1346,8 @@ impl DockBar {
             .map(|it| it.id.as_str())
     }
 
-    /// Hit-tests all Dock targets: wake strip (when hidden), Tray flyout items, app items,
-    /// and right-side utility buttons (`Hime AI`, `Settings`, `Tray`).
+    /// Hit-tests all Dock targets: wake region (when hidden), Spaces & Tray flyouts,
+    /// app items, and right-side utility buttons (`Hime AI`, `Spaces`, `Tray`).
     pub fn hit_test_action(&self, x: f32, y: f32, surface_rect: Rect) -> Option<DockAction> {
         if !self.visible && self.visibility.value <= 0.01 {
             return None;
@@ -1112,6 +1361,22 @@ impl DockBar {
         }
 
         let dock = self.dock_rect(surface_rect);
+        if self.spaces_open {
+            if let Some(new_r) = self.new_space_rect(surface_rect, dock) {
+                if point_in_rect(x, y, new_r) {
+                    return Some(DockAction::NewDesktop);
+                }
+            }
+            for (idx, r) in self
+                .space_item_rects(surface_rect, dock)
+                .into_iter()
+                .enumerate()
+            {
+                if point_in_rect(x, y, r) {
+                    return Some(DockAction::SwitchDesktop(idx));
+                }
+            }
+        }
         if self.tray_open {
             for (idx, r) in self.tray_item_rects(surface_rect, dock).into_iter().enumerate() {
                 if point_in_rect(x, y, r) {
@@ -1124,14 +1389,14 @@ impl DockBar {
             return Some(DockAction::App(idx));
         }
 
-        let (_, _, ai_rect, settings_rect, tray_rect) = self.utility_rects(dock);
+        let (_, _, ai_rect, spaces_rect, tray_rect) = self.utility_rects(dock);
         if let Some(ai) = ai_rect {
             if point_in_rect(x, y, ai) {
                 return Some(DockAction::ToggleAiDrawer);
             }
         }
-        if point_in_rect(x, y, settings_rect) {
-            Some(DockAction::ToggleSettings)
+        if point_in_rect(x, y, spaces_rect) {
+            Some(DockAction::ToggleSpaces)
         } else if point_in_rect(x, y, tray_rect) {
             Some(DockAction::ToggleTray)
         } else {
@@ -1139,7 +1404,7 @@ impl DockBar {
         }
     }
 
-    /// Right-click / context-action hit test (e.g. Pin/Unpin on an app icon, or Tray/Settings/AI).
+    /// Right-click / context-action hit test (e.g. Pin/Unpin on an app icon, or Spaces/Tray/AI).
     pub fn hit_test_context_action(&self, x: f32, y: f32, surface_rect: Rect) -> Option<DockAction> {
         if (!self.visible && self.visibility.value <= 0.01)
             || (self.is_hidden && self.show_progress.value <= 0.2)
@@ -1153,7 +1418,14 @@ impl DockBar {
     }
 
     fn active_tooltip(&self, surface_rect: Rect, dock: Rect) -> Option<(Rect, String)> {
-        let (target_rect, label) = match self.hovered_target? {
+        let target = self.hovered_target?;
+        let is_flyout_item = matches!(
+            target,
+            DockHoverTarget::TrayItem(_)
+                | DockHoverTarget::SpaceItem(_)
+                | DockHoverTarget::NewSpace
+        );
+        let (target_rect, label) = match target {
             DockHoverTarget::App(idx) => {
                 let item = self.items.get(idx)?;
                 let rects = self.item_rects(surface_rect);
@@ -1164,11 +1436,27 @@ impl DockBar {
                 let (_, _, ai_rect, _, _) = self.utility_rects(dock);
                 (ai_rect?, "Hime AI".to_string())
             }
-            DockHoverTarget::Settings => {
-                let (_, _, _, settings_rect, _) = self.utility_rects(dock);
-                (settings_rect, "Settings".to_string())
+            DockHoverTarget::Spaces => {
+                if self.spaces_open {
+                    return None;
+                }
+                let (_, _, _, spaces_rect, _) = self.utility_rects(dock);
+                (spaces_rect, "Spaces".to_string())
+            }
+            DockHoverTarget::SpaceItem(idx) => {
+                let space = self.spaces.get(idx)?;
+                let rects = self.space_item_rects(surface_rect, dock);
+                let r = *rects.get(idx)?;
+                (r, space.name.clone())
+            }
+            DockHoverTarget::NewSpace => {
+                let r = self.new_space_rect(surface_rect, dock)?;
+                (r, "New Desktop".to_string())
             }
             DockHoverTarget::Tray => {
+                if self.tray_open {
+                    return None;
+                }
                 let (_, _, _, _, tray_rect) = self.utility_rects(dock);
                 let label = if self.system_tray_count > 0 {
                     format!("System Tray ({})", self.system_tray_count)
@@ -1188,7 +1476,7 @@ impl DockBar {
 
         let text_w = (label.chars().count() as f32 * 6.8 + 18.0).clamp(54.0, 210.0);
         let tip_h = 22.0;
-        let anchor_y = if matches!(self.hovered_target, Some(DockHoverTarget::TrayItem(_))) {
+        let anchor_y = if is_flyout_item {
             target_rect.y
         } else {
             target_rect.y.min(dock.y)
@@ -1197,32 +1485,44 @@ impl DockBar {
         let cx = target_rect.x + target_rect.width * 0.5;
         let max_x = (surface_rect.width - text_w - 4.0).max(4.0);
         let tip_x = (cx - text_w * 0.5).clamp(4.0, max_x);
-        Some((Rect::new(tip_x, tip_y, text_w, tip_h), label))
+        let tip_rect = Rect::new(tip_x, tip_y, text_w, tip_h);
+
+        // Never let a dock-row tooltip overlap an open Spaces or Tray flyout above the Dock.
+        if !is_flyout_item {
+            if let Some(fly) = self.spaces_flyout_rect(surface_rect, dock) {
+                if rects_overlap(tip_rect, fly, 4.0) {
+                    return None;
+                }
+            }
+            if let Some(fly) = self.tray_flyout_rect(surface_rect, dock) {
+                if rects_overlap(tip_rect, fly, 4.0) {
+                    return None;
+                }
+            }
+        }
+
+        Some((tip_rect, label))
     }
 
-    /// Renders either the invisible collapsed state (when auto-hidden) or the macOS glassmorphic Dock capsule.
+    /// Renders either the 100% invisible minimized state (when auto-hidden) or the Apple Liquid Glass Dock capsule.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let alpha = self.visibility.value.clamp(0.0, 1.0);
-        if alpha <= 0.01 {
+        let show_t = self.show_progress.value.clamp(0.0, 1.0);
+        if alpha <= 0.01 || (self.is_hidden && show_t <= 0.08) {
+            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
             return Ok(());
         }
 
         let (sw, sh) = surface.dip_size();
         let surface_rect = Rect::new(0.0, 0.0, sw, sh);
 
-        // Hidden mode: completely invisible & click-through until bottom edge is hovered
-        let show_t = self.show_progress.value.clamp(0.0, 1.0);
-        if self.is_hidden && show_t <= 0.08 {
-            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
-            return Ok(());
-        }
-
         let dock = self.dock_rect(surface_rect);
         let rects = self.item_rects(surface_rect);
         let tray_flyout = self.tray_flyout_rect(surface_rect, dock);
+        let spaces_flyout = self.spaces_flyout_rect(surface_rect, dock);
         let tooltip = self.active_tooltip(surface_rect, dock);
 
-        let mut regions = Vec::with_capacity(3 + rects.len());
+        let mut regions = Vec::with_capacity(4 + rects.len());
         regions.push((dock, CORNER_RADIUS));
         for r in &rects {
             if r.y < dock.y {
@@ -1235,46 +1535,34 @@ impl DockBar {
         if let Some(fly) = tray_flyout {
             regions.push((fly, 10.0));
         }
+        if let Some(fly) = spaces_flyout {
+            regions.push((fly, 12.0));
+        }
         if let Some((tip_rect, _)) = &tooltip {
             regions.push((*tip_rect, 7.0));
         }
         set_dock_regions(surface, &regions);
 
-        // macOS glassmorphic capsule (`rgba(45, 45, 48, 0.82)` + crisp inner top rim highlight & outer border)
-        let glass_bg = Color::from_rgba_u8(45, 45, 48, 210).with_alpha(0.82 * alpha);
-        surface.fill_rounded_rect(dock, CORNER_RADIUS, glass_bg)?;
-        surface.stroke_rounded_rect(
+        // Apple Liquid Glass Dock capsule (clear smoked glass + diagonal specular rim + soft outer shadow)
+        surface.draw_liquid_glass_panel(
             dock,
-            CORNER_RADIUS,
-            Color::from_rgba_u8(255, 255, 255, 40).with_alpha(0.16 * alpha),
-            1.0,
-        )?;
-        surface.draw_line(
-            dock.x + CORNER_RADIUS,
-            dock.y + 1.0,
-            dock.x + dock.width - CORNER_RADIUS,
-            dock.y + 1.0,
-            Color::from_rgba_u8(255, 255, 255, 46).with_alpha(0.18 * alpha),
-            1.0,
+            LiquidGlassStyle::clear(CORNER_RADIUS).with_shadow(12.0, 3.0, 0.24 * alpha * show_t),
         )?;
 
-        // Application items (real Win32 BGRA icons + fallback letter tiles + magnification shadow)
+        // Application items (crystal-clear BGRA icons + soft clean shadow, zero dark hover borders)
         for (i, (item, rect)) in self.items.iter().zip(rects.iter()).enumerate() {
             let is_hovered = self.hovered_target == Some(DockHoverTarget::App(i));
             let scale = item.hover_scale.value;
             if scale > 1.04 || item.bounce_timer > 0.0 {
                 let elev = ((scale - 1.0) / (MAX_MAGNIFY_SCALE - 1.0)).clamp(0.0, 1.0);
-                let shadow_a = (0.28 * elev + if item.bounce_timer > 0.0 { 0.12 } else { 0.0 }) * alpha;
-                let shadow_rect = Rect::new(
-                    rect.x + 1.0,
-                    rect.y + 4.0,
-                    rect.width,
-                    rect.height,
-                );
-                surface.fill_rounded_rect(
-                    shadow_rect,
+                let shadow_a =
+                    (0.24 * elev + if item.bounce_timer > 0.0 { 0.10 } else { 0.0 }) * alpha;
+                surface.draw_soft_shadow(
+                    *rect,
                     ICON_CORNER_RADIUS,
-                    Color::rgba(0.0, 0.0, 0.0, shadow_a),
+                    4.0 + 6.0 * elev,
+                    2.5,
+                    shadow_a,
                 )?;
             }
 
@@ -1287,21 +1575,12 @@ impl DockBar {
                     ICON_CORNER_RADIUS,
                 )?;
             } else {
-                let tile_bg = if is_hovered {
-                    SURFACE_ELEVATED.with_alpha(0.98 * alpha)
-                } else {
-                    SURFACE_ELEVATED.with_alpha(0.85 * alpha)
-                };
-                surface.fill_rounded_rect(*rect, ICON_CORNER_RADIUS, tile_bg)?;
-                surface.stroke_rounded_rect(
+                surface.draw_liquid_glass_button(
                     *rect,
                     ICON_CORNER_RADIUS,
-                    if is_hovered {
-                        ACCENT_CYAN.with_alpha(0.75 * alpha)
-                    } else {
-                        GLASS_BORDER.with_alpha(0.22 * alpha)
-                    },
-                    if is_hovered { 1.4 } else { 1.0 },
+                    None,
+                    is_hovered,
+                    false,
                 )?;
                 let initial = item
                     .label
@@ -1326,7 +1605,7 @@ impl DockBar {
                 let dot_h = if multi { 2.8 } else { 4.5 };
                 let dot_r = dot_h * 0.5;
                 let dot_color = if multi {
-                    ACCENT_CYAN.with_alpha(alpha)
+                    SYSTEM_BLUE.with_alpha(alpha)
                 } else {
                     TEXT_PRIMARY.with_alpha(0.92 * alpha)
                 };
@@ -1342,7 +1621,7 @@ impl DockBar {
             // Multi-window / notification count badge
             if item.badge_count > 0 {
                 let badge = Rect::new(rect.x + rect.width - 12.0, rect.y - 2.0, 15.0, 15.0);
-                surface.fill_rounded_rect(badge, 7.5, STATUS_ALERT.with_alpha(alpha))?;
+                surface.fill_rounded_rect(badge, 7.5, STATUS_LIVE_RED.with_alpha(alpha))?;
                 let txt = if item.badge_count > 99 {
                     "99+".to_string()
                 } else {
@@ -1358,78 +1637,145 @@ impl DockBar {
             }
         }
 
-        // Thin vertical separators + right-side Hime AI / Settings / Tray controls
-        let (pinned_div_x, utils_div_x, ai_rect, settings_rect, tray_rect) =
+        // Hairline separators + right-side Hime AI / Spaces / System Tray controls
+        let (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect) =
             self.utility_rects(dock);
         if let Some(px) = pinned_div_x {
             let div_rect = Rect::new(px, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
-            surface.fill_rounded_rect(div_rect, 0.5, GLASS_BORDER.with_alpha(0.24 * alpha))?;
+            surface.fill_rounded_rect(div_rect, 0.5, DIVIDER_HAIRLINE.with_alpha_mul(alpha))?;
         }
         if let Some(dx) = utils_div_x {
             let div_rect = Rect::new(dx, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
-            surface.fill_rounded_rect(div_rect, 0.5, GLASS_BORDER.with_alpha(0.24 * alpha))?;
+            surface.fill_rounded_rect(div_rect, 0.5, DIVIDER_HAIRLINE.with_alpha_mul(alpha))?;
         }
 
-        self.render_utility_buttons(surface, ai_rect, settings_rect, tray_rect, alpha)?;
+        self.render_utility_buttons(surface, ai_rect, spaces_rect, tray_rect, alpha)?;
 
-        // Expanded System Tray flyout strip (when toggled open)
-        if let Some(flyout) = tray_flyout {
-            surface.fill_rounded_rect(flyout, 10.0, NOTCH_BG_SOLID.with_alpha(0.95 * alpha))?;
-            surface.stroke_rounded_rect(flyout, 10.0, GLASS_BORDER.with_alpha(0.28 * alpha), 1.0)?;
-            let tray_rects = self.tray_item_rects(surface_rect, dock);
-            for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
-                let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
-                if hovered {
-                    surface.fill_rounded_rect(
-                        *r,
-                        6.0,
-                        SURFACE_ELEVATED.with_alpha(0.95 * alpha),
-                    )?;
+        // Expanded Virtual Desktops ("Spaces") Liquid Glass flyout
+        if let Some(flyout) = spaces_flyout {
+            let fly_t = self.spaces_flyout_progress.value.clamp(0.0, 1.0);
+            let fly_alpha = alpha * fly_t;
+            if fly_alpha > 0.02 {
+                surface.draw_liquid_glass_panel(
+                    flyout,
+                    LiquidGlassStyle::regular(12.0).with_shadow(10.0, 3.0, 0.24 * fly_alpha),
+                )?;
+                let space_rects = self.space_item_rects(surface_rect, dock);
+                for (idx, (entry, r)) in self.spaces.iter().zip(space_rects.iter()).enumerate() {
+                    let hovered = self.hovered_target == Some(DockHoverTarget::SpaceItem(idx));
+                    let tint = if entry.active {
+                        Some(SYSTEM_BLUE.with_alpha_mul(fly_alpha))
+                    } else {
+                        None
+                    };
+                    surface.draw_liquid_glass_button(*r, 7.0, tint, hovered, false)?;
+
+                    let dot_r = Rect::new(r.x + 8.0, r.y + (r.height - 5.0) * 0.5, 5.0, 5.0);
+                    let dot_color = if entry.active {
+                        SYSTEM_BLUE.with_alpha(fly_alpha)
+                    } else {
+                        TEXT_TERTIARY.with_alpha(0.55 * fly_alpha)
+                    };
+                    surface.fill_rounded_rect(dot_r, 2.5, dot_color)?;
+
+                    let label_rect =
+                        Rect::new(r.x + 15.0, r.y, (r.width - 20.0).max(12.0), r.height);
+                    let text_color = if entry.active || hovered {
+                        TEXT_PRIMARY.with_alpha(fly_alpha)
+                    } else {
+                        TEXT_SECONDARY.with_alpha(fly_alpha)
+                    };
+                    surface.draw_text(&entry.name, label_rect, 11.0, text_color, TextAlign::Leading)?;
                 }
-                if let Some(ref icon_rgba) = entry.icon {
-                    surface.draw_bgra_bitmap(
-                        *r,
-                        icon_rgba.width,
-                        icon_rgba.height,
-                        &icon_rgba.bgra_premul,
-                        5.0,
+
+                if let Some(new_r) = self.new_space_rect(surface_rect, dock) {
+                    let div_x = new_r.x - SPACES_FLYOUT_GAP - DIVIDER_WIDTH;
+                    surface.fill_rounded_rect(
+                        Rect::new(div_x, flyout.y + 8.0, DIVIDER_WIDTH, flyout.height - 16.0),
+                        0.5,
+                        DIVIDER_HAIRLINE.with_alpha_mul(fly_alpha),
                     )?;
-                } else {
-                    let initial = entry
-                        .label
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                        .to_uppercase()
-                        .to_string();
-                    surface.fill_rounded_rect(*r, 6.0, SURFACE_ELEVATED.with_alpha(0.8 * alpha))?;
-                    surface.draw_text(
-                        &initial,
-                        *r,
-                        11.0,
-                        TEXT_PRIMARY.with_alpha(alpha),
-                        TextAlign::Center,
+                    let new_hovered = self.hovered_target == Some(DockHoverTarget::NewSpace);
+                    surface.draw_liquid_glass_button(new_r, 7.0, None, new_hovered, false)?;
+                    let plus_rect = Rect::new(
+                        new_r.x + 5.0,
+                        new_r.y + 5.0,
+                        (new_r.width - 10.0).max(8.0),
+                        (new_r.height - 10.0).max(8.0),
+                    );
+                    surface.draw_sf_symbol(
+                        plus_rect,
+                        SfSymbol::Plus,
+                        TEXT_PRIMARY.with_alpha(if new_hovered { 1.0 } else { 0.90 } * fly_alpha),
+                        1.6,
                     )?;
                 }
             }
         }
 
-        // Hover tooltip pill above the hovered item (pure WHITE text #FFFFFF)
-        if let Some((tip_rect, label)) = tooltip {
-            surface.fill_rounded_rect(tip_rect, 7.0, NOTCH_BG_SOLID.with_alpha(0.96 * alpha))?;
-            surface.stroke_rounded_rect(
-                tip_rect,
-                7.0,
-                GLASS_BORDER.with_alpha(0.28 * alpha),
-                1.0,
-            )?;
-            surface.draw_text(
-                &label,
-                tip_rect,
-                11.5,
-                TEXT_PRIMARY.with_alpha(alpha),
-                TextAlign::Center,
-            )?;
+        // Expanded System Tray Liquid Glass flyout strip (when toggled open)
+        if let Some(flyout) = tray_flyout {
+            let tray_t = self.tray_flyout_progress.value.clamp(0.0, 1.0);
+            let tray_alpha = alpha * tray_t;
+            if tray_alpha > 0.02 {
+                surface.draw_liquid_glass_panel(
+                    flyout,
+                    LiquidGlassStyle::regular(10.0).with_shadow(8.0, 2.5, 0.24 * tray_alpha),
+                )?;
+                let tray_rects = self.tray_item_rects(surface_rect, dock);
+                for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
+                    let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
+                    if hovered {
+                        surface.draw_liquid_glass_button(*r, 6.0, None, true, false)?;
+                    }
+                    if let Some(ref icon_rgba) = entry.icon {
+                        surface.draw_bgra_bitmap(
+                            *r,
+                            icon_rgba.width,
+                            icon_rgba.height,
+                            &icon_rgba.bgra_premul,
+                            5.0,
+                        )?;
+                    } else {
+                        let initial = entry
+                            .label
+                            .chars()
+                            .next()
+                            .unwrap_or('?')
+                            .to_uppercase()
+                            .to_string();
+                        if !hovered {
+                            surface.draw_liquid_glass_button(*r, 6.0, None, false, false)?;
+                        }
+                        surface.draw_text(
+                            &initial,
+                            *r,
+                            11.0,
+                            TEXT_PRIMARY.with_alpha(tray_alpha),
+                            TextAlign::Center,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        // Liquid Glass hover tooltip pill above the hovered item
+        if let Some((mut tip_rect, label)) = tooltip {
+            let tip_t = self.tooltip_progress.value.clamp(0.0, 1.0);
+            if tip_t > 0.02 {
+                tip_rect.y += (1.0 - tip_t) * 4.0;
+                surface.draw_liquid_glass_panel(
+                    tip_rect,
+                    LiquidGlassStyle::regular(7.0).with_shadow(6.0, 2.0, 0.22 * alpha * tip_t),
+                )?;
+                surface.draw_text(
+                    &label,
+                    tip_rect,
+                    11.5,
+                    TEXT_PRIMARY.with_alpha(alpha * tip_t),
+                    TextAlign::Center,
+                )?;
+            }
         }
 
         Ok(())
@@ -1439,17 +1785,17 @@ impl DockBar {
         &self,
         surface: &NativeSurface,
         ai_rect: Option<Rect>,
-        settings_rect: Rect,
+        spaces_rect: Rect,
         tray_rect: Rect,
         alpha: f32,
     ) -> Result<()> {
         let ai_hovered = self.hovered_target == Some(DockHoverTarget::AiDrawer);
-        let settings_hovered = self.hovered_target == Some(DockHoverTarget::Settings);
-        let tray_hovered = self.hovered_target == Some(DockHoverTarget::Tray) || self.tray_open;
+        let spaces_hovered = self.hovered_target == Some(DockHoverTarget::Spaces);
+        let tray_hovered = self.hovered_target == Some(DockHoverTarget::Tray);
 
         // 1. Hime AI button (expressive Hime eyes badge)
         if let Some(ai_r) = ai_rect {
-            draw_util_bg(surface, ai_r, ai_hovered, alpha)?;
+            surface.draw_liquid_glass_button(ai_r, 10.0, None, ai_hovered, false)?;
             surface.draw_hime_eyes(
                 ai_r.x + ai_r.width * 0.5,
                 ai_r.y + ai_r.height * 0.5,
@@ -1459,76 +1805,86 @@ impl DockBar {
             )?;
         }
 
-        // 2. Settings button (3 crisp horizontal slider tracks + knobs)
-        draw_util_bg(surface, settings_rect, settings_hovered, alpha)?;
-        let track_x = settings_rect.x + 8.0;
-        let track_w = settings_rect.width - 16.0;
-        let knob_offsets = [0.68_f32, 0.25_f32, 0.58_f32];
-        for (idx, knob_ratio) in knob_offsets.iter().enumerate() {
-            let ty = settings_rect.y + 10.0 + idx as f32 * 6.5;
-            surface.fill_rounded_rect(
-                Rect::new(track_x, ty, track_w, 2.0),
-                1.0,
-                TEXT_SECONDARY.with_alpha(0.65 * alpha),
-            )?;
-            let kx = track_x + (track_w - 4.5) * knob_ratio;
-            surface.fill_rounded_rect(
-                Rect::new(kx, ty - 1.25, 4.5, 4.5),
-                2.25,
-                if settings_hovered {
-                    ACCENT_CYAN.with_alpha(alpha)
-                } else {
-                    TEXT_PRIMARY.with_alpha(alpha)
-                },
-            )?;
-        }
+        // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`)
+        let spaces_tint = if self.spaces_open {
+            Some(SYSTEM_BLUE.with_alpha_mul(alpha))
+        } else {
+            None
+        };
+        surface.draw_liquid_glass_button(
+            spaces_rect,
+            10.0,
+            spaces_tint,
+            spaces_hovered,
+            self.spaces_open,
+        )?;
+        let spaces_icon = Rect::new(
+            spaces_rect.x + 8.0,
+            spaces_rect.y + 8.0,
+            spaces_rect.width - 16.0,
+            spaces_rect.height - 16.0,
+        );
+        surface.draw_sf_symbol(
+            spaces_icon,
+            SfSymbol::Desktops,
+            TEXT_PRIMARY.with_alpha(if spaces_hovered || self.spaces_open { 1.0 } else { 0.88 } * alpha),
+            1.5,
+        )?;
 
-        // 3. System Tray button (badge + icon preview or crisp 2x2 tray dots)
-        draw_util_bg(surface, tray_rect, tray_hovered, alpha)?;
+        // 3. System Tray button (`SfSymbol::TrayGrid` + optional `+N` count)
+        let tray_tint = if self.tray_open {
+            Some(SYSTEM_BLUE.with_alpha_mul(alpha))
+        } else {
+            None
+        };
+        surface.draw_liquid_glass_button(
+            tray_rect,
+            10.0,
+            tray_tint,
+            tray_hovered,
+            self.tray_open,
+        )?;
+        let tray_fg =
+            TEXT_PRIMARY.with_alpha(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
         if self.system_tray_count > 0 {
+            let icon_r = Rect::new(tray_rect.x + 6.0, tray_rect.y + 10.0, 14.0, 14.0);
+            surface.draw_sf_symbol(icon_r, SfSymbol::TrayGrid, tray_fg, 1.4)?;
+            let count_r = Rect::new(
+                tray_rect.x + 20.0,
+                tray_rect.y,
+                (tray_rect.width - 23.0).max(16.0),
+                tray_rect.height,
+            );
             surface.draw_text(
                 &format!("+{}", self.system_tray_count),
-                tray_rect,
-                11.5,
-                TEXT_PRIMARY.with_alpha(alpha),
+                count_r,
+                10.5,
+                tray_fg,
                 TextAlign::Center,
             )?;
         } else {
-            let cx = tray_rect.x + tray_rect.width * 0.5;
-            let cy = tray_rect.y + tray_rect.height * 0.5;
-            let dot_color = if tray_hovered {
-                ACCENT_CYAN.with_alpha(alpha)
-            } else {
-                TEXT_PRIMARY.with_alpha(0.82 * alpha)
-            };
-            for dx in [-4.5_f32, 1.5_f32] {
-                for dy in [-4.5_f32, 1.5_f32] {
-                    surface.fill_rounded_rect(Rect::new(cx + dx, cy + dy, 3.2, 3.2), 1.6, dot_color)?;
-                }
-            }
+            let icon_r = Rect::new(
+                tray_rect.x + 9.0,
+                tray_rect.y + 9.0,
+                tray_rect.width - 18.0,
+                tray_rect.height - 18.0,
+            );
+            surface.draw_sf_symbol(icon_r, SfSymbol::TrayGrid, tray_fg, 1.5)?;
         }
 
         Ok(())
     }
 }
 
-fn draw_util_bg(surface: &NativeSurface, rect: Rect, hovered: bool, alpha: f32) -> Result<()> {
-    let bg = if hovered {
-        SURFACE_ELEVATED.with_alpha(0.98 * alpha)
-    } else {
-        SURFACE_ELEVATED.with_alpha(0.65 * alpha)
-    };
-    surface.fill_rounded_rect(rect, 10.0, bg)?;
-    if hovered {
-        surface.stroke_rounded_rect(rect, 10.0, ACCENT_CYAN.with_alpha(0.75 * alpha), 1.2)?;
-    } else {
-        surface.stroke_rounded_rect(rect, 10.0, GLASS_BORDER.with_alpha(0.16 * alpha), 1.0)?;
-    }
-    Ok(())
-}
-
 fn point_in_rect(x: f32, y: f32, r: Rect) -> bool {
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
+}
+
+fn rects_overlap(a: Rect, b: Rect, pad: f32) -> bool {
+    a.x < b.x + b.width + pad
+        && a.x + a.width + pad > b.x
+        && a.y < b.y + b.height + pad
+        && a.y + a.height + pad > b.y
 }
 
 fn set_dock_regions(surface: &NativeSurface, rects: &[(Rect, f32)]) {
@@ -1577,7 +1933,7 @@ mod tests {
 
         let dock_rect = dock.dock_rect(surface_rect);
         assert_eq!(dock_rect.height, 54.0);
-        let (pinned_div_x, utils_div_x, ai_rect, settings_rect, tray_rect) =
+        let (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect) =
             dock.utility_rects(dock_rect);
         assert!(pinned_div_x.is_some());
         assert!(utils_div_x.is_some());
@@ -1592,11 +1948,11 @@ mod tests {
         );
         assert_eq!(
             dock.hit_test_action(
-                settings_rect.x + settings_rect.width * 0.5,
-                settings_rect.y + settings_rect.height * 0.5,
+                spaces_rect.x + spaces_rect.width * 0.5,
+                spaces_rect.y + spaces_rect.height * 0.5,
                 surface_rect
             ),
-            Some(DockAction::ToggleSettings)
+            Some(DockAction::ToggleSpaces)
         );
         assert_eq!(
             dock.hit_test_action(
@@ -1609,7 +1965,197 @@ mod tests {
     }
 
     #[test]
-    fn dock_modes_auto_hide_and_smart_collapse_to_80x4_handle_strip() {
+    fn dock_utility_cluster_excludes_settings_and_exposes_spaces_tooltip() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
+        let dock_rect = dock.dock_rect(surface_rect);
+        let (_, _, ai_rect, spaces_rect, tray_rect) = dock.utility_rects(dock_rect);
+        assert!(ai_rect.is_some());
+
+        // When AI is disabled, only Spaces and Tray remain in the utility cluster.
+        dock.set_ai_enabled(false);
+        let dock_no_ai = dock.dock_rect(surface_rect);
+        let (_, _, no_ai, spaces_no_ai, tray_no_ai) = dock.utility_rects(dock_no_ai);
+        assert!(no_ai.is_none());
+        assert_eq!(
+            dock.hit_test_action(
+                spaces_no_ai.x + spaces_no_ai.width * 0.5,
+                spaces_no_ai.y + spaces_no_ai.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::ToggleSpaces)
+        );
+        assert_eq!(
+            dock.hit_test_action(
+                tray_no_ai.x + tray_no_ai.width * 0.5,
+                tray_no_ai.y + tray_no_ai.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::ToggleTray)
+        );
+
+        // Hovering Spaces button sets "Spaces" tooltip.
+        dock.set_ai_enabled(true);
+        dock.set_hovered_at(
+            spaces_rect.x + spaces_rect.width * 0.5,
+            spaces_rect.y + spaces_rect.height * 0.5,
+            surface_rect,
+        );
+        let dock_rect = dock.dock_rect(surface_rect);
+        let (_, tip) = dock
+            .active_tooltip(surface_rect, dock_rect)
+            .expect("Spaces button should produce a tooltip");
+        assert_eq!(tip, "Spaces");
+        assert_ne!(
+            dock.hit_test_action(
+                tray_rect.x + tray_rect.width * 0.5,
+                tray_rect.y + tray_rect.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::ToggleSpaces)
+        );
+    }
+
+    #[test]
+    fn spaces_flyout_toggle_switch_new_desktop_hit_testing_and_mutual_exclusivity() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
+        dock.set_spaces(vec![
+            SpaceEntry::new("d0", "Desktop 1", 0, false),
+            SpaceEntry::new("d1", "Work", 1, true),
+            SpaceEntry::new("d2", "Media", 2, false),
+        ]);
+        dock.set_tray_items(vec![TrayEntry::new("discord", "Discord", "", 0)]);
+
+        // Opening Tray then Spaces closes Tray (mutually exclusive).
+        assert!(dock.toggle_tray());
+        assert!(dock.tray_open);
+        assert!(!dock.spaces_open);
+
+        assert!(dock.toggle_spaces());
+        assert!(dock.spaces_open);
+        assert!(!dock.tray_open);
+
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+
+        let dock_rect = dock.dock_rect(surface_rect);
+        let flyout = dock
+            .spaces_flyout_rect(surface_rect, dock_rect)
+            .expect("spaces flyout rect should be present when spaces_open");
+        assert!(flyout.y + flyout.height < dock_rect.y);
+
+        let item_rects = dock.space_item_rects(surface_rect, dock_rect);
+        assert_eq!(item_rects.len(), 3);
+        for (idx, r) in item_rects.iter().enumerate() {
+            assert_eq!(
+                dock.hit_test_action(r.x + r.width * 0.5, r.y + r.height * 0.5, surface_rect),
+                Some(DockAction::SwitchDesktop(idx))
+            );
+        }
+
+        // Hovering a desktop pill displays its desktop label tooltip.
+        dock.set_hovered_at(
+            item_rects[1].x + item_rects[1].width * 0.5,
+            item_rects[1].y + item_rects[1].height * 0.5,
+            surface_rect,
+        );
+        let (_, tip) = dock
+            .active_tooltip(surface_rect, dock_rect)
+            .expect("hovered desktop pill should show desktop label tooltip");
+        assert_eq!(tip, "Work");
+
+        // `+` New Desktop pill hit-tests to DockAction::NewDesktop and shows "New Desktop" tooltip.
+        let new_r = dock
+            .new_space_rect(surface_rect, dock_rect)
+            .expect("new desktop pill rect should exist");
+        assert_eq!(
+            dock.hit_test_action(
+                new_r.x + new_r.width * 0.5,
+                new_r.y + new_r.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::NewDesktop)
+        );
+        dock.set_hovered_at(
+            new_r.x + new_r.width * 0.5,
+            new_r.y + new_r.height * 0.5,
+            surface_rect,
+        );
+        let (_, new_tip) = dock
+            .active_tooltip(surface_rect, dock_rect)
+            .expect("hovered + button should show New Desktop tooltip");
+        assert_eq!(new_tip, "New Desktop");
+
+        // Opening Tray closes Spaces.
+        assert!(dock.toggle_tray());
+        assert!(dock.tray_open);
+        assert!(!dock.spaces_open);
+    }
+
+    #[test]
+    fn flyout_open_suppresses_overlapping_button_and_dock_row_tooltips() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
+        dock.set_spaces(vec![
+            SpaceEntry::new("d0", "Desktop 1", 0, true),
+            SpaceEntry::new("d1", "Desktop 2", 1, false),
+        ]);
+        dock.set_tray_items(vec![TrayEntry::new("discord", "Discord", "", 0)]);
+
+        let dock_rect = dock.dock_rect(surface_rect);
+        let (_, _, _, spaces_rect, tray_rect) = dock.utility_rects(dock_rect);
+
+        // Hovering Spaces when closed shows "Spaces" tooltip.
+        dock.set_hovered_at(
+            spaces_rect.x + spaces_rect.width * 0.5,
+            spaces_rect.y + spaces_rect.height * 0.5,
+            surface_rect,
+        );
+        assert_eq!(
+            dock.active_tooltip(surface_rect, dock_rect).map(|(_, t)| t),
+            Some("Spaces".to_string())
+        );
+
+        // Opening Spaces while cursor stays on the Spaces button suppresses "Spaces" tooltip.
+        assert!(dock.toggle_spaces());
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert_eq!(dock.active_tooltip(surface_rect, dock_rect), None);
+
+        // Hovering a desktop pill inside the Spaces flyout shows its tooltip cleanly ABOVE the flyout.
+        let flyout = dock
+            .spaces_flyout_rect(surface_rect, dock_rect)
+            .expect("spaces flyout rect");
+        let item_rects = dock.space_item_rects(surface_rect, dock_rect);
+        dock.set_hovered_at(
+            item_rects[0].x + item_rects[0].width * 0.5,
+            item_rects[0].y + item_rects[0].height * 0.5,
+            surface_rect,
+        );
+        let (tip_rect, tip_label) = dock
+            .active_tooltip(surface_rect, dock_rect)
+            .expect("space pill tooltip");
+        assert_eq!(tip_label, "Desktop 1");
+        assert!(tip_rect.y + tip_rect.height <= flyout.y);
+
+        // Same suppression for Tray button when Tray flyout is open.
+        assert!(dock.toggle_tray());
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+        dock.set_hovered_at(
+            tray_rect.x + tray_rect.width * 0.5,
+            tray_rect.y + tray_rect.height * 0.5,
+            surface_rect,
+        );
+        assert_eq!(dock.active_tooltip(surface_rect, dock_rect), None);
+    }
+
+    #[test]
+    fn dock_modes_auto_hide_and_smart_collapse_to_invisible_wake_band() {
         let mut dock = sample_dock();
         let surface_rect = Rect::new(0.0, 0.0, 800.0, 120.0);
 
@@ -1642,7 +2188,7 @@ mod tests {
         }
         assert!((dock.show_progress.value - 1.0).abs() < 0.05);
 
-        // Unhovering starts the 2.5s grace timer; after grace expires in AutoHide, it hides.
+        // Unhovering starts the grace timer; after grace expires in AutoHide, it hides.
         dock.set_edge_hovered(false);
         dock.set_mode(DockMode::AutoHide);
         assert!(!dock.is_hidden);
@@ -1654,34 +2200,55 @@ mod tests {
     }
 
     #[test]
-    fn dock_renders_full_capsule_tray_flyout_and_hidden_handle_strip_without_error() {
-        let surface = match NativeSurface::new("HimeDockTest", -2000, -2000, 800, 120) {
+    fn dock_renders_liquid_glass_spaces_tray_and_invisible_auto_hide_without_error() {
+        let surface = match NativeSurface::new("HimeDockTest", -2000, -2000, 1080, 136) {
             Ok(s) => s,
             Err(_) => return,
         };
         let mut dock = sample_dock();
+        dock.set_spaces(vec![
+            SpaceEntry::new("d0", "Desktop 1", 0, true),
+            SpaceEntry::new("d1", "Desktop 2", 1, false),
+        ]);
         dock.set_tray_items(vec![TrayEntry::new("discord", "Discord", "", 0)]);
-        dock.toggle_tray();
+        dock.toggle_spaces();
         dock.set_hovered(Some(1));
         for _ in 0..60 {
             dock.tick(1.0 / 60.0);
         }
 
         surface.begin_draw();
-        dock.render(&surface).expect("DockBar expanded + tray + tooltip render");
-        surface.end_draw_and_present().expect("DockBar present");
+        dock.render(&surface)
+            .expect("DockBar Liquid Glass + Spaces flyout + tooltip render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar Spaces present");
+
+        dock.toggle_tray();
+        for _ in 0..60 {
+            dock.tick(1.0 / 60.0);
+        }
+        surface.begin_draw();
+        dock.render(&surface)
+            .expect("DockBar Liquid Glass + Tray flyout render");
+        surface.end_draw_and_present().expect("DockBar Tray present");
 
         dock.clear_hover();
         dock.set_tray_open(false);
+        dock.set_spaces_open(false);
         dock.set_mode(DockMode::AutoHide);
         for _ in 0..240 {
             dock.tick(1.0 / 60.0);
         }
         assert!(dock.is_hidden);
+        assert_eq!(dock.show_progress.value, 0.0);
 
         surface.begin_draw();
-        dock.render(&surface).expect("DockBar 80x4 handle strip render");
-        surface.end_draw_and_present().expect("DockBar strip present");
+        dock.render(&surface)
+            .expect("DockBar invisible AutoHide render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar invisible AutoHide present");
     }
 
     #[test]
@@ -1729,12 +2296,14 @@ mod tests {
             dock.items()[1].hover_scale.value
         );
         assert!(
-            dock.items()[0].hover_scale.value > 1.25 && dock.items()[0].hover_scale.value < dock.items()[1].hover_scale.value,
+            dock.items()[0].hover_scale.value > 1.25
+                && dock.items()[0].hover_scale.value < dock.items()[1].hover_scale.value,
             "left neighbor should follow cosine bell curve, got {}",
             dock.items()[0].hover_scale.value
         );
         assert!(
-            dock.items()[2].hover_scale.value > 1.15 && dock.items()[2].hover_scale.value < dock.items()[1].hover_scale.value,
+            dock.items()[2].hover_scale.value > 1.15
+                && dock.items()[2].hover_scale.value < dock.items()[1].hover_scale.value,
             "right neighbor should follow cosine bell curve, got {}",
             dock.items()[2].hover_scale.value
         );
@@ -1825,7 +2394,7 @@ mod tests {
         assert_eq!(dock.hide_grace_timer(), 0.0);
         assert!(dock.is_animating());
 
-        // Tick ~0.67s: show_progress settles to 0.0, dock_rect slides off-bottom, 80x4 strip active
+        // Tick ~0.67s: show_progress settles to 0.0 via Spring::RECEDE, dock_rect slides off-bottom
         for _ in 0..40 {
             dock.tick(1.0 / 60.0);
         }
@@ -1840,7 +2409,7 @@ mod tests {
         let wake = dock.wake_hit_rect(surface_rect);
         assert!(point_in_rect(strip.x + 40.0, strip.y + 2.0, wake));
 
-        // 2. Wake on bottom-edge hover (over handle strip)
+        // 2. Wake on bottom-edge hover
         dock.set_hovered_at(strip.x + 40.0, strip.y + 2.0, surface_rect);
         assert!(!dock.is_hidden);
         assert!(dock.is_edge_hovered);
@@ -1866,17 +2435,19 @@ mod tests {
     }
 
     #[test]
-    fn force_hide_now_collapses_auto_hide_dock_immediately_without_grace_delay() {
+    fn force_hide_now_collapses_auto_hide_dock_and_flyouts_immediately_without_grace_delay() {
         let mut dock = sample_dock();
         dock.set_mode(DockMode::AutoHide);
         dock.set_edge_hovered(true);
-        dock.set_tray_open(true);
+        dock.set_spaces_open(true);
         assert!(!dock.is_hidden);
+        assert!(dock.spaces_open);
         assert!(dock.hide_grace_timer() > 0.0);
 
         dock.force_hide_now();
         assert!(dock.is_hidden);
         assert!(!dock.tray_open);
+        assert!(!dock.spaces_open);
         assert_eq!(dock.hide_grace_timer(), 0.0);
     }
 

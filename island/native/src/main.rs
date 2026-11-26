@@ -62,7 +62,7 @@ use hime_island_native::ai_drawer::{
 use hime_island_native::d2d::{
     self, HimeExpression, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind, WM_SURFACE_EVENT,
 };
-use hime_island_native::dock::{DockAction, DockBar, DockItem, DockMode, TrayEntry};
+use hime_island_native::dock::{DockAction, DockBar, DockItem, DockMode, SpaceEntry, TrayEntry};
 use hime_island_native::hotkey::{self, HotkeyAction, HotkeyManager};
 use hime_island_native::ipc_client::{
     AiProfileUpsertParams, ApprovalResolution, ChatTurnParams, ChatTurnResult,
@@ -100,6 +100,7 @@ const WM_EXTRA_SURFACE_EVENT: u32 = WM_APP + 3;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM_ID: usize = 1;
 const ANIM_INTERVAL_ACTIVE_MS: u32 = 16;
+const ANIM_INTERVAL_EDGE_POLL_MS: u32 = 50;
 const ANIM_INTERVAL_IDLE_MS: u32 = 250;
 
 const OVERLAY_DIP_WIDTH: f32 = 80.0;
@@ -241,6 +242,7 @@ enum IpcBgResult {
     WifiScan(Vec<WifiNetworkInfo>),
     WifiConnect(String, Result<(), String>),
     TrayEntries(Vec<TrayEntry>),
+    VirtualDesktops(Vec<os_shell::VirtualDesktopInfo>),
     MediaTimeline {
         title: String,
         artist: String,
@@ -600,6 +602,9 @@ enum OsCommand {
     ConnectWifi(String),
     Probe9Router,
     ScanTrayEntries,
+    RefreshVirtualDesktops,
+    SwitchVirtualDesktop(usize),
+    CreateVirtualDesktop,
 }
 
 struct OsWorker {
@@ -731,6 +736,22 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                 OsCommand::ScanTrayEntries => {
                     let entries = collect_live_tray_entries();
                     let _ = result_tx.send(IpcBgResult::TrayEntries(entries));
+                }
+                OsCommand::RefreshVirtualDesktops => {
+                    let spaces = os_shell::list_virtual_desktops();
+                    let _ = result_tx.send(IpcBgResult::VirtualDesktops(spaces));
+                }
+                OsCommand::SwitchVirtualDesktop(index) => {
+                    let _ = os_shell::switch_virtual_desktop(index);
+                    std::thread::sleep(Duration::from_millis(120));
+                    let spaces = os_shell::list_virtual_desktops();
+                    let _ = result_tx.send(IpcBgResult::VirtualDesktops(spaces));
+                }
+                OsCommand::CreateVirtualDesktop => {
+                    let _ = os_shell::create_virtual_desktop();
+                    std::thread::sleep(Duration::from_millis(150));
+                    let spaces = os_shell::list_virtual_desktops();
+                    let _ = result_tx.send(IpcBgResult::VirtualDesktops(spaces));
                 }
                 OsCommand::SetVolume { .. } | OsCommand::SetBrightness(_) => {}
             }
@@ -924,7 +945,7 @@ impl AppShell {
         subclass_surface(notch_surface.hwnd());
         notch_surface.set_click_through(true);
         notch_surface.show();
-        os_shell::enable_drag_drop(notch_surface.hwnd(), true);
+        os_shell::enable_file_drop(notch_surface.hwnd(), true);
 
         let (dx, dy, dock_w, dock_h) = dock_surface_bounds(screen, 1.0);
         let mut dock_surface = NativeSurface::new("HimeDock", dx, dy, dock_w, dock_h)?;
@@ -1052,6 +1073,7 @@ impl AppShell {
         shell.apply_native_settings(&native_settings, false);
         shell.sync_shelf_to_views();
         shell.os_worker.send(OsCommand::ScanTrayEntries);
+        shell.os_worker.send(OsCommand::RefreshVirtualDesktops);
         if native_settings.hime_ai_enabled {
             shell.send_ipc(IpcCommand::BootstrapWorkspace);
         }
@@ -1149,7 +1171,7 @@ impl AppShell {
         }
         let hwnd = drawer_surface.hwnd();
         subclass_surface(hwnd);
-        os_shell::enable_drag_drop(hwnd, true);
+        os_shell::enable_file_drop(hwnd, true);
         self.drawer_surface = Some(drawer_surface);
         self.dirty_drawer = true;
         Some(hwnd)
@@ -1322,14 +1344,20 @@ impl AppShell {
     fn sync_overlay_visibility(&mut self) {
         if self.overlays.volume.is_visible() {
             self.overlay_left_surface.show();
-            self.overlay_left_surface.set_click_through(false);
+            let interactive = self.overlays.volume.is_expanded()
+                || self.overlays.volume.is_hovered
+                || self.overlays.volume.is_dragging;
+            self.overlay_left_surface.set_click_through(!interactive);
         } else {
             self.overlay_left_surface.set_click_through(true);
             self.overlay_left_surface.hide();
         }
         if self.overlays.brightness.is_visible() {
             self.overlay_right_surface.show();
-            self.overlay_right_surface.set_click_through(false);
+            let interactive = self.overlays.brightness.is_expanded()
+                || self.overlays.brightness.is_hovered
+                || self.overlays.brightness.is_dragging;
+            self.overlay_right_surface.set_click_through(!interactive);
         } else {
             self.overlay_right_surface.set_click_through(true);
             self.overlay_right_surface.hide();
@@ -1542,7 +1570,15 @@ impl AppShell {
     fn update_surface_click_through(&mut self) {
         let primary = os_shell::primary_screen_bounds();
         if let Some((cx, cy)) = os_shell::cursor_position() {
-            // Notch click-through & edge-wake
+            let left_btn_down =
+                unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 };
+            let external_file_drag = left_btn_down
+                && !self.dragging_notch
+                && !self.dragging_notch_slider
+                && !self.overlays.volume.is_dragging
+                && !self.overlays.brightness.is_dragging;
+
+            // Notch click-through, edge-wake & drag-and-drop wake
             let notch_scale = (self.notch_surface.dpi() / 96.0).max(0.5);
             let (nx, ny, _, _) = notch_surface_bounds(self.notch.edge, primary, notch_scale);
             let (nw_dip, nh_dip) = self.notch_surface.dip_size();
@@ -1550,16 +1586,28 @@ impl AppShell {
             let local_ny = (cy - ny) as f32 / notch_scale;
             let over_notch =
                 os_shell::hit_test_notch(local_nx, local_ny, &self.notch, nw_dip, nh_dip);
+            let wake_margin = if external_file_drag {
+                44.0
+            } else {
+                os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX
+            };
             let near_wake = os_shell::is_notch_edge_hovered(
                 cx as f32,
                 cy as f32,
                 &self.notch,
                 primary,
-                os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX,
+                wake_margin,
             );
+            let drag_near_notch = external_file_drag
+                && is_cursor_in_notch_drop_band(cx as f32, cy as f32, &self.notch, primary);
             let prev_notch_hidden = self.notch.is_hidden;
+            let prev_drag_hover = self.notch.drag_hover;
+            let dragging_over_notch =
+                external_file_drag && (over_notch || near_wake || drag_near_notch);
+            self.notch.set_drag_hover(dragging_over_notch);
             let keep_notch_visible = over_notch
                 || near_wake
+                || drag_near_notch
                 || self.notch.is_expanded
                 || self.dragging_notch
                 || self.dragging_notch_slider
@@ -1568,7 +1616,7 @@ impl AppShell {
 
             if keep_notch_visible {
                 self.notch_leave_at = None;
-                if (near_wake || over_notch) && self.notch.is_hidden {
+                if (near_wake || over_notch || drag_near_notch) && self.notch.is_hidden {
                     self.notch.set_hidden(false);
                 }
             } else if self.native_settings.notch_mode == "peek" {
@@ -1583,11 +1631,20 @@ impl AppShell {
             } else {
                 self.notch_leave_at = None;
             }
-            if self.notch.is_hidden != prev_notch_hidden {
+            if self.notch.is_hidden != prev_notch_hidden || self.notch.drag_hover != prev_drag_hover
+            {
+                self.dirty_notch = true;
+            }
+            if !over_notch && self.notch.pointer_pos.is_some() {
+                self.notch.set_pointer_hover(None);
                 self.dirty_notch = true;
             }
             self.notch_surface.set_click_through(
-                !(over_notch || near_wake || self.dragging_notch || self.dragging_notch_slider),
+                !(over_notch
+                    || near_wake
+                    || drag_near_notch
+                    || self.dragging_notch
+                    || self.dragging_notch_slider),
             );
 
             // Dock click-through, overlap detection & bottom-edge wake
@@ -1606,18 +1663,29 @@ impl AppShell {
                 self.dock.set_overlapped(overlapped);
 
                 let wake = self.dock.wake_hit_rect(surf_rect);
-                let over_wake = os_shell::is_point_in_rect(local_dx, local_dy, wake);
+                let over_wake = os_shell::is_dock_edge_hovered(
+                    cx as f32,
+                    cy as f32,
+                    &self.dock,
+                    primary,
+                    os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX,
+                ) || os_shell::is_point_in_rect(local_dx, local_dy, wake);
 
                 if self.dock.is_hidden && self.dock.show_progress.value <= 0.2 {
                     self.dock.set_edge_hovered(over_wake);
-                    self.dock_surface.set_click_through(!over_wake);
+                    self.dock_surface.set_click_through(true);
                 } else {
                     let dock_rect = self.dock.dock_rect(surf_rect);
                     let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
-                    let over_flyout = self
+                    let over_tray_flyout = self
                         .dock
                         .tray_flyout_rect(surf_rect, dock_rect)
                         .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                    let over_spaces_flyout = self
+                        .dock
+                        .spaces_flyout_rect(surf_rect, dock_rect)
+                        .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                    let over_flyout = over_tray_flyout || over_spaces_flyout;
                     let over_any = over_dock || over_flyout;
                     let keep_awake =
                         over_any || (self.dock.mode != DockMode::Fixed && over_wake);
@@ -1637,14 +1705,14 @@ impl AppShell {
                 self.dock_surface.set_click_through(true);
             }
 
-            // Left & Right Edge Overlay hover guard (safety net in case cursor leaves quickly)
-            self.sync_overlay_hover_cursor(true, cx, cy, primary);
-            self.sync_overlay_hover_cursor(false, cx, cy, primary);
+            // Left & Right Edge Overlay edge-wake + hover guard
+            let over_left_overlay = self.sync_overlay_hover_cursor(true, cx, cy, primary);
+            let over_right_overlay = self.sync_overlay_hover_cursor(false, cx, cy, primary);
 
-            // Click-outside immediate collapse for awake Notch & Dock
-            let mouse_down = unsafe {
-                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
-            };
+            // Click-outside immediate collapse for awake Notch, Dock & Edge Overlays
+            let right_btn_down =
+                unsafe { (GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000) != 0 };
+            let mouse_down = left_btn_down || right_btn_down;
             let clicked_now = mouse_down && !self.was_mouse_down;
             self.was_mouse_down = mouse_down;
             if clicked_now {
@@ -1690,14 +1758,23 @@ impl AppShell {
                         let wake = self.dock.wake_hit_rect(surf_rect);
                         let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
                         let over_wake = os_shell::is_point_in_rect(local_dx, local_dy, wake);
-                        let over_flyout = self
+                        let over_tray_flyout = self
                             .dock
                             .tray_flyout_rect(surf_rect, dock_rect)
                             .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                        let over_spaces_flyout = self
+                            .dock
+                            .spaces_flyout_rect(surf_rect, dock_rect)
+                            .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                        let over_flyout = over_tray_flyout || over_spaces_flyout;
 
                         if !over_dock && !over_flyout && !over_wake {
                             if self.dock.tray_open {
                                 self.dock.set_tray_open(false);
+                                self.dirty_dock = true;
+                            }
+                            if self.dock.spaces_open {
+                                self.dock.set_spaces_open(false);
                                 self.dirty_dock = true;
                             }
                             if self.dock.mode != DockMode::Fixed && !self.dock.is_hidden {
@@ -1706,6 +1783,24 @@ impl AppShell {
                                 self.dock_surface.set_click_through(true);
                             }
                         }
+                    }
+
+                    if !over_left_overlay
+                        && !self.overlays.volume.is_dragging
+                        && (self.overlays.volume.is_expanded() || self.overlays.volume.is_hovered)
+                    {
+                        self.overlays.volume.hide();
+                        self.dirty_overlay_left = true;
+                        self.overlay_left_surface.set_click_through(true);
+                    }
+                    if !over_right_overlay
+                        && !self.overlays.brightness.is_dragging
+                        && (self.overlays.brightness.is_expanded()
+                            || self.overlays.brightness.is_hovered)
+                    {
+                        self.overlays.brightness.hide();
+                        self.dirty_overlay_right = true;
+                        self.overlay_right_surface.set_click_through(true);
                     }
                 }
             }
@@ -1725,7 +1820,7 @@ impl AppShell {
         cx: i32,
         cy: i32,
         screen: os_shell::ScreenBounds,
-    ) {
+    ) -> bool {
         let (scale, sw, sh) = {
             let surface = if is_left {
                 &self.overlay_left_surface
@@ -1743,15 +1838,26 @@ impl AppShell {
         let surf_rect = Rect::new(0.0, 0.0, sw, sh);
         let lx = (cx - ox) as f32 / scale;
         let ly = (cy - oy) as f32 / scale;
-        let hud = if is_left {
-            &mut self.overlays.volume
+        let (hud, surf) = if is_left {
+            (&mut self.overlays.volume, &self.overlay_left_surface)
         } else {
-            &mut self.overlays.brightness
+            (&mut self.overlays.brightness, &self.overlay_right_surface)
         };
-        if !hud.is_visible() {
-            return;
+        if !hud.enabled {
+            surf.set_click_through(true);
+            return false;
         }
-        let over = hud.hit_test_pill(lx, ly, surf_rect);
+        let over_pill = hud.is_expanded() && hud.hit_test_pill(lx, ly, surf_rect);
+        let over_wake_rect = os_shell::is_point_in_rect(lx, ly, hud.wake_hit_rect(surf_rect));
+        let over_edge = os_shell::is_overlay_edge_hovered(
+            cx as f32,
+            cy as f32,
+            is_left,
+            screen,
+            os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX,
+            OVERLAY_DIP_HEIGHT * scale,
+        );
+        let over = over_pill || over_wake_rect || over_edge;
         if over != hud.is_hovered && (over || !hud.is_dragging) {
             hud.set_hovered(over);
             if is_left {
@@ -1760,11 +1866,14 @@ impl AppShell {
                 self.dirty_overlay_right = true;
             }
         }
+        let interactive = hud.is_expanded() || hud.is_hovered || hud.is_dragging;
+        surf.set_click_through(!interactive);
+        over
     }
 
     fn is_foreground_overlapping_dock(&self, screen: os_shell::ScreenBounds) -> bool {
         let fg = unsafe { GetForegroundWindow() };
-        if fg.0.is_null() || self.is_own_hwnd(fg) {
+        if fg.0.is_null() || self.is_own_hwnd(fg) || os_shell::is_desktop_shell_hwnd(fg) {
             return false;
         }
         unsafe {
@@ -1786,7 +1895,7 @@ impl AppShell {
 
     fn is_foreground_overlapping_notch(&self, screen: os_shell::ScreenBounds) -> bool {
         let fg = unsafe { GetForegroundWindow() };
-        if fg.0.is_null() || self.is_own_hwnd(fg) {
+        if fg.0.is_null() || self.is_own_hwnd(fg) || os_shell::is_desktop_shell_hwnd(fg) {
             return false;
         }
         unsafe {
@@ -1888,9 +1997,11 @@ impl AppShell {
             SurfaceEventKind::LeftButtonDown { x, y } => {
                 let lx = x / scale;
                 let ly = y / scale;
+                self.notch.set_pointer_hover(Some((lx, ly)));
+                self.notch.set_pointer_pressed(true);
+                render_now = true;
                 if self.notch.is_hidden {
                     self.notch.set_hidden(false);
-                    render_now = true;
                 }
                 if self.notch.is_expanded {
                     if let Some(act @ (NotchAction::SetVolume(_)
@@ -1902,7 +2013,6 @@ impl AppShell {
                             let _ = SetCapture(self.notch_surface.hwnd());
                         }
                         self.execute_notch_action(act, ctrl_hwnd);
-                        render_now = true;
                     } else {
                         self.dragging_notch = true;
                         self.drag_moved = false;
@@ -1917,6 +2027,7 @@ impl AppShell {
             SurfaceEventKind::MouseMove { x, y } => {
                 let lx = x / scale;
                 let ly = y / scale;
+                self.notch.set_pointer_hover(Some((lx, ly)));
                 if self.notch.is_hidden {
                     self.notch.set_hidden(false);
                     render_now = true;
@@ -1940,9 +2051,12 @@ impl AppShell {
                             render_now = true;
                         }
                     }
+                } else if self.notch.is_expanded {
+                    render_now = true;
                 }
             }
             SurfaceEventKind::LeftButtonUp { x, y } => {
+                self.notch.set_pointer_pressed(false);
                 if self.dragging_notch_slider {
                     self.dragging_notch_slider = false;
                     unsafe {
@@ -1971,9 +2085,8 @@ impl AppShell {
                 if !added.is_empty() {
                     let _ = self.shelf.save();
                     self.sync_shelf_to_views();
-                    self.notch
-                        .set_ncm_center_alert(Some(format!("+{} file(s)", added.len())));
-                    self.notch.set_panel(NotchPanel::Shelf);
+                    self.notch.handle_files_dropped(added.len());
+                    self.notch_surface.set_click_through(false);
                     render_now = true;
                 }
             }
@@ -1988,22 +2101,35 @@ impl AppShell {
     }
 
     fn handle_notch_extra_event(&mut self, kind: ExtraSurfaceEventKind, ctrl_hwnd: HWND) {
-        if let ExtraSurfaceEventKind::MouseWheel { delta_steps, .. } = kind {
-            if self.notch.is_expanded && delta_steps.abs() > 0.01 {
-                let shift_held = unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
-                if shift_held || self.notch.active_panel != NotchPanel::CommandCenter {
-                    let act = if delta_steps > 0.0 {
-                        NotchAction::PrevPanel
-                    } else {
-                        NotchAction::NextPanel
-                    };
-                    self.execute_notch_action(act, ctrl_hwnd);
-                    self.dirty_notch = true;
-                    self.update_surface_click_through();
-                    self.render_all();
-                    self.ensure_fast_timer(ctrl_hwnd);
+        match kind {
+            ExtraSurfaceEventKind::MouseLeave => {
+                self.notch.set_pointer_hover(None);
+                self.notch.set_pointer_pressed(false);
+                self.notch.set_drag_hover(false);
+                self.dirty_notch = true;
+                self.update_surface_click_through();
+                self.render_all();
+                self.ensure_fast_timer(ctrl_hwnd);
+            }
+            ExtraSurfaceEventKind::MouseWheel { delta_steps, .. } => {
+                if self.notch.is_expanded && delta_steps.abs() > 0.01 {
+                    let shift_held =
+                        unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
+                    if shift_held || self.notch.active_panel != NotchPanel::CommandCenter {
+                        let act = if delta_steps > 0.0 {
+                            NotchAction::PrevPanel
+                        } else {
+                            NotchAction::NextPanel
+                        };
+                        self.execute_notch_action(act, ctrl_hwnd);
+                        self.dirty_notch = true;
+                        self.update_surface_click_through();
+                        self.render_all();
+                        self.ensure_fast_timer(ctrl_hwnd);
+                    }
                 }
             }
+            ExtraSurfaceEventKind::RightButtonUp { .. } => {}
         }
     }
 
@@ -2403,8 +2529,22 @@ impl AppShell {
             DockAction::ToggleAiDrawer => {
                 self.handle_action(HotkeyAction::ToggleAssistant, ctrl_hwnd);
             }
-            DockAction::ToggleSettings => {
-                self.toggle_settings(ctrl_hwnd);
+            DockAction::ToggleSpaces => {
+                let opened = self.dock.toggle_spaces();
+                if opened {
+                    self.os_worker.send(OsCommand::RefreshVirtualDesktops);
+                }
+                self.dirty_dock = true;
+            }
+            DockAction::SwitchDesktop(idx) => {
+                self.dock.set_spaces_open(false);
+                self.os_worker.send(OsCommand::SwitchVirtualDesktop(idx));
+                self.dirty_dock = true;
+            }
+            DockAction::NewDesktop => {
+                self.dock.set_spaces_open(false);
+                self.os_worker.send(OsCommand::CreateVirtualDesktop);
+                self.dirty_dock = true;
             }
             DockAction::ToggleTray => {
                 if self.dock.tray_items().is_empty() {
@@ -2535,6 +2675,7 @@ impl AppShell {
             } else {
                 self.dirty_overlay_right = true;
             }
+            self.sync_overlay_visibility();
             self.render_all();
         }
         self.ensure_fast_timer(ctrl_hwnd);
@@ -2589,6 +2730,7 @@ impl AppShell {
             } else {
                 self.dirty_overlay_right = true;
             }
+            self.sync_overlay_visibility();
             self.render_all();
         }
         self.ensure_fast_timer(ctrl_hwnd);
@@ -2793,18 +2935,27 @@ impl AppShell {
             return;
         };
         match kind {
-            SurfaceEventKind::LeftButtonDown { .. } => {
+            SurfaceEventKind::LeftButtonDown { x, y } => {
                 if self.ai_drawer.visible {
                     os_shell::focus_window(surf_hwnd);
                 }
+                self.ai_drawer.set_pointer_hover(Some((x / scale, y / scale)));
+                self.ai_drawer.set_pointer_pressed(true);
+                self.dirty_drawer = true;
+                self.render_all();
             }
             SurfaceEventKind::LeftButtonUp { x, y } => {
+                self.ai_drawer.set_pointer_pressed(false);
                 if let Some(action) = self.ai_drawer.hit_test(x / scale, y / scale) {
                     self.dirty_drawer = true;
                     self.apply_drawer_action(action, ctrl_hwnd);
                     self.render_all();
-                } else if self.ai_drawer.visible {
-                    os_shell::focus_window(surf_hwnd);
+                } else {
+                    if self.ai_drawer.visible {
+                        os_shell::focus_window(surf_hwnd);
+                    }
+                    self.dirty_drawer = true;
+                    self.render_all();
                 }
             }
             SurfaceEventKind::DropFiles { wparam } => {
@@ -2817,7 +2968,12 @@ impl AppShell {
                     self.ensure_fast_timer(ctrl_hwnd);
                 }
             }
-            SurfaceEventKind::MouseMove { .. } => {}
+            SurfaceEventKind::MouseMove { x, y } => {
+                if self.ai_drawer.visible {
+                    self.ai_drawer.set_pointer_hover(Some((x / scale, y / scale)));
+                    self.dirty_drawer = true;
+                }
+            }
         }
     }
 
@@ -3303,6 +3459,16 @@ impl AppShell {
                     }
                     self.dirty_dock = true;
                 }
+                IpcBgResult::VirtualDesktops(spaces) => {
+                    let mapped: Vec<SpaceEntry> = spaces
+                        .into_iter()
+                        .map(|s| SpaceEntry::new(s.id, s.name, s.index, s.active))
+                        .collect();
+                    if self.dock.spaces() != mapped.as_slice() {
+                        self.dock.set_spaces(mapped);
+                        self.dirty_dock = true;
+                    }
+                }
                 IpcBgResult::MediaTimeline {
                     title,
                     artist,
@@ -3618,6 +3784,9 @@ impl AppShell {
         if self.tick_count > 0 && self.tick_count % 20 == 0 {
             self.os_worker.send(OsCommand::ScanTrayEntries);
         }
+        if self.dock.visible && self.tick_count > 0 && self.tick_count % 25 == 0 {
+            self.os_worker.send(OsCommand::RefreshVirtualDesktops);
+        }
 
         // Smoothly advance LRC lyrics position while playing & periodically re-sync SMTC timeline
         let is_playing = self.notch.music.as_ref().is_some_and(|m| m.is_playing);
@@ -3690,7 +3859,10 @@ impl AppShell {
         let watch_outside_click = (self.native_settings.notch_mode != "fixed" && !self.notch.is_hidden)
             || self.notch.is_expanded
             || (self.dock.visible && self.dock.mode != DockMode::Fixed && !self.dock.is_hidden)
-            || self.dock.tray_open;
+            || self.dock.tray_open
+            || self.dock.spaces_open
+            || self.overlays.volume.is_expanded()
+            || self.overlays.brightness.is_expanded();
 
         let animating = notch_anim
             || dock_anim
@@ -3728,7 +3900,7 @@ impl AppShell {
 
         if animating {
             self.ensure_fast_timer(ctrl_hwnd);
-        } else if self.fast_timer_active {
+        } else {
             self.set_idle_timer(ctrl_hwnd);
         }
     }
@@ -3792,9 +3964,21 @@ impl AppShell {
         }
     }
 
+    fn has_edge_wake_targets(&self) -> bool {
+        self.native_settings.notch_mode != "fixed"
+            || (self.dock.visible && self.dock.mode != DockMode::Fixed)
+            || self.overlays.volume.enabled
+            || self.overlays.brightness.enabled
+    }
+
     fn set_idle_timer(&mut self, ctrl_hwnd: HWND) {
+        let interval = if self.has_edge_wake_targets() {
+            ANIM_INTERVAL_EDGE_POLL_MS
+        } else {
+            ANIM_INTERVAL_IDLE_MS
+        };
         unsafe {
-            let _ = SetTimer(Some(ctrl_hwnd), TIMER_ANIM_ID, ANIM_INTERVAL_IDLE_MS, None);
+            let _ = SetTimer(Some(ctrl_hwnd), TIMER_ANIM_ID, interval, None);
         }
         self.fast_timer_active = false;
     }
@@ -3818,19 +4002,23 @@ impl AppShell {
             self.dirty_notch = false;
         }
 
-        if self.dock.visible && self.dirty_dock {
+        if (self.dock.visible || self.dock.is_animating()) && self.dirty_dock {
             self.render_surface("HimeDock", &self.dock_surface, |s| self.dock.render(s));
             self.dirty_dock = false;
         }
 
-        if self.overlays.volume.is_visible() && self.dirty_overlay_left {
+        if (self.overlays.volume.enabled || self.overlays.volume.is_visible())
+            && self.dirty_overlay_left
+        {
             self.render_surface("HimeOverlayLeft", &self.overlay_left_surface, |s| {
                 self.overlays.volume.render(s)
             });
             self.dirty_overlay_left = false;
         }
 
-        if self.overlays.brightness.is_visible() && self.dirty_overlay_right {
+        if (self.overlays.brightness.enabled || self.overlays.brightness.is_visible())
+            && self.dirty_overlay_right
+        {
             self.render_surface("HimeOverlayRight", &self.overlay_right_surface, |s| {
                 self.overlays.brightness.render(s)
             });
@@ -4585,6 +4773,36 @@ fn right_overlay_bounds(screen: os_shell::ScreenBounds, scale: f32) -> (i32, i32
     )
 }
 
+fn is_cursor_in_notch_drop_band(
+    cursor_x: f32,
+    cursor_y: f32,
+    notch: &NotchView,
+    screen: os_shell::ScreenBounds,
+) -> bool {
+    let rx = cursor_x - screen.x as f32;
+    let ry = cursor_y - screen.y as f32;
+    let sw = screen.width.max(1) as f32;
+    let sh = screen.height.max(1) as f32;
+    let rect = notch.computed_rect(sw, sh);
+    match notch.edge {
+        NotchEdge::Top => {
+            let span = rect.width.max(320.0);
+            let left = (sw - span) * 0.5;
+            rx >= left && rx <= left + span && ry >= 0.0 && ry <= 48.0
+        }
+        NotchEdge::Left => {
+            let span = rect.height.max(260.0);
+            let top = (sh - span) * 0.5;
+            rx >= 0.0 && rx <= 48.0 && ry >= top && ry <= top + span
+        }
+        NotchEdge::Right => {
+            let span = rect.height.max(260.0);
+            let top = (sh - span) * 0.5;
+            rx >= (sw - 48.0).max(0.0) && rx <= sw && ry >= top && ry <= top + span
+        }
+    }
+}
+
 fn notch_surface_bounds(
     edge: NotchEdge,
     screen: os_shell::ScreenBounds,
@@ -4723,6 +4941,8 @@ fn main() {
     let start_fast = shell.dock.is_animating() || shell.notch.is_hidden;
     if start_fast {
         shell.ensure_fast_timer(ctrl_hwnd);
+    } else {
+        shell.set_idle_timer(ctrl_hwnd);
     }
     let quit_raw_handle = shell.quit_event.map(|h| h.0 as isize);
     APP_SHELL.with(|cell| *cell.borrow_mut() = Some(shell));
@@ -4752,9 +4972,6 @@ fn main() {
     const QS_ALLINPUT: u32 = 0x04FF;
 
     unsafe {
-        if !start_fast {
-            let _ = SetTimer(Some(ctrl_hwnd), TIMER_ANIM_ID, ANIM_INTERVAL_IDLE_MS, None);
-        }
         let mut msg = MSG::default();
         if let Some(evt_raw) = quit_raw_handle {
             let mut should_quit = false;
@@ -5257,5 +5474,22 @@ mod tests {
         assert_eq!(docs.completed_jobs, 1);
         assert_eq!(docs.failed_jobs, 0);
         assert_eq!(docs.latest_job_label.as_deref(), Some("merged.pdf (completed)"));
+    }
+
+    #[test]
+    fn notch_drop_band_targets_anchored_edge_without_hijacking_corners() {
+        let screen = os_shell::ScreenBounds::new(0, 0, 1920, 1080);
+        let mut notch = NotchView::new(NotchEdge::Top);
+        assert!(is_cursor_in_notch_drop_band(960.0, 24.0, &notch, screen));
+        // Top-right close button / corner should not be stolen for Notch file drop
+        assert!(!is_cursor_in_notch_drop_band(1900.0, 16.0, &notch, screen));
+
+        notch.set_edge(NotchEdge::Left);
+        assert!(is_cursor_in_notch_drop_band(20.0, 540.0, &notch, screen));
+        assert!(!is_cursor_in_notch_drop_band(20.0, 40.0, &notch, screen));
+
+        notch.set_edge(NotchEdge::Right);
+        assert!(is_cursor_in_notch_drop_band(1900.0, 540.0, &notch, screen));
+        assert!(!is_cursor_in_notch_drop_band(1820.0, 540.0, &notch, screen));
     }
 }

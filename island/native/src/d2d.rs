@@ -1,4 +1,4 @@
-//! Direct2D + DirectWrite + DirectComposition window & rendering surface.
+//! Direct2D + DirectWrite + Layered 32-bit Per-Pixel Alpha (`UpdateLayeredWindow`) surface.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -10,19 +10,20 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use windows::core::{s, w, HRESULT, PCWSTR, Result};
 use windows_numerics::Vector2 as D2D_POINT_2F;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
-    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1Layer,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory1, ID2D1Layer,
+    ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_LAYER_PARAMETERS, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
+    D2D1_LAYER_PARAMETERS, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES1,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -32,10 +33,9 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BeginPath, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, EndPath, LineTo, MoveToEx, PathToRegion, PolyBezierTo, SelectObject,
-    SetWindowRgn, ValidateRect, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HRGN,
-    RGN_OR,
+    CreateCompatibleDC, CreateDIBSection, CreateRectRgn, DeleteDC, DeleteObject, SelectObject,
+    SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -44,17 +44,19 @@ use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DrawIconEx, GetClassLongPtrW,
     GetIconInfo, GetWindowLongW, LoadCursorW, PostMessageW, RegisterClassExW, SendMessageTimeoutW,
-    SetCursor, SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, DI_NORMAL,
-    GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, HICON, HTCLIENT, HWND_TOPMOST, ICONINFO, ICON_BIG,
-    ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_GETICON,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SetCursor, SetWindowLongW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_HREDRAW,
+    CS_VREDRAW, DI_NORMAL, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, HICON, HTCLIENT, HWND_TOPMOST,
+    ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
+    WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
-    Color, ACCENT_CYAN, ACCENT_GLOW, FONT_FAMILY, STATUS_ALERT, STATUS_OFFLINE, STATUS_SUCCESS,
-    STATUS_WARNING, TRANSPARENT,
+    Color, FONT_FAMILY, GLASS_CLEAR, GLASS_ELEVATED, GLASS_HAIRLINE, GLASS_INNER_SHADE,
+    GLASS_REGULAR, GLASS_SPECULAR_BOTTOM, GLASS_SPECULAR_TOP, STATUS_LIVE_AMBER, STATUS_LIVE_GREEN,
+    STATUS_LIVE_RED, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TRANSPARENT,
 };
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("HimeIslandNativeSurface");
@@ -533,8 +535,249 @@ impl BitmapCache {
     }
 }
 
-/// Borderless topmost window backed by Direct2D `ID2D1HwndRenderTarget` (software rasterizer)
-/// + DirectWrite + `SetWindowRgn` clipping.
+/// Apple Liquid Glass material variant for [`LiquidGlassStyle`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LiquidGlassVariant {
+    /// Adaptive obsidian smoked glass (~77% alpha) for panels, menus, settings, and text-heavy surfaces.
+    Regular,
+    /// Lighter clear smoked glass (~62% alpha) for floating HUD pills and media overlays.
+    Clear,
+    /// Elevated inner card / control surface (~82% alpha).
+    Elevated,
+    /// Stained-glass tint (`Glass.regular.tint(color)`), reserved for primary actions & active tabs.
+    Tinted(Color),
+}
+
+/// Configuration for [`NativeSurface::draw_liquid_glass_panel`] and [`NativeSurface::draw_liquid_glass_edge_surface`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LiquidGlassStyle {
+    pub variant: LiquidGlassVariant,
+    pub corner_radius: f32,
+    pub shadow_blur: f32,
+    pub shadow_offset_y: f32,
+    pub shadow_opacity: f32,
+    pub hovered: bool,
+    pub pressed: bool,
+}
+
+impl LiquidGlassStyle {
+    /// Regular obsidian Liquid Glass panel with soft outer shadow.
+    pub const fn regular(corner_radius: f32) -> Self {
+        Self {
+            variant: LiquidGlassVariant::Regular,
+            corner_radius,
+            shadow_blur: 10.0,
+            shadow_offset_y: 3.0,
+            shadow_opacity: 0.28,
+            hovered: false,
+            pressed: false,
+        }
+    }
+
+    /// Clear translucent Liquid Glass pill with light shadow.
+    pub const fn clear(corner_radius: f32) -> Self {
+        Self {
+            variant: LiquidGlassVariant::Clear,
+            corner_radius,
+            shadow_blur: 8.0,
+            shadow_offset_y: 2.0,
+            shadow_opacity: 0.20,
+            hovered: false,
+            pressed: false,
+        }
+    }
+
+    /// Elevated inner card surface (no heavy outer shadow).
+    pub const fn elevated(corner_radius: f32) -> Self {
+        Self {
+            variant: LiquidGlassVariant::Elevated,
+            corner_radius,
+            shadow_blur: 0.0,
+            shadow_offset_y: 0.0,
+            shadow_opacity: 0.0,
+            hovered: false,
+            pressed: false,
+        }
+    }
+
+    /// Tinted Liquid Glass pill reserved for primary actions or selected states.
+    pub const fn tinted(color: Color, corner_radius: f32) -> Self {
+        Self {
+            variant: LiquidGlassVariant::Tinted(color),
+            corner_radius,
+            shadow_blur: 6.0,
+            shadow_offset_y: 2.0,
+            shadow_opacity: 0.18,
+            hovered: false,
+            pressed: false,
+        }
+    }
+
+    /// Compact interactive Liquid Glass button preset.
+    pub const fn button(corner_radius: f32, hovered: bool, pressed: bool) -> Self {
+        Self {
+            variant: LiquidGlassVariant::Elevated,
+            corner_radius,
+            shadow_blur: 4.0,
+            shadow_offset_y: 1.0,
+            shadow_opacity: 0.14,
+            hovered,
+            pressed,
+        }
+    }
+
+    /// Overrides the outer drop shadow parameters.
+    pub const fn with_shadow(mut self, blur: f32, offset_y: f32, opacity: f32) -> Self {
+        self.shadow_blur = blur;
+        self.shadow_offset_y = offset_y;
+        self.shadow_opacity = opacity;
+        self
+    }
+
+    /// Disables the outer drop shadow (e.g. for inner cards or tight clipped surfaces).
+    pub const fn without_shadow(mut self) -> Self {
+        self.shadow_blur = 0.0;
+        self.shadow_offset_y = 0.0;
+        self.shadow_opacity = 0.0;
+        self
+    }
+}
+
+/// Crisp SF-Symbols-style vector glyphs rendered with uniform rounded Direct2D strokes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SfSymbol {
+    CloseX,
+    ChevronLeft,
+    ChevronRight,
+    ChevronDown,
+    ChevronUp,
+    SettingsSliders,
+    Desktops,
+    TrayGrid,
+    VolumeHigh,
+    VolumeMuted,
+    BrightnessSun,
+    Play,
+    Pause,
+    SkipBack,
+    SkipForward,
+    Plus,
+    Minus,
+    Trash,
+    Check,
+    Wifi,
+    WifiOff,
+    FolderDrop,
+    Search,
+    Sparkle,
+    Pin,
+    Calendar,
+    FocusTimer,
+    ShortcutKeys,
+    Gear,
+    MusicNote,
+    Bell,
+    Bluetooth,
+    Copy,
+    SendArrow,
+    ShieldCheck,
+    ListChecklist,
+    Terminal,
+    Document,
+    Globe,
+    Refresh,
+}
+
+/// Cached 32-bit premultiplied BGRA DIB section backing an `UpdateLayeredWindow` surface.
+struct BackingDib {
+    hdc: HDC,
+    hbitmap: HBITMAP,
+    old_obj: HGDIOBJ,
+    #[cfg(test)]
+    bits: *mut u8,
+    #[cfg(test)]
+    width: u32,
+    #[cfg(test)]
+    height: u32,
+}
+
+impl BackingDib {
+    unsafe fn new(width: u32, height: u32) -> Result<Self> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let hdc = CreateCompatibleDC(None);
+        if hdc.0.is_null() {
+            return Err(windows::core::Error::from_win32());
+        }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbitmap = match CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(hbmp) => hbmp,
+            Err(err) => {
+                let _ = DeleteDC(hdc);
+                return Err(err);
+            }
+        };
+        let old_obj = SelectObject(hdc, hbitmap.into());
+        let byte_len = (width as usize) * (height as usize) * 4;
+        if !bits.is_null() {
+            std::ptr::write_bytes(bits as *mut u8, 0, byte_len);
+        }
+
+        Ok(Self {
+            hdc,
+            hbitmap,
+            old_obj,
+            #[cfg(test)]
+            bits: bits as *mut u8,
+            #[cfg(test)]
+            width,
+            #[cfg(test)]
+            height,
+        })
+    }
+
+    #[cfg(test)]
+    unsafe fn pixel_bgra(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height || self.bits.is_null() {
+            return None;
+        }
+        let idx = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
+        let ptr = self.bits.add(idx);
+        Some([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
+    }
+}
+
+impl Drop for BackingDib {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hdc.0.is_null() {
+                if !self.old_obj.0.is_null() {
+                    let _ = SelectObject(self.hdc, self.old_obj);
+                }
+                if !self.hbitmap.0.is_null() {
+                    let _ = DeleteObject(self.hbitmap.into());
+                }
+                let _ = DeleteDC(self.hdc);
+            }
+        }
+    }
+}
+
+/// Borderless topmost `WS_EX_LAYERED` window backed by Direct2D `ID2D1DCRenderTarget`,
+/// a cached 32-bit premultiplied BGRA DIB section, and `UpdateLayeredWindow(ULW_ALPHA)`.
 pub struct NativeSurface {
     hwnd: HWND,
     width: u32,
@@ -542,17 +785,19 @@ pub struct NativeSurface {
     dpi: f32,
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
-    d2d_target: ID2D1HwndRenderTarget,
+    d2d_target: ID2D1DCRenderTarget,
+    dib: RefCell<BackingDib>,
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     text_format_cache: RefCell<HashMap<(u32, u8, bool), IDWriteTextFormat>>,
     bitmap_cache: RefCell<BitmapCache>,
     cached_layer: RefCell<Option<ID2D1Layer>>,
     round_cap_stroke: RefCell<Option<ID2D1StrokeStyle>>,
     last_region_key: RefCell<Option<RegionKey>>,
+    region_is_empty: RefCell<bool>,
 }
 
 impl NativeSurface {
-    /// Creates a new borderless topmost Direct2D HWND render target window.
+    /// Creates a new borderless topmost layered Direct2D surface window with true per-pixel alpha.
     pub fn new(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
@@ -563,7 +808,7 @@ impl NativeSurface {
             register_window_class(hinstance);
 
             let wide_title = to_wide_null(title);
-            let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+            let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
             let hwnd = CreateWindowExW(
                 ex_style,
                 WINDOW_CLASS_NAME,
@@ -588,18 +833,14 @@ impl NativeSurface {
                 r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                 pixelFormat: D2D1_PIXEL_FORMAT {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
                 },
                 dpiX: dpi,
                 dpiY: dpi,
                 ..Default::default()
             };
-            let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-                hwnd,
-                pixelSize: D2D_SIZE_U { width, height },
-                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-            };
-            let d2d_target = d2d_factory.CreateHwndRenderTarget(&rt_props, &hwnd_props)?;
+            let d2d_target = d2d_factory.CreateDCRenderTarget(&rt_props)?;
+            let dib = BackingDib::new(width, height)?;
 
             Ok(Self {
                 hwnd,
@@ -609,12 +850,14 @@ impl NativeSurface {
                 d2d_factory,
                 dwrite_factory,
                 d2d_target,
+                dib: RefCell::new(dib),
                 brush_cache: RefCell::new(HashMap::new()),
                 text_format_cache: RefCell::new(HashMap::new()),
                 bitmap_cache: RefCell::new(BitmapCache::default()),
                 cached_layer: RefCell::new(None),
                 round_cap_stroke: RefCell::new(None),
                 last_region_key: RefCell::new(None),
+                region_is_empty: RefCell::new(false),
             })
         }
     }
@@ -645,7 +888,7 @@ impl NativeSurface {
         &self.dwrite_factory
     }
 
-    pub fn render_target(&self) -> &ID2D1HwndRenderTarget {
+    pub fn render_target(&self) -> &ID2D1DCRenderTarget {
         &self.d2d_target
     }
 
@@ -688,7 +931,7 @@ impl NativeSurface {
         }
     }
 
-    /// Moves and resizes the surface window and its backing DXGI swap chain.
+    /// Moves and resizes the surface window and its cached 32-bit DIB backing store.
     pub fn set_bounds(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
         let width = width.max(1);
         let height = height.max(1);
@@ -709,7 +952,7 @@ impl NativeSurface {
         Ok(())
     }
 
-    /// Resizes only the window position without reallocating the swap chain.
+    /// Resizes only the window position without reallocating the backing DIB.
     pub fn set_position(&self, x: i32, y: i32) {
         unsafe {
             let _ = SetWindowPos(
@@ -724,10 +967,12 @@ impl NativeSurface {
         }
     }
 
-    /// Clips the window to a rounded rectangle in DIPs so areas outside the pill are transparent.
+    /// Updates hit-test/empty-hide state cleanly while letting `ULW_ALPHA` handle
+    /// anti-aliased edges and soft outer drop shadows with zero black border artifacts.
     pub fn set_rounded_region(&self, rect: Rect, radius: f32) {
         let scale = (self.dpi / 96.0).max(0.5);
-        let (left, top, right, bottom, diam) = if rect.width <= 0.0 || rect.height <= 0.0 {
+        let is_empty = rect.width <= 0.0 || rect.height <= 0.0;
+        let (left, top, right, bottom, diam) = if is_empty {
             (0, 0, 0, 0, 0)
         } else {
             (
@@ -748,21 +993,11 @@ impl NativeSurface {
         if *self.last_region_key.borrow() == Some(key) {
             return;
         }
-        unsafe {
-            let rgn = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
-            if !rgn.is_invalid() {
-                // On success, the system owns `rgn` and deletes it automatically.
-                if SetWindowRgn(self.hwnd, Some(rgn), true) != 0 {
-                    *self.last_region_key.borrow_mut() = Some(key);
-                } else {
-                    let _ = DeleteObject(rgn.into());
-                }
-            }
-        }
+        self.apply_layered_region_state(is_empty, key);
     }
 
-    /// Clips the window to the union of one or more rounded rectangles in DIPs, keeping
-    /// the surface region cache in sync across transitions (e.g. expanded Dock <-> collapsed strip).
+    /// Preserves region-cache API compatibility for multi-rect surfaces while avoiding GDI
+    /// `SetWindowRgn` clipping so `ULW_ALPHA` renders clean soft shadows and magnified icons.
     pub fn set_rounded_regions(&self, rects: &[(Rect, f32)]) {
         if rects.is_empty() {
             return;
@@ -774,8 +1009,11 @@ impl NativeSurface {
 
         let scale = (self.dpi / 96.0).max(0.5);
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut coords: Vec<(i32, i32, i32, i32, i32)> = Vec::with_capacity(rects.len());
+        let mut all_empty = true;
         for &(r, rad) in rects {
+            if r.width > 0.0 && r.height > 0.0 {
+                all_empty = false;
+            }
             let left = (r.x * scale).round() as i32;
             let top = (r.y * scale).round() as i32;
             let right = ((r.x + r.width) * scale).round() as i32 + 1;
@@ -785,53 +1023,81 @@ impl NativeSurface {
                 hash ^= v as u64;
                 hash = hash.wrapping_mul(0x1000_0000_01b3);
             }
-            coords.push((left, top, right, bottom, diam));
         }
 
         let key = RegionKey::Multi(hash);
         if *self.last_region_key.borrow() == Some(key) {
             return;
         }
-
-        unsafe {
-            let mut combined: Option<HRGN> = None;
-            for (left, top, right, bottom, diam) in coords {
-                let next = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
-                if next.is_invalid() {
-                    continue;
-                }
-                match combined {
-                    None => combined = Some(next),
-                    Some(acc) => {
-                        let _ = CombineRgn(Some(acc), Some(acc), Some(next), RGN_OR);
-                        let _ = DeleteObject(next.into());
-                    }
-                }
-            }
-            if let Some(acc) = combined {
-                if SetWindowRgn(self.hwnd, Some(acc), true) != 0 {
-                    *self.last_region_key.borrow_mut() = Some(key);
-                } else {
-                    let _ = DeleteObject(acc.into());
-                }
-            }
-        }
+        self.apply_layered_region_state(all_empty, key);
     }
 
-    /// Begins a Direct2D frame and clears the HWND render target.
+    /// Binds the cached 32-bit DIB section, begins a Direct2D frame, and clears to transparent alpha.
     pub fn begin_draw(&self) {
         unsafe {
+            let hdc = self.dib.borrow().hdc;
+            let rect = RECT {
+                left: 0,
+                top: 0,
+                right: self.width as i32,
+                bottom: self.height as i32,
+            };
+            let _ = self.d2d_target.BindDC(hdc, &rect);
             self.d2d_target.BeginDraw();
             self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
         }
     }
 
-    /// Ends the Direct2D frame and presents directly to the HWND.
+    /// Ends the Direct2D frame and composites the premultiplied 32-bit DIB via `UpdateLayeredWindow`.
     pub fn end_draw_and_present(&self) -> Result<()> {
         unsafe {
             self.d2d_target.EndDraw(None, None)?;
+            let hdc = self.dib.borrow().hdc;
+            let size = SIZE {
+                cx: self.width as i32,
+                cy: self.height as i32,
+            };
+            let pt_src = POINT { x: 0, y: 0 };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            UpdateLayeredWindow(
+                self.hwnd,
+                None,
+                None,
+                Some(&size),
+                Some(hdc),
+                Some(&pt_src),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            )?;
             Ok(())
         }
+    }
+
+    fn apply_layered_region_state(&self, is_empty: bool, key: RegionKey) {
+        unsafe {
+            if is_empty {
+                if !*self.region_is_empty.borrow() {
+                    let empty_rgn = CreateRectRgn(0, 0, 0, 0);
+                    if !empty_rgn.is_invalid() {
+                        if SetWindowRgn(self.hwnd, Some(empty_rgn), true) != 0 {
+                            *self.region_is_empty.borrow_mut() = true;
+                        } else {
+                            let _ = DeleteObject(empty_rgn.into());
+                        }
+                    }
+                }
+            } else if *self.region_is_empty.borrow() {
+                let _ = SetWindowRgn(self.hwnd, None, false);
+                *self.region_is_empty.borrow_mut() = false;
+            }
+        }
+        *self.last_region_key.borrow_mut() = Some(key);
     }
 
     /// Fills a rounded rectangle with a solid color.
@@ -1035,11 +1301,11 @@ impl NativeSurface {
         let right_x = center_x + eye_spacing * 0.5;
 
         let (eye_color, glow_color) = match expression {
-            HimeExpression::Netral | HimeExpression::Fokus => (ACCENT_CYAN, ACCENT_GLOW),
-            HimeExpression::Senang => (STATUS_SUCCESS, STATUS_SUCCESS.with_alpha(0.25)),
-            HimeExpression::Khawatir => (STATUS_WARNING, STATUS_WARNING.with_alpha(0.25)),
-            HimeExpression::Offline => (STATUS_OFFLINE, STATUS_OFFLINE.with_alpha(0.15)),
-            HimeExpression::Waspada => (STATUS_ALERT, STATUS_ALERT.with_alpha(0.32)),
+            HimeExpression::Netral | HimeExpression::Fokus => (SYSTEM_BLUE, SYSTEM_BLUE_TINT),
+            HimeExpression::Senang => (STATUS_LIVE_GREEN, STATUS_LIVE_GREEN.with_alpha(0.25)),
+            HimeExpression::Khawatir => (STATUS_LIVE_AMBER, STATUS_LIVE_AMBER.with_alpha(0.25)),
+            HimeExpression::Offline => (STATUS_MUTED, STATUS_MUTED.with_alpha(0.15)),
+            HimeExpression::Waspada => (STATUS_LIVE_RED, STATUS_LIVE_RED.with_alpha(0.32)),
         };
 
         unsafe {
@@ -1179,8 +1445,273 @@ impl NativeSurface {
         }
     }
 
-    /// Clips the window via GDI `BeginPath` + `PolyBezierTo` + `PathToRegion` + `SetWindowRgn`
-    /// to match the exact `EdgeSurface` contour (including concave top/side ears).
+    /// Draws an Apple Liquid Glass `EdgeSurface` contour (concave ears + smoked glass fill +
+    /// top/diagonal specular bevel sheen + inner shadow rim + crisp 1px hairline border).
+    pub fn draw_liquid_glass_edge_surface(
+        &self,
+        rect: Rect,
+        ear_w: f32,
+        radius: f32,
+        edge: EdgeSide,
+        flares: bool,
+        style: LiquidGlassStyle,
+    ) -> Result<()> {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
+        let (base_fill, spec_top, spec_bot, border_top, border_bot) =
+            resolve_liquid_glass_colors(style);
+
+        unsafe {
+            if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
+                let shadow_rect = Rect::new(
+                    rect.x + if flares { ear_w * 0.5 } else { 0.0 },
+                    rect.y,
+                    (rect.width - if flares { ear_w } else { 0.0 }).max(4.0),
+                    rect.height,
+                );
+                self.draw_soft_shadow(
+                    shadow_rect,
+                    radius,
+                    style.shadow_blur,
+                    style.shadow_offset_y,
+                    style.shadow_opacity,
+                )?;
+            }
+
+            let geo = self.build_contour_geometry(&ops)?;
+            let fill_brush = self.create_brush(base_fill)?;
+            self.d2d_target.FillGeometry(&geo, &fill_brush, None);
+
+            // Specular diagonal bevel sheen across the glass surface
+            let sheen_stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: spec_top.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.38,
+                    color: spec_top.with_alpha_mul(0.22).to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.80,
+                    color: Color::rgba(1.0, 1.0, 1.0, 0.0).to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: spec_bot.to_d2d(),
+                },
+            ];
+            let sheen_brush = self.create_linear_gradient(
+                pt(rect.x, rect.y),
+                pt(rect.x + rect.width * 0.45, rect.y + rect.height),
+                &sheen_stops,
+            )?;
+            self.d2d_target.FillGeometry(&geo, &sheen_brush, None);
+
+            // Crisp specular 1px hairline border
+            let border_stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: border_top.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.5,
+                    color: GLASS_HAIRLINE.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: border_bot.to_d2d(),
+                },
+            ];
+            let border_brush = self.create_linear_gradient(
+                pt(rect.x, rect.y),
+                pt(rect.x + rect.width, rect.y + rect.height),
+                &border_stops,
+            )?;
+            self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+            Ok(())
+        }
+    }
+
+    /// Draws an anti-aliased soft outer drop shadow behind `rect` using concentric
+    /// premultiplied alpha rings (clean on `WS_EX_LAYERED` + `ULW_ALPHA` with zero black frames).
+    pub fn draw_soft_shadow(
+        &self,
+        rect: Rect,
+        radius: f32,
+        blur: f32,
+        offset_y: f32,
+        opacity: f32,
+    ) -> Result<()> {
+        if rect.width <= 0.0 || rect.height <= 0.0 || blur <= 0.0 || opacity <= 0.0 {
+            return Ok(());
+        }
+        let steps = 5_usize;
+        let max_blur = blur.min(24.0);
+        let base_alpha = opacity.clamp(0.0, 0.65);
+        unsafe {
+            for i in 0..steps {
+                let frac = 1.0 - (i as f32 / steps as f32);
+                let expand = max_blur * frac;
+                let falloff = (-(frac * 1.55) * (frac * 1.55)).exp();
+                let step_alpha = (base_alpha * falloff / (steps as f32 * 0.58)).clamp(0.004, 0.28);
+                let brush = self.create_brush(Color::rgba(0.0, 0.0, 0.0, step_alpha))?;
+                let sr = Rect::new(
+                    rect.x - expand,
+                    rect.y + offset_y - expand * 0.65,
+                    rect.width + expand * 2.0,
+                    rect.height + expand * 2.0,
+                );
+                let r = (radius + expand * 0.65).max(0.0);
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: sr.to_d2d(),
+                    radiusX: r,
+                    radiusY: r,
+                };
+                self.d2d_target.FillRoundedRectangle(&rr, &brush);
+            }
+            Ok(())
+        }
+    }
+
+    /// Draws an Apple Liquid Glass rounded panel (`Regular`, `Clear`, `Elevated`, or `Tinted`):
+    /// soft outer drop shadow -> translucent smoked glass fill -> diagonal/top specular rim
+    /// gradient -> soft inner shadow rim -> crisp 1px white/tinted hairline border.
+    pub fn draw_liquid_glass_panel(&self, rect: Rect, style: LiquidGlassStyle) -> Result<()> {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let radius = style
+            .corner_radius
+            .max(0.0)
+            .min(rect.width * 0.5)
+            .min(rect.height * 0.5);
+        let (base_fill, spec_top, spec_bot, border_top, border_bot) =
+            resolve_liquid_glass_colors(style);
+
+        unsafe {
+            if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
+                self.draw_soft_shadow(
+                    rect,
+                    radius,
+                    style.shadow_blur,
+                    style.shadow_offset_y,
+                    style.shadow_opacity,
+                )?;
+            }
+
+            let rr = D2D1_ROUNDED_RECT {
+                rect: rect.to_d2d(),
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let fill_brush = self.create_brush(base_fill)?;
+            self.d2d_target.FillRoundedRectangle(&rr, &fill_brush);
+
+            // Diagonal specular bevel sheen (lit edge + opposite-side Fresnel bounce)
+            let sheen_stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: spec_top.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.36,
+                    color: spec_top.with_alpha_mul(0.24).to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.78,
+                    color: Color::rgba(1.0, 1.0, 1.0, 0.0).to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: spec_bot.to_d2d(),
+                },
+            ];
+            let sheen_brush = self.create_linear_gradient(
+                pt(rect.x, rect.y),
+                pt(rect.x + rect.width * 0.45, rect.y + rect.height),
+                &sheen_stops,
+            )?;
+            self.d2d_target.FillRoundedRectangle(&rr, &sheen_brush);
+
+            // Soft inner shadow rim just inside the outer edge
+            if rect.width > 6.0 && rect.height > 6.0 {
+                let inner_rr = D2D1_ROUNDED_RECT {
+                    rect: Rect::new(
+                        rect.x + 1.5,
+                        rect.y + 1.5,
+                        rect.width - 3.0,
+                        rect.height - 3.0,
+                    )
+                    .to_d2d(),
+                    radiusX: (radius - 1.5).max(0.0),
+                    radiusY: (radius - 1.5).max(0.0),
+                };
+                let shade_alpha = if style.pressed { 0.28 } else { 0.16 };
+                let shade_brush = self.create_brush(GLASS_INNER_SHADE.with_alpha(shade_alpha))?;
+                self.d2d_target
+                    .DrawRoundedRectangle(&inner_rr, &shade_brush, 1.2, None);
+            }
+
+            // Crisp 1px specular hairline border
+            let border_rr = D2D1_ROUNDED_RECT {
+                rect: Rect::new(
+                    rect.x + 0.5,
+                    rect.y + 0.5,
+                    (rect.width - 1.0).max(0.5),
+                    (rect.height - 1.0).max(0.5),
+                )
+                .to_d2d(),
+                radiusX: (radius - 0.5).max(0.0),
+                radiusY: (radius - 0.5).max(0.0),
+            };
+            let border_stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: border_top.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.5,
+                    color: GLASS_HAIRLINE.to_d2d(),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: border_bot.to_d2d(),
+                },
+            ];
+            let border_brush = self.create_linear_gradient(
+                pt(rect.x, rect.y),
+                pt(rect.x + rect.width, rect.y + rect.height),
+                &border_stops,
+            )?;
+            self.d2d_target
+                .DrawRoundedRectangle(&border_rr, &border_brush, 1.0, None);
+            Ok(())
+        }
+    }
+
+    /// Draws a compact Liquid Glass button/pill with hover/press specular response and optional tint.
+    pub fn draw_liquid_glass_button(
+        &self,
+        rect: Rect,
+        corner_radius: f32,
+        tint: Option<Color>,
+        hovered: bool,
+        pressed: bool,
+    ) -> Result<()> {
+        let mut style = match tint {
+            Some(c) => LiquidGlassStyle::tinted(c, corner_radius).with_shadow(4.0, 1.5, 0.16),
+            None => LiquidGlassStyle::button(corner_radius, hovered, pressed),
+        };
+        style.hovered = hovered;
+        style.pressed = pressed;
+        self.draw_liquid_glass_panel(rect, style)
+    }
+
+    /// Updates hit-test/empty-hide state for `EdgeSurface` windows cleanly while letting
+    /// `ULW_ALPHA` preserve anti-aliased concave ears and soft drop shadows.
     pub fn set_edge_surface_region(
         &self,
         rect: Rect,
@@ -1194,51 +1725,8 @@ impl NativeSurface {
         if *self.last_region_key.borrow() == Some(key) {
             return;
         }
-        let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
-        let to_px = |x: f32, y: f32| POINT {
-            x: (x * scale).round() as i32,
-            y: (y * scale).round() as i32,
-        };
-        unsafe {
-            let hdc = CreateCompatibleDC(None);
-            if hdc.0.is_null() {
-                return;
-            }
-            if BeginPath(hdc).as_bool() {
-                for op in &ops {
-                    match *op {
-                        ContourOp::MoveTo(x, y) => {
-                            let p = to_px(x, y);
-                            let _ = MoveToEx(hdc, p.x, p.y, None);
-                        }
-                        ContourOp::LineTo(x, y) => {
-                            let p = to_px(x, y);
-                            let _ = LineTo(hdc, p.x, p.y);
-                        }
-                        ContourOp::CubicTo { cp1, cp2, end } => {
-                            let pts = [
-                                to_px(cp1.0, cp1.1),
-                                to_px(cp2.0, cp2.1),
-                                to_px(end.0, end.1),
-                            ];
-                            let _ = PolyBezierTo(hdc, &pts);
-                        }
-                        ContourOp::Close => {}
-                    }
-                }
-                if EndPath(hdc).as_bool() {
-                    let rgn = PathToRegion(hdc);
-                    if !rgn.is_invalid() {
-                        if SetWindowRgn(self.hwnd, Some(rgn), true) != 0 {
-                            *self.last_region_key.borrow_mut() = Some(key);
-                        } else {
-                            let _ = DeleteObject(rgn.into());
-                        }
-                    }
-                }
-            }
-            let _ = DeleteDC(hdc);
-        }
+        let is_empty = rect.width <= 0.0 || rect.height <= 0.0;
+        self.apply_layered_region_state(is_empty, key);
     }
 
     /// Draws a premultiplied BGRA bitmap inside `rect` with optional rounded corner clipping.
@@ -1400,9 +1888,9 @@ impl NativeSurface {
         let bh = h.max(6.0);
         let pct = (percent.min(100) as f32) / 100.0;
         let fill_color = if charging {
-            STATUS_SUCCESS
+            STATUS_LIVE_GREEN
         } else if percent <= 20 {
-            STATUS_WARNING
+            STATUS_LIVE_AMBER
         } else {
             Color::from_rgb_u8(0xFF, 0xFF, 0xFF)
         };
@@ -1457,7 +1945,7 @@ impl NativeSurface {
         }
         let bar_w = 2.5_f32;
         let gap = 2.0_f32;
-        let color = if is_playing { ACCENT_CYAN } else { STATUS_OFFLINE };
+        let color = if is_playing { SYSTEM_BLUE } else { STATUS_MUTED };
         unsafe {
             let brush = self.create_brush(color)?;
             for (i, &level) in bars.iter().enumerate() {
@@ -1476,6 +1964,481 @@ impl NativeSurface {
                 };
                 self.d2d_target.FillRoundedRectangle(&rr, &brush);
             }
+            Ok(())
+        }
+    }
+
+    /// Draws an SF-Symbols-style vector glyph inside `rect` with uniform rounded strokes.
+    /// Pass `stroke_width <= 0.0` to compute optical stroke weight automatically from `rect`.
+    pub fn draw_sf_symbol(
+        &self,
+        rect: Rect,
+        symbol: SfSymbol,
+        color: Color,
+        stroke_width: f32,
+    ) -> Result<()> {
+        let s = rect.width.min(rect.height).max(8.0);
+        let cx = rect.x + rect.width * 0.5;
+        let cy = rect.y + rect.height * 0.5;
+        let sw = if stroke_width > 0.0 {
+            stroke_width.max(0.8)
+        } else {
+            (s * 0.11).clamp(1.2, 2.4)
+        };
+
+        match symbol {
+            SfSymbol::CloseX => {
+                let u = s * 0.25;
+                self.draw_line(cx - u, cy - u, cx + u, cy + u, color, sw)?;
+                self.draw_line(cx + u, cy - u, cx - u, cy + u, color, sw)?;
+            }
+            SfSymbol::ChevronLeft => {
+                self.draw_polyline(
+                    &[
+                        (cx + s * 0.12, cy - s * 0.26),
+                        (cx - s * 0.14, cy),
+                        (cx + s * 0.12, cy + s * 0.26),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::ChevronRight => {
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.12, cy - s * 0.26),
+                        (cx + s * 0.14, cy),
+                        (cx - s * 0.12, cy + s * 0.26),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::ChevronDown => {
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.26, cy - s * 0.10),
+                        (cx, cy + s * 0.16),
+                        (cx + s * 0.26, cy - s * 0.10),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::ChevronUp => {
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.26, cy + s * 0.10),
+                        (cx, cy - s * 0.16),
+                        (cx + s * 0.26, cy + s * 0.10),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::SettingsSliders => {
+                let rows = [(-0.24_f32, -0.14_f32), (0.0, 0.14), (0.24, -0.06)];
+                for (dy, kx) in rows {
+                    let y = cy + s * dy;
+                    let knob_x = cx + s * kx;
+                    self.draw_line(cx - s * 0.34, y, knob_x - s * 0.08, y, color, sw)?;
+                    self.draw_line(knob_x + s * 0.08, y, cx + s * 0.34, y, color, sw)?;
+                    self.stroke_circle(knob_x, y, s * 0.075, color, sw)?;
+                }
+            }
+            SfSymbol::Desktops => {
+                // Overlapping desktop windows (`macwindow.on.rectangle`)
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.12, cy - s * 0.28, s * 0.48, s * 0.38),
+                    (s * 0.07).max(1.2),
+                    color.with_alpha_mul(0.75),
+                    sw,
+                )?;
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.36, cy - s * 0.08, s * 0.50, s * 0.40),
+                    (s * 0.07).max(1.2),
+                    color,
+                    sw,
+                )?;
+                self.draw_line(
+                    cx - s * 0.24,
+                    cy + s * 0.04,
+                    cx + s * 0.02,
+                    cy + s * 0.04,
+                    color,
+                    sw * 0.85,
+                )?;
+            }
+            SfSymbol::TrayGrid => {
+                let cell = s * 0.25;
+                let off = s * 0.165;
+                let r = (s * 0.06).max(1.2);
+                for dx in [-off, off] {
+                    for dy in [-off, off] {
+                        self.stroke_rounded_rect(
+                            Rect::new(cx + dx - cell * 0.5, cy + dy - cell * 0.5, cell, cell),
+                            r,
+                            color,
+                            sw,
+                        )?;
+                    }
+                }
+            }
+            SfSymbol::VolumeHigh => {
+                self.draw_volume_icon(cx, cy, s, false, 0.85, color)?;
+            }
+            SfSymbol::VolumeMuted => {
+                self.draw_volume_icon(cx, cy, s, true, 0.0, color)?;
+            }
+            SfSymbol::BrightnessSun => {
+                self.draw_sun_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::Play => {
+                self.draw_play_pause_icon(cx, cy, s, false, color)?;
+            }
+            SfSymbol::Pause => {
+                self.draw_play_pause_icon(cx, cy, s, true, color)?;
+            }
+            SfSymbol::SkipBack => {
+                self.draw_skip_icon(cx, cy, s, false, color)?;
+            }
+            SfSymbol::SkipForward => {
+                self.draw_skip_icon(cx, cy, s, true, color)?;
+            }
+            SfSymbol::Plus => {
+                let u = s * 0.28;
+                self.draw_line(cx - u, cy, cx + u, cy, color, sw)?;
+                self.draw_line(cx, cy - u, cx, cy + u, color, sw)?;
+            }
+            SfSymbol::Minus => {
+                let u = s * 0.28;
+                self.draw_line(cx - u, cy, cx + u, cy, color, sw)?;
+            }
+            SfSymbol::Trash => {
+                // Lid bar + top handle
+                self.draw_line(cx - s * 0.30, cy - s * 0.22, cx + s * 0.30, cy - s * 0.22, color, sw)?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.12, cy - s * 0.22),
+                        (cx - s * 0.08, cy - s * 0.34),
+                        (cx + s * 0.08, cy - s * 0.34),
+                        (cx + s * 0.12, cy - s * 0.22),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+                // Bin body
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.22, cy - s * 0.20),
+                        (cx - s * 0.17, cy + s * 0.32),
+                        (cx + s * 0.17, cy + s * 0.32),
+                        (cx + s * 0.22, cy - s * 0.20),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+                self.draw_line(cx - s * 0.07, cy - s * 0.08, cx - s * 0.06, cy + s * 0.20, color, sw * 0.85)?;
+                self.draw_line(cx + s * 0.07, cy - s * 0.08, cx + s * 0.06, cy + s * 0.20, color, sw * 0.85)?;
+            }
+            SfSymbol::Check => {
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.28, cy + s * 0.02),
+                        (cx - s * 0.06, cy + s * 0.24),
+                        (cx + s * 0.30, cy - s * 0.22),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::Wifi => {
+                self.draw_wifi_icon(cx, cy, s, true, false, color)?;
+            }
+            SfSymbol::WifiOff => {
+                self.draw_wifi_icon(cx, cy, s, false, true, color)?;
+            }
+            SfSymbol::FolderDrop => {
+                // Folder silhouette + downward drop arrow
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.36, cy - s * 0.18),
+                        (cx - s * 0.36, cy - s * 0.30),
+                        (cx - s * 0.10, cy - s * 0.30),
+                        (cx - s * 0.02, cy - s * 0.20),
+                        (cx + s * 0.36, cy - s * 0.20),
+                        (cx + s * 0.36, cy + s * 0.28),
+                        (cx - s * 0.36, cy + s * 0.28),
+                    ],
+                    true,
+                    color,
+                    sw,
+                )?;
+                // Down arrow inside folder
+                self.draw_line(cx, cy - s * 0.06, cx, cy + s * 0.18, color, sw)?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.12, cy + s * 0.07),
+                        (cx, cy + s * 0.19),
+                        (cx + s * 0.12, cy + s * 0.07),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::Search => {
+                let r = s * 0.22;
+                let gx = cx - s * 0.07;
+                let gy = cy - s * 0.07;
+                self.stroke_circle(gx, gy, r, color, sw)?;
+                let edge = r * std::f32::consts::FRAC_1_SQRT_2;
+                self.draw_line(gx + edge, gy + edge, cx + s * 0.31, cy + s * 0.31, color, sw)?;
+            }
+            SfSymbol::Sparkle => {
+                self.draw_sparkles_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::Pin => {
+                self.draw_line(cx - s * 0.20, cy - s * 0.32, cx + s * 0.20, cy - s * 0.32, color, sw)?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.12, cy - s * 0.32),
+                        (cx - s * 0.14, cy + s * 0.02),
+                        (cx - s * 0.24, cy + s * 0.10),
+                        (cx + s * 0.24, cy + s * 0.10),
+                        (cx + s * 0.14, cy + s * 0.02),
+                        (cx + s * 0.12, cy - s * 0.32),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+                self.draw_line(cx, cy + s * 0.10, cx, cy + s * 0.36, color, sw)?;
+            }
+            SfSymbol::Calendar => {
+                self.draw_calendar_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::FocusTimer => {
+                let r = s * 0.29;
+                let ty = cy + s * 0.04;
+                self.stroke_circle(cx, ty, r, color, sw)?;
+                self.draw_line(cx - s * 0.09, cy - s * 0.34, cx + s * 0.09, cy - s * 0.34, color, sw)?;
+                self.draw_line(cx, ty, cx, ty - r * 0.56, color, sw)?;
+                self.draw_line(cx, ty, cx + r * 0.45, ty + r * 0.20, color, sw)?;
+            }
+            SfSymbol::ShortcutKeys => {
+                // Apple Command (⌘) symbol with rounded corners
+                let inner = s * 0.14;
+                let loop_r = s * 0.11;
+                self.draw_line(cx - inner, cy - inner, cx + inner, cy - inner, color, sw)?;
+                self.draw_line(cx - inner, cy + inner, cx + inner, cy + inner, color, sw)?;
+                self.draw_line(cx - inner, cy - inner, cx - inner, cy + inner, color, sw)?;
+                self.draw_line(cx + inner, cy - inner, cx + inner, cy + inner, color, sw)?;
+                for (sx, sy) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                    self.stroke_circle(
+                        cx + sx * (inner + loop_r),
+                        cy + sy * (inner + loop_r),
+                        loop_r,
+                        color,
+                        sw,
+                    )?;
+                }
+            }
+            SfSymbol::Gear => {
+                self.draw_settings_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::MusicNote => {
+                self.draw_music_note_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::Bell => {
+                self.draw_bell_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::Bluetooth => {
+                self.draw_bluetooth_icon(cx, cy, s, color)?;
+            }
+            SfSymbol::Copy => {
+                let r = (s * 0.06).max(1.2);
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.28, cy - s * 0.28, s * 0.42, s * 0.46),
+                    r,
+                    color.with_alpha_mul(0.72),
+                    sw,
+                )?;
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.14, cy - s * 0.14, s * 0.42, s * 0.46),
+                    r,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::SendArrow => {
+                self.draw_line(cx, cy + s * 0.28, cx, cy - s * 0.26, color, sw)?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.22, cy - s * 0.06),
+                        (cx, cy - s * 0.28),
+                        (cx + s * 0.22, cy - s * 0.06),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::ShieldCheck => {
+                self.draw_polyline(
+                    &[
+                        (cx, cy - s * 0.34),
+                        (cx + s * 0.28, cy - s * 0.22),
+                        (cx + s * 0.24, cy + s * 0.10),
+                        (cx, cy + s * 0.34),
+                        (cx - s * 0.24, cy + s * 0.10),
+                        (cx - s * 0.28, cy - s * 0.22),
+                    ],
+                    true,
+                    color,
+                    sw,
+                )?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.12, cy + s * 0.02),
+                        (cx - s * 0.02, cy + s * 0.12),
+                        (cx + s * 0.15, cy - s * 0.08),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+            SfSymbol::ListChecklist => {
+                for dy in [-0.20_f32, 0.02, 0.24] {
+                    let y = cy + s * dy;
+                    self.fill_circle(cx - s * 0.24, y, (sw * 0.55).max(1.0), color)?;
+                    self.draw_line(cx - s * 0.08, y, cx + s * 0.30, y, color, sw)?;
+                }
+            }
+            SfSymbol::Terminal => {
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.36, cy - s * 0.28, s * 0.72, s * 0.56),
+                    (s * 0.08).max(1.5),
+                    color,
+                    sw,
+                )?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.20, cy - s * 0.10),
+                        (cx - s * 0.06, cy + s * 0.02),
+                        (cx - s * 0.20, cy + s * 0.14),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+                self.draw_line(cx + s * 0.02, cy + s * 0.14, cx + s * 0.20, cy + s * 0.14, color, sw)?;
+            }
+            SfSymbol::Document => {
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.24, cy - s * 0.34),
+                        (cx + s * 0.10, cy - s * 0.34),
+                        (cx + s * 0.24, cy - s * 0.18),
+                        (cx + s * 0.24, cy + s * 0.34),
+                        (cx - s * 0.24, cy + s * 0.34),
+                    ],
+                    true,
+                    color,
+                    sw,
+                )?;
+                self.draw_line(cx - s * 0.12, cy - s * 0.04, cx + s * 0.12, cy - s * 0.04, color, sw * 0.85)?;
+                self.draw_line(cx - s * 0.12, cy + s * 0.12, cx + s * 0.12, cy + s * 0.12, color, sw * 0.85)?;
+            }
+            SfSymbol::Globe => {
+                let r = s * 0.33;
+                self.stroke_circle(cx, cy, r, color, sw)?;
+                self.draw_line(cx - r, cy, cx + r, cy, color, sw * 0.85)?;
+                self.draw_line(cx, cy - r, cx, cy + r, color, sw * 0.85)?;
+                unsafe {
+                    let brush = self.create_brush(color)?;
+                    self.d2d_target.DrawEllipse(
+                        &D2D1_ELLIPSE {
+                            point: pt(cx, cy),
+                            radiusX: r * 0.48,
+                            radiusY: r,
+                        },
+                        &brush,
+                        sw * 0.85,
+                        None,
+                    );
+                }
+            }
+            SfSymbol::Refresh => {
+                let r = s * 0.28;
+                unsafe {
+                    let brush = self.create_brush(color)?;
+                    let round_cap = self.create_round_cap_stroke()?;
+                    let arc = self.build_quadratic_arc(
+                        pt(cx + r * 0.85, cy - r * 0.45),
+                        pt(cx - r * 0.8, cy - r * 1.15),
+                        pt(cx - r * 0.85, cy + r * 0.45),
+                    )?;
+                    self.d2d_target
+                        .DrawGeometry(&arc, &brush, sw, Some(&round_cap));
+                    let arc2 = self.build_quadratic_arc(
+                        pt(cx - r * 0.85, cy + r * 0.45),
+                        pt(cx + r * 0.4, cy + r * 1.15),
+                        pt(cx + r * 0.90, cy + r * 0.25),
+                    )?;
+                    self.d2d_target
+                        .DrawGeometry(&arc2, &brush, sw, Some(&round_cap));
+                }
+                self.draw_polyline(
+                    &[
+                        (cx + s * 0.14, cy - s * 0.26),
+                        (cx + s * 0.27, cy - s * 0.12),
+                        (cx + s * 0.12, cy - s * 0.04),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_polyline(
+        &self,
+        pts: &[(f32, f32)],
+        closed: bool,
+        color: Color,
+        stroke_width: f32,
+    ) -> Result<()> {
+        if pts.len() < 2 {
+            return Ok(());
+        }
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let round_cap = self.create_round_cap_stroke()?;
+            let geo = self.d2d_factory.CreatePathGeometry()?;
+            let sink = geo.Open()?;
+            sink.BeginFigure(pt(pts[0].0, pts[0].1), D2D1_FIGURE_BEGIN_HOLLOW);
+            for &(x, y) in &pts[1..] {
+                sink.AddLine(pt(x, y));
+            }
+            sink.EndFigure(if closed {
+                D2D1_FIGURE_END_CLOSED
+            } else {
+                D2D1_FIGURE_END_OPEN
+            });
+            sink.Close()?;
+            self.d2d_target
+                .DrawGeometry(&geo, &brush, stroke_width.max(0.5), Some(&round_cap));
             Ok(())
         }
     }
@@ -1724,14 +2687,41 @@ impl NativeSurface {
         Ok(())
     }
 
-    /// Draws a 4-point sparkle icon for Hime AI centered at `(cx, cy)`.
+    /// Draws a 4-point SF-style sparkle icon centered at `(cx, cy)`.
     pub fn draw_sparkles_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
         let s = size.max(8.0);
-        let sw = (s * 0.12).max(1.1);
-        self.draw_line(cx, cy - s * 0.42, cx, cy + s * 0.42, color, sw)?;
-        self.draw_line(cx - s * 0.42, cy, cx + s * 0.42, cy, color, sw)?;
-        self.fill_circle(cx, cy, s * 0.14, color)?;
-        Ok(())
+        let r = s * 0.36;
+        let k = s * 0.08;
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let geo = self.d2d_factory.CreatePathGeometry()?;
+            let sink = geo.Open()?;
+            sink.BeginFigure(pt(cx, cy - r), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx, cy - k),
+                point2: pt(cx + k, cy),
+                point3: pt(cx + r, cy),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx + k, cy),
+                point2: pt(cx, cy + k),
+                point3: pt(cx, cy + r),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx, cy + k),
+                point2: pt(cx - k, cy),
+                point3: pt(cx - r, cy),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx - k, cy),
+                point2: pt(cx, cy - k),
+                point3: pt(cx, cy - r),
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.d2d_target.FillGeometry(&geo, &brush, None);
+            Ok(())
+        }
     }
 
     /// Draws a notification bell icon centered at `(cx, cy)`.
@@ -1754,6 +2744,25 @@ impl NativeSurface {
         Ok(())
     }
 
+    unsafe fn create_linear_gradient(
+        &self,
+        start: D2D_POINT_2F,
+        end: D2D_POINT_2F,
+        stops: &[D2D1_GRADIENT_STOP],
+    ) -> Result<ID2D1LinearGradientBrush> {
+        let collection = self.d2d_target.CreateGradientStopCollection(
+            stops,
+            D2D1_GAMMA_2_2,
+            D2D1_EXTEND_MODE_CLAMP,
+        )?;
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+            startPoint: start,
+            endPoint: end,
+        };
+        self.d2d_target
+            .CreateLinearGradientBrush(&props, None, &collection)
+    }
+
     unsafe fn create_round_cap_stroke(&self) -> Result<ID2D1StrokeStyle> {
         if let Some(cached) = self.round_cap_stroke.borrow().as_ref() {
             return Ok(cached.clone());
@@ -1761,6 +2770,7 @@ impl NativeSurface {
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_ROUND,
             endCap: D2D1_CAP_STYLE_ROUND,
+            lineJoin: D2D1_LINE_JOIN_ROUND,
             ..Default::default()
         };
         let style: ID2D1StrokeStyle = self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
@@ -1920,7 +2930,8 @@ impl NativeSurface {
             self.bitmap_cache.borrow_mut().clear();
             self.cached_layer.borrow_mut().take();
             self.last_region_key.borrow_mut().take();
-            self.d2d_target.Resize(&D2D_SIZE_U { width, height })?;
+            let new_dib = BackingDib::new(width, height)?;
+            *self.dib.borrow_mut() = new_dib;
             self.width = width;
             self.height = height;
             self.dpi = get_window_dpi(self.hwnd);
@@ -2104,6 +3115,61 @@ fn to_wide_null(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
+/// Resolves `(base_fill, specular_top, specular_bottom, border_top, border_bottom)`
+/// for [`LiquidGlassStyle`], matching Apple's smoked glass + dual-sided Fresnel catchlight.
+fn resolve_liquid_glass_colors(style: LiquidGlassStyle) -> (Color, Color, Color, Color, Color) {
+    let hover_lift = if style.hovered { 0.05 } else { 0.0 };
+    let press_lift = if style.pressed { 0.04 } else { 0.0 };
+
+    let base_fill = match style.variant {
+        LiquidGlassVariant::Regular => {
+            GLASS_REGULAR.with_alpha((GLASS_REGULAR.a + hover_lift * 0.5).clamp(0.62, 0.85))
+        }
+        LiquidGlassVariant::Clear => {
+            GLASS_CLEAR.with_alpha((GLASS_CLEAR.a + hover_lift * 0.5).clamp(0.55, 0.78))
+        }
+        LiquidGlassVariant::Elevated => {
+            let base = if style.pressed {
+                Color::from_rgba_u8(0x2C, 0x2C, 0x30, 0xDB)
+            } else if style.hovered {
+                Color::from_rgba_u8(0x28, 0x28, 0x2C, 0xD6)
+            } else {
+                GLASS_ELEVATED
+            };
+            base
+        }
+        LiquidGlassVariant::Tinted(tint) => {
+            let alpha = (tint.a.clamp(0.28, 0.82) + hover_lift + press_lift).clamp(0.28, 0.88);
+            GLASS_REGULAR.lerp(tint.with_alpha(alpha), 0.72)
+        }
+    };
+
+    let spec_mul: f32 = if style.pressed {
+        0.72
+    } else if style.hovered {
+        1.22
+    } else {
+        1.0
+    };
+    let spec_top = GLASS_SPECULAR_TOP.with_alpha((0.17 * spec_mul).clamp(0.06, 0.34));
+    let spec_bot = GLASS_SPECULAR_BOTTOM.with_alpha((0.05 * spec_mul).clamp(0.02, 0.12));
+
+    let (border_top, border_bot) = match style.variant {
+        LiquidGlassVariant::Tinted(tint) => (
+            tint.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.55)
+                .with_alpha(0.45),
+            tint.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.35)
+                .with_alpha(0.22),
+        ),
+        _ => (
+            Color::rgba(1.0, 1.0, 1.0, (0.34 * spec_mul).clamp(0.16, 0.48)),
+            Color::rgba(1.0, 1.0, 1.0, (0.18 * spec_mul).clamp(0.08, 0.28)),
+        ),
+    };
+
+    (base_fill, spec_top, spec_bot, border_top, border_bot)
+}
+
 /// Converts a Win32 HRESULT into a `windows::core::Result<()>`.
 #[allow(dead_code)]
 fn check_hr(hr: HRESULT) -> Result<()> {
@@ -2134,7 +3200,7 @@ mod tests {
     }
 
     #[test]
-    fn native_surface_uses_hwnd_render_target_and_renders() {
+    fn native_surface_uses_layered_per_pixel_alpha_and_renders() {
         let mut surface = match NativeSurface::new("HimeTestSurface", -2000, -2000, 160, 48) {
             Ok(s) => s,
             Err(_) => return,
@@ -2143,6 +3209,7 @@ mod tests {
         assert_ne!(ex_style & WS_EX_TOPMOST.0, 0);
         assert_ne!(ex_style & WS_EX_TOOLWINDOW.0, 0);
         assert_ne!(ex_style & WS_EX_NOACTIVATE.0, 0);
+        assert_ne!(ex_style & WS_EX_LAYERED.0, 0);
 
         surface.set_click_through(true);
         let ct_style = unsafe { GetWindowLongW(surface.hwnd(), GWL_EXSTYLE) } as u32;
@@ -2152,31 +3219,167 @@ mod tests {
         let nct_style = unsafe { GetWindowLongW(surface.hwnd(), GWL_EXSTYLE) } as u32;
         assert_eq!(nct_style & WS_EX_TRANSPARENT.0, 0);
 
-        surface.set_bounds(-2000, -2000, 540, 200).expect("set_bounds should resize target");
+        surface
+            .set_bounds(-2000, -2000, 540, 200)
+            .expect("set_bounds should resize target");
         assert_eq!(surface.size(), (540, 200));
+
+        // Verify true 32-bit premultiplied per-pixel alpha transparency:
+        // Corners outside the Liquid Glass panel must stay alpha == 0 (never solid black),
+        // while the interior of the drawn glass panel has alpha > 0.
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(
+                Rect::new(40.0, 30.0, 220.0, 100.0),
+                LiquidGlassStyle::regular(18.0).without_shadow(),
+            )
+            .expect("draw_liquid_glass_panel should succeed");
+        surface
+            .draw_liquid_glass_button(
+                Rect::new(280.0, 40.0, 44.0, 44.0),
+                12.0,
+                Some(theme::SYSTEM_BLUE),
+                true,
+                false,
+            )
+            .expect("draw_liquid_glass_button should succeed");
+        surface
+            .draw_liquid_glass_edge_surface(
+                Rect::new(340.0, 0.0, 180.0, 40.0),
+                13.0,
+                16.0,
+                EdgeSide::Top,
+                true,
+                LiquidGlassStyle::clear(16.0).without_shadow(),
+            )
+            .expect("draw_liquid_glass_edge_surface should succeed");
+        surface
+            .end_draw_and_present()
+            .expect("layered UpdateLayeredWindow should succeed");
+
+        unsafe {
+            let dib = surface.dib.borrow();
+            assert_eq!(dib.pixel_bgra(1, 1), Some([0, 0, 0, 0]));
+            let center_px = dib.pixel_bgra(120, 80).unwrap();
+            assert!(center_px[3] > 0, "expected non-zero glass alpha, got {:?}", center_px);
+        }
 
         let notch = crate::notch::NotchView::default();
         surface.begin_draw();
         notch.render(&surface).expect("NotchView::render should succeed");
-        surface.end_draw_and_present().expect("notch end_draw_and_present");
+        surface
+            .end_draw_and_present()
+            .expect("notch end_draw_and_present");
 
         let mut dock = crate::dock::DockBar::new();
         dock.add_item(crate::dock::DockItem::new("term", "Terminal", "wt.exe", true));
         surface.begin_draw();
         dock.render(&surface).expect("DockBar::render should succeed");
-        surface.end_draw_and_present().expect("dock end_draw_and_present");
+        surface
+            .end_draw_and_present()
+            .expect("dock end_draw_and_present");
 
         surface.begin_draw();
-        surface.draw_line(10.0, 10.0, 40.0, 40.0, crate::theme::TEXT_PRIMARY, 1.5).unwrap();
-        surface.fill_circle(60.0, 24.0, 8.0, crate::theme::ACCENT_CYAN).unwrap();
-        surface.stroke_circle(84.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, 1.2).unwrap();
-        surface.draw_circle(108.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, false, 1.0).unwrap();
-        surface.draw_sun_icon(132.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
-        surface.draw_volume_icon(156.0, 24.0, 14.0, false, 0.8, crate::theme::TEXT_PRIMARY).unwrap();
-        surface.draw_bluetooth_icon(180.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
-        surface.draw_calendar_icon(204.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
-        surface.draw_text_bold("16:50", Rect::new(220.0, 10.0, 60.0, 28.0), 14.0, crate::theme::TEXT_PRIMARY, TextAlign::Center).unwrap();
-        surface.end_draw_and_present().expect("vector icon helpers");
+        surface
+            .draw_line(10.0, 10.0, 40.0, 40.0, crate::theme::TEXT_PRIMARY, 1.5)
+            .unwrap();
+        surface
+            .fill_circle(60.0, 24.0, 8.0, crate::theme::SYSTEM_BLUE)
+            .unwrap();
+        surface
+            .stroke_circle(84.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, 1.2)
+            .unwrap();
+        surface
+            .draw_circle(108.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, false, 1.0)
+            .unwrap();
+        surface
+            .draw_sun_icon(132.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY)
+            .unwrap();
+        surface
+            .draw_volume_icon(156.0, 24.0, 14.0, false, 0.8, crate::theme::TEXT_PRIMARY)
+            .unwrap();
+        surface
+            .draw_bluetooth_icon(180.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY)
+            .unwrap();
+        surface
+            .draw_calendar_icon(204.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY)
+            .unwrap();
+        surface
+            .draw_text_bold(
+                "16:50",
+                Rect::new(220.0, 10.0, 60.0, 28.0),
+                14.0,
+                crate::theme::TEXT_PRIMARY,
+                TextAlign::Center,
+            )
+            .unwrap();
+        surface
+            .end_draw_and_present()
+            .expect("vector icon helpers");
+    }
+
+    #[test]
+    fn all_sf_symbols_render_cleanly() {
+        let surface = match NativeSurface::new("HimeSfSymbolsTest", -2000, -2000, 480, 160) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let symbols = [
+            SfSymbol::CloseX,
+            SfSymbol::ChevronLeft,
+            SfSymbol::ChevronRight,
+            SfSymbol::ChevronDown,
+            SfSymbol::ChevronUp,
+            SfSymbol::SettingsSliders,
+            SfSymbol::Desktops,
+            SfSymbol::TrayGrid,
+            SfSymbol::VolumeHigh,
+            SfSymbol::VolumeMuted,
+            SfSymbol::BrightnessSun,
+            SfSymbol::Play,
+            SfSymbol::Pause,
+            SfSymbol::SkipBack,
+            SfSymbol::SkipForward,
+            SfSymbol::Plus,
+            SfSymbol::Minus,
+            SfSymbol::Trash,
+            SfSymbol::Check,
+            SfSymbol::Wifi,
+            SfSymbol::WifiOff,
+            SfSymbol::FolderDrop,
+            SfSymbol::Search,
+            SfSymbol::Sparkle,
+            SfSymbol::Pin,
+            SfSymbol::Calendar,
+            SfSymbol::FocusTimer,
+            SfSymbol::ShortcutKeys,
+            SfSymbol::Gear,
+            SfSymbol::MusicNote,
+            SfSymbol::Bell,
+            SfSymbol::Bluetooth,
+            SfSymbol::Copy,
+            SfSymbol::SendArrow,
+            SfSymbol::ShieldCheck,
+            SfSymbol::ListChecklist,
+            SfSymbol::Terminal,
+            SfSymbol::Document,
+            SfSymbol::Globe,
+            SfSymbol::Refresh,
+        ];
+        surface.begin_draw();
+        for (idx, &sym) in symbols.iter().enumerate() {
+            let col = (idx % 12) as f32;
+            let row = (idx / 12) as f32;
+            surface
+                .draw_sf_symbol(
+                    Rect::new(10.0 + col * 32.0, 10.0 + row * 32.0, 22.0, 22.0),
+                    sym,
+                    theme::TEXT_PRIMARY,
+                    0.0,
+                )
+                .expect("SfSymbol should render without error");
+        }
+        surface.end_draw_and_present().expect("SfSymbol present");
     }
 
     #[test]
@@ -2266,6 +3469,12 @@ mod tests {
 
         s1.set_edge_surface_region(Rect::new(0.0, 0.0, 120.0, 48.0), 13.0, 18.0, EdgeSide::Top, true);
         assert!(matches!(*s1.last_region_key.borrow(), Some(RegionKey::Edge(_))));
+
+        // Empty region marks empty hide state, and non-empty clears it.
+        s1.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
+        assert!(*s1.region_is_empty.borrow());
+        s1.set_rounded_region(Rect::new(0.0, 0.0, 120.0, 48.0), 18.0);
+        assert!(!*s1.region_is_empty.borrow());
 
         // Resize clears device-dependent caches and region key.
         s1.set_bounds(-2000, -2000, 180, 60).unwrap();

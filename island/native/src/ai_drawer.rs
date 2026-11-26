@@ -1,14 +1,15 @@
 //! Native AI Chat & Approval Drawer rendered with Direct2D (`NativeSurface`).
-//! Supports shelf file attachments, streaming assistant responses, and tool approval cards.
+//! Styled with Apple Liquid Glass, monochrome typography hierarchy, `SfSymbol` vector strokes,
+//! and smooth Apple `Spring` (`EMERGE`/`RECEDE`/`SMOOTH`) transitions.
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
-use crate::animation::SpringValue;
-use crate::d2d::{NativeSurface, Rect, TextAlign};
+use crate::animation::{Spring, SpringValue};
+use crate::d2d::{LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
 use crate::theme::{
-    ACCENT_CYAN, GLASS_BORDER, GLASS_SURFACE, STATUS_ALERT, STATUS_OFFLINE, STATUS_SUCCESS,
-    STATUS_WARNING, SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    DIVIDER_HAIRLINE, GLASS_CONTROL, GLASS_HAIRLINE, STATUS_LIVE_AMBER, STATUS_LIVE_GREEN,
+    STATUS_LIVE_RED, SYSTEM_BLUE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
 };
 
 pub const DRAWER_WIDTH: f32 = 440.0;
@@ -165,7 +166,11 @@ pub struct AiDrawer {
     pub translation: DrawerTranslationState,
     pub developer: DeveloperWorkspaceSummary,
     pub documents: DocumentsWorkspaceSummary,
+    pub pointer_pos: Option<(f32, f32)>,
+    pub pointer_pressed: bool,
     open_spring: SpringValue,
+    tab_spring: SpringValue,
+    press_spring: SpringValue,
     width: f32,
     height: f32,
 }
@@ -182,7 +187,11 @@ impl AiDrawer {
             translation: DrawerTranslationState::default(),
             developer: DeveloperWorkspaceSummary::default(),
             documents: DocumentsWorkspaceSummary::default(),
-            open_spring: SpringValue::snappy(0.0),
+            pointer_pos: None,
+            pointer_pressed: false,
+            open_spring: SpringValue::from_spring(0.0, Spring::EMERGE),
+            tab_spring: SpringValue::from_spring(0.0, Spring::SMOOTH),
+            press_spring: SpringValue::from_spring(1.0, Spring::KNOB_SETTLE),
             width: DRAWER_WIDTH,
             height: DRAWER_HEIGHT,
         }
@@ -190,6 +199,44 @@ impl AiDrawer {
 
     pub fn select_tab(&mut self, tab: DrawerTab) {
         self.active_tab = tab;
+        if let Some(idx) = DrawerTab::ALL.iter().position(|&t| t == tab) {
+            self.tab_spring.animate_to(idx as f32, Spring::SMOOTH);
+        }
+    }
+
+    pub fn set_pointer_hover(&mut self, pos: Option<(f32, f32)>) {
+        self.pointer_pos = pos;
+    }
+
+    pub fn set_pointer_pressed(&mut self, pressed: bool) {
+        self.pointer_pressed = pressed;
+        self.press_spring
+            .animate_to(if pressed { 0.97 } else { 1.0 }, Spring::KNOB_SETTLE);
+    }
+
+    fn is_hovered(&self, rect: Rect) -> bool {
+        self.pointer_pos
+            .is_some_and(|(x, y)| point_in_rect(x, y, rect))
+    }
+
+    fn is_pressed(&self, rect: Rect) -> bool {
+        self.pointer_pressed && self.is_hovered(rect)
+    }
+
+    fn button_rect(&self, rect: Rect) -> Rect {
+        if self.is_pressed(rect) {
+            let scale = self.press_spring.value.clamp(0.95, 1.0);
+            let dx = rect.width * (1.0 - scale) * 0.5;
+            let dy = rect.height * (1.0 - scale) * 0.5;
+            Rect::new(
+                rect.x + dx,
+                rect.y + dy,
+                (rect.width - dx * 2.0).max(4.0),
+                (rect.height - dy * 2.0).max(4.0),
+            )
+        } else {
+            rect
+        }
     }
 
     pub fn set_translation(
@@ -227,12 +274,12 @@ impl AiDrawer {
 
     pub fn open(&mut self) {
         self.visible = true;
-        self.open_spring.set_target(1.0);
+        self.open_spring.launch_to(1.0, Spring::EMERGE, 1.0);
     }
 
     pub fn close(&mut self) {
         self.visible = false;
-        self.open_spring.set_target(0.0);
+        self.open_spring.launch_to(0.0, Spring::RECEDE, 1.0);
     }
 
     pub fn toggle(&mut self) {
@@ -244,13 +291,22 @@ impl AiDrawer {
     }
 
     pub fn tick(&mut self, dt: f32) -> bool {
-        let was_settled = self.open_spring.is_settled();
+        let was_settled = self.open_spring.is_settled()
+            && self.tab_spring.is_settled()
+            && self.press_spring.is_settled();
         self.open_spring.tick(dt);
-        !was_settled || !self.open_spring.is_settled()
+        self.tab_spring.tick(dt);
+        self.press_spring.tick(dt);
+        !was_settled
+            || !self.open_spring.is_settled()
+            || !self.tab_spring.is_settled()
+            || !self.press_spring.is_settled()
     }
 
     pub fn is_animating(&self) -> bool {
         !self.open_spring.is_settled()
+            || !self.tab_spring.is_settled()
+            || !self.press_spring.is_settled()
     }
 
     pub fn attach_items(&mut self, items: Vec<DrawerAttachment>) {
@@ -494,59 +550,106 @@ impl AiDrawer {
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let progress = self.open_spring.value.clamp(0.0, 1.0);
         if progress <= 0.01 && !self.visible {
+            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
             return Ok(());
         }
 
-        let panel = Rect::new(0.0, 0.0, self.width, self.height * progress.max(0.2));
-        surface.set_rounded_region(panel, 18.0);
-        surface.fill_rounded_rect(panel, 18.0, GLASS_SURFACE)?;
-        surface.stroke_rounded_rect(panel, 18.0, GLASS_BORDER, 1.0)?;
+        // Emerge/recede without collapsing from scale(0) — start from 0.94 scale with soft vertical slide.
+        let scale_factor = 0.94 + 0.06 * progress;
+        let pw = self.width * scale_factor;
+        let ph = self.height * scale_factor;
+        let px = (self.width - pw) * 0.5;
+        let py = (1.0 - progress) * 8.0;
+        let panel = Rect::new(px, py, pw, ph);
 
-        surface.draw_text(
+        surface.set_rounded_region(panel, 18.0);
+        surface.draw_liquid_glass_panel(panel, LiquidGlassStyle::regular(18.0))?;
+
+        // Header brand icon + monochrome title
+        let brand_icon = Rect::new(px + 18.0, py + 17.0, 16.0, 16.0);
+        surface.draw_sf_symbol(brand_icon, SfSymbol::Sparkle, SYSTEM_BLUE, 1.5)?;
+        surface.draw_text_bold(
             "Hime AI",
-            Rect::new(20.0, 14.0, 92.0, 28.0),
-            15.0,
+            Rect::new(px + 38.0, py + 12.0, 78.0, 28.0),
+            14.5,
             TEXT_PRIMARY,
             TextAlign::Leading,
         )?;
 
-        // Tab switcher in header
-        for (tab, rect) in self.tab_rects() {
+        // Segmented Liquid Glass tab switcher with smooth spring-gliding active pill
+        let tab_rects = self.tab_rects();
+        let seg_x = tab_rects[0].1.x - 3.0;
+        let seg_y = tab_rects[0].1.y - 2.0;
+        let seg_w = (tab_rects[2].1.x + tab_rects[2].1.width) - tab_rects[0].1.x + 6.0;
+        let seg_h = tab_rects[0].1.height + 4.0;
+        let seg_container = Rect::new(seg_x, seg_y, seg_w, seg_h);
+        surface.fill_rounded_rect(seg_container, 10.0, GLASS_CONTROL)?;
+        surface.stroke_rounded_rect(seg_container, 10.0, GLASS_HAIRLINE, 0.8)?;
+
+        // Sliding active tab indicator driven by `tab_spring`
+        let slide_idx = self.tab_spring.value.clamp(0.0, 2.0);
+        let lo = (slide_idx.floor() as usize).min(2);
+        let hi = (slide_idx.ceil() as usize).min(2);
+        let frac = slide_idx - lo as f32;
+        let r_lo = tab_rects[lo].1;
+        let r_hi = tab_rects[hi].1;
+        let active_pill = Rect::new(
+            r_lo.x + (r_hi.x - r_lo.x) * frac,
+            r_lo.y,
+            r_lo.width,
+            r_lo.height,
+        );
+        surface.draw_liquid_glass_panel(
+            active_pill,
+            LiquidGlassStyle::tinted(SYSTEM_BLUE, 8.0).without_shadow(),
+        )?;
+
+        for (tab, rect) in tab_rects {
             let active = self.active_tab == tab;
-            surface.fill_rounded_rect(
-                rect,
-                8.0,
-                if active {
-                    ACCENT_CYAN.with_alpha(0.20)
-                } else {
-                    SURFACE_ELEVATED.with_alpha(0.65)
-                },
-            )?;
-            surface.stroke_rounded_rect(
-                rect,
-                8.0,
-                if active {
-                    ACCENT_CYAN.with_alpha(0.75)
-                } else {
-                    GLASS_BORDER
-                },
-                1.0,
-            )?;
-            surface.draw_text(
-                tab.label(),
-                rect,
-                11.5,
-                if active { TEXT_PRIMARY } else { TEXT_SECONDARY },
-                TextAlign::Center,
-            )?;
+            let hovered = !active && self.is_hovered(rect);
+            if hovered {
+                surface.fill_rounded_rect(
+                    rect,
+                    8.0,
+                    crate::theme::GLASS_CONTROL_HOVER.with_alpha_mul(0.6),
+                )?;
+            }
+            let icon = match tab {
+                DrawerTab::Chat => SfSymbol::Sparkle,
+                DrawerTab::Translate => SfSymbol::Globe,
+                DrawerTab::Workspace => SfSymbol::Terminal,
+            };
+            let fg = if active { TEXT_PRIMARY } else { TEXT_SECONDARY };
+            let icon_rect = Rect::new(rect.x + 7.0, rect.y + (rect.height - 12.0) * 0.5, 12.0, 12.0);
+            surface.draw_sf_symbol(icon_rect, icon, fg, 1.3)?;
+            let label_rect = Rect::new(rect.x + 20.0, rect.y, rect.width - 23.0, rect.height);
+            if active {
+                surface.draw_text_bold(tab.label(), label_rect, 11.0, fg, TextAlign::Center)?;
+            } else {
+                surface.draw_text(tab.label(), label_rect, 11.0, fg, TextAlign::Center)?;
+            }
         }
 
-        surface.draw_text(
-            "X",
-            self.close_rect(),
-            13.0,
-            TEXT_SECONDARY,
-            TextAlign::Center,
+        // Close button (`SfSymbol::CloseX`, no ASCII `"X"`)
+        let close_r = self.button_rect(self.close_rect());
+        surface.draw_liquid_glass_button(
+            close_r,
+            9.0,
+            None,
+            self.is_hovered(self.close_rect()),
+            self.is_pressed(self.close_rect()),
+        )?;
+        let close_icon = Rect::new(close_r.x + 7.0, close_r.y + 7.0, 14.0, 14.0);
+        surface.draw_sf_symbol(close_icon, SfSymbol::CloseX, TEXT_SECONDARY, 1.5)?;
+
+        // Subtle hairline divider below header
+        surface.draw_line(
+            px + 18.0,
+            py + 48.0,
+            px + pw - 18.0,
+            py + 48.0,
+            DIVIDER_HAIRLINE,
+            1.0,
         )?;
 
         match self.active_tab {
@@ -561,56 +664,96 @@ impl AiDrawer {
     fn render_chat_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
         // Attachments bar from FileShelf
         if !self.attachments.is_empty() {
-            let attach_bar = Rect::new(20.0, 50.0, self.width - 40.0, 26.0);
-            surface.fill_rounded_rect(attach_bar, 8.0, SURFACE_ELEVATED)?;
+            let attach_bar = Rect::new(20.0, 56.0, self.width - 40.0, 28.0);
+            surface.draw_liquid_glass_panel(
+                attach_bar,
+                LiquidGlassStyle::elevated(9.0).without_shadow(),
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(28.0, 63.0, 14.0, 14.0),
+                SfSymbol::FolderDrop,
+                SYSTEM_BLUE,
+                1.4,
+            )?;
             let summary = format!("{} shelf attachment(s)", self.attachments.len());
             surface.draw_text(
                 &summary,
-                Rect::new(30.0, 50.0, self.width - 150.0, 26.0),
+                Rect::new(48.0, 56.0, self.width - 168.0, 28.0),
                 11.5,
-                ACCENT_CYAN,
+                TEXT_PRIMARY,
                 TextAlign::Leading,
+            )?;
+            let clear_raw = self.clear_attachments_rect();
+            let clear_r = self.button_rect(clear_raw);
+            surface.draw_liquid_glass_button(
+                clear_r,
+                7.0,
+                None,
+                self.is_hovered(clear_raw),
+                self.is_pressed(clear_raw),
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(clear_r.x + 8.0, clear_r.y + 7.0, 12.0, 12.0),
+                SfSymbol::Trash,
+                TEXT_SECONDARY,
+                1.3,
             )?;
             surface.draw_text(
                 "Clear",
-                self.clear_attachments_rect(),
-                11.5,
+                Rect::new(clear_r.x + 20.0, clear_r.y, clear_r.width - 24.0, clear_r.height),
+                11.0,
                 TEXT_SECONDARY,
                 TextAlign::Center,
             )?;
         }
 
         // Recent messages
-        let mut msg_y = if self.attachments.is_empty() { 54.0 } else { 86.0 };
+        let mut msg_y = if self.attachments.is_empty() { 58.0 } else { 92.0 };
         let max_msg_y = 330.0;
         for msg in self.messages.iter().rev().take(5).rev() {
             if msg_y + 44.0 > max_msg_y {
                 break;
             }
             let bubble = Rect::new(20.0, msg_y, self.width - 40.0, 44.0);
-            surface.fill_rounded_rect(bubble, 10.0, SURFACE_ELEVATED)?;
-            let prefix = match msg.role {
-                ChatRole::User => "You: ",
+            let style = match msg.role {
+                ChatRole::User => LiquidGlassStyle::elevated(11.0).without_shadow(),
+                ChatRole::Assistant => LiquidGlassStyle::clear(11.0).without_shadow(),
+                ChatRole::System => LiquidGlassStyle::elevated(11.0).without_shadow(),
+            };
+            surface.draw_liquid_glass_panel(bubble, style)?;
+
+            let role_label = match msg.role {
+                ChatRole::User => "You",
                 ChatRole::Assistant => {
                     if msg.streaming {
-                        "Hime (typing...): "
+                        "Hime • Typing"
                     } else {
-                        "Hime: "
+                        "Hime"
                     }
                 }
-                ChatRole::System => "System: ",
+                ChatRole::System => "System",
             };
-            let line = format!("{prefix}{}", msg.content);
-            let color = match msg.role {
-                ChatRole::User => TEXT_PRIMARY,
-                ChatRole::Assistant => ACCENT_CYAN,
-                ChatRole::System => TEXT_SECONDARY,
+            let role_color = match msg.role {
+                ChatRole::Assistant => SYSTEM_BLUE,
+                ChatRole::User => TEXT_SECONDARY,
+                ChatRole::System => TEXT_TERTIARY,
             };
+            surface.draw_text_bold(
+                role_label,
+                Rect::new(32.0, msg_y + 4.0, self.width - 64.0, 15.0),
+                10.0,
+                role_color,
+                TextAlign::Leading,
+            )?;
             surface.draw_text(
-                &line,
-                Rect::new(30.0, msg_y, self.width - 60.0, 44.0),
+                &msg.content,
+                Rect::new(32.0, msg_y + 19.0, self.width - 64.0, 21.0),
                 12.0,
-                color,
+                if msg.role == ChatRole::System {
+                    TEXT_SECONDARY
+                } else {
+                    TEXT_PRIMARY
+                },
                 TextAlign::Leading,
             )?;
             msg_y += 52.0;
@@ -627,52 +770,135 @@ impl AiDrawer {
                 break;
             }
             let rect = Rect::new(20.0, card_y, self.width - 40.0, 68.0);
-            surface.fill_rounded_rect(rect, 12.0, SURFACE_ELEVATED)?;
-            surface.stroke_rounded_rect(rect, 12.0, STATUS_WARNING, 1.0)?;
-            surface.draw_text(
+            surface.draw_liquid_glass_panel(
+                rect,
+                LiquidGlassStyle::elevated(12.0).without_shadow(),
+            )?;
+            surface.stroke_rounded_rect(rect, 12.0, STATUS_LIVE_AMBER.with_alpha(0.55), 1.0)?;
+
+            surface.draw_sf_symbol(
+                Rect::new(30.0, card_y + 10.0, 14.0, 14.0),
+                SfSymbol::ShieldCheck,
+                STATUS_LIVE_AMBER,
+                1.4,
+            )?;
+            surface.draw_text_bold(
                 &format!("Approve {}: {}", card.tool_name, card.summary),
-                Rect::new(30.0, card_y + 6.0, self.width - 60.0, 24.0),
-                12.0,
+                Rect::new(50.0, card_y + 7.0, self.width - 80.0, 22.0),
+                11.5,
                 TEXT_PRIMARY,
                 TextAlign::Leading,
             )?;
 
-            let approve = Rect::new(self.width - 172.0, card_y + 36.0, 72.0, 26.0);
-            let deny = Rect::new(self.width - 92.0, card_y + 36.0, 72.0, 26.0);
-            surface.fill_rounded_rect(approve, 6.0, STATUS_SUCCESS)?;
-            surface.draw_text("Approve", approve, 11.5, TEXT_PRIMARY, TextAlign::Center)?;
-            surface.fill_rounded_rect(deny, 6.0, STATUS_ALERT)?;
-            surface.draw_text("Deny", deny, 11.5, TEXT_PRIMARY, TextAlign::Center)?;
+            let approve_raw = Rect::new(self.width - 172.0, card_y + 36.0, 72.0, 26.0);
+            let deny_raw = Rect::new(self.width - 92.0, card_y + 36.0, 72.0, 26.0);
+            let approve = self.button_rect(approve_raw);
+            let deny = self.button_rect(deny_raw);
+
+            surface.draw_liquid_glass_button(
+                approve,
+                7.0,
+                Some(STATUS_LIVE_GREEN),
+                self.is_hovered(approve_raw),
+                self.is_pressed(approve_raw),
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(approve.x + 6.0, approve.y + 7.0, 11.0, 11.0),
+                SfSymbol::Check,
+                TEXT_PRIMARY,
+                1.4,
+            )?;
+            surface.draw_text_bold(
+                "Allow",
+                Rect::new(approve.x + 17.0, approve.y, approve.width - 20.0, approve.height),
+                11.0,
+                TEXT_PRIMARY,
+                TextAlign::Center,
+            )?;
+
+            surface.draw_liquid_glass_button(
+                deny,
+                7.0,
+                Some(STATUS_LIVE_RED),
+                self.is_hovered(deny_raw),
+                self.is_pressed(deny_raw),
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(deny.x + 8.0, deny.y + 7.5, 10.0, 10.0),
+                SfSymbol::CloseX,
+                TEXT_PRIMARY,
+                1.4,
+            )?;
+            surface.draw_text(
+                "Deny",
+                Rect::new(deny.x + 18.0, deny.y, deny.width - 22.0, deny.height),
+                11.0,
+                TEXT_PRIMARY,
+                TextAlign::Center,
+            )?;
             card_y += 76.0;
         }
 
         // Input footer
         if panel_height >= 120.0 {
             let input_rect = Rect::new(20.0, self.height - 48.0, self.width - 116.0, 32.0);
-            surface.fill_rounded_rect(input_rect, 10.0, SURFACE_ELEVATED)?;
-            let prompt_display;
+            surface.draw_liquid_glass_panel(
+                input_rect,
+                LiquidGlassStyle::elevated(10.0).without_shadow(),
+            )?;
             let prompt_text = if self.draft_prompt.is_empty() {
-                "Ask Hime AI... (type & press Enter)"
+                "Ask Hime AI..."
             } else {
-                prompt_display = format!("{}|", self.draft_prompt);
-                prompt_display.as_str()
+                self.draft_prompt.as_str()
             };
             let prompt_color = if self.draft_prompt.is_empty() {
-                TEXT_SECONDARY
+                TEXT_TERTIARY
             } else {
                 TEXT_PRIMARY
             };
             surface.draw_text(
                 prompt_text,
-                Rect::new(30.0, self.height - 48.0, self.width - 136.0, 32.0),
+                Rect::new(32.0, self.height - 48.0, self.width - 140.0, 32.0),
                 12.0,
                 prompt_color,
                 TextAlign::Leading,
             )?;
+            if !self.draft_prompt.is_empty() {
+                let approx_caret_x =
+                    (34.0 + self.draft_prompt.chars().count() as f32 * 6.4).min(input_rect.x + input_rect.width - 10.0);
+                surface.draw_line(
+                    approx_caret_x,
+                    input_rect.y + 8.0,
+                    approx_caret_x,
+                    input_rect.y + input_rect.height - 8.0,
+                    SYSTEM_BLUE,
+                    1.5,
+                )?;
+            }
 
-            let send_rect = self.send_button_rect();
-            surface.fill_rounded_rect(send_rect, 10.0, ACCENT_CYAN)?;
-            surface.draw_text("Send", send_rect, 12.0, GLASS_SURFACE, TextAlign::Center)?;
+            let send_raw = self.send_button_rect();
+            let send_rect = self.button_rect(send_raw);
+            let can_send = !self.draft_prompt.trim().is_empty() || !self.attachments.is_empty();
+            surface.draw_liquid_glass_button(
+                send_rect,
+                10.0,
+                if can_send { Some(SYSTEM_BLUE) } else { None },
+                self.is_hovered(send_raw),
+                self.is_pressed(send_raw),
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(send_rect.x + 9.0, send_rect.y + 10.0, 12.0, 12.0),
+                SfSymbol::SendArrow,
+                TEXT_PRIMARY,
+                1.5,
+            )?;
+            surface.draw_text_bold(
+                "Send",
+                Rect::new(send_rect.x + 21.0, send_rect.y, send_rect.width - 25.0, send_rect.height),
+                11.5,
+                TEXT_PRIMARY,
+                TextAlign::Center,
+            )?;
         }
 
         Ok(())
@@ -683,33 +909,41 @@ impl AiDrawer {
             return Ok(());
         }
 
-        surface.draw_text(
+        surface.draw_text_bold(
             "Selection Translate",
-            Rect::new(20.0, 56.0, 220.0, 26.0),
+            Rect::new(20.0, 58.0, 220.0, 24.0),
             13.5,
             TEXT_PRIMARY,
             TextAlign::Leading,
         )?;
 
-        let lang_badge = Rect::new(self.width - 130.0, 56.0, 110.0, 24.0);
-        surface.fill_rounded_rect(lang_badge, 8.0, ACCENT_CYAN.with_alpha(0.16))?;
-        surface.stroke_rounded_rect(lang_badge, 8.0, ACCENT_CYAN.with_alpha(0.45), 1.0)?;
+        let lang_badge = Rect::new(self.width - 130.0, 58.0, 110.0, 24.0);
+        surface.fill_rounded_rect(lang_badge, 8.0, GLASS_CONTROL)?;
+        surface.stroke_rounded_rect(lang_badge, 8.0, GLASS_HAIRLINE, 0.8)?;
+        surface.draw_sf_symbol(
+            Rect::new(lang_badge.x + 8.0, lang_badge.y + 6.0, 12.0, 12.0),
+            SfSymbol::Globe,
+            TEXT_SECONDARY,
+            1.3,
+        )?;
         surface.draw_text(
             &format!("Target: {}", self.translation.target_lang.to_uppercase()),
-            lang_badge,
-            11.0,
-            ACCENT_CYAN,
+            Rect::new(lang_badge.x + 22.0, lang_badge.y, lang_badge.width - 26.0, lang_badge.height),
+            10.5,
+            TEXT_PRIMARY,
             TextAlign::Center,
         )?;
 
         let source_card = Rect::new(20.0, 92.0, self.width - 40.0, 112.0);
-        surface.fill_rounded_rect(source_card, 12.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(source_card, 12.0, GLASS_BORDER, 1.0)?;
+        surface.draw_liquid_glass_panel(
+            source_card,
+            LiquidGlassStyle::elevated(12.0).without_shadow(),
+        )?;
         surface.draw_text(
             &format!("SOURCE ({})", self.translation.source_lang.to_uppercase()),
             Rect::new(32.0, 100.0, self.width - 64.0, 18.0),
             10.5,
-            TEXT_SECONDARY,
+            TEXT_TERTIARY,
             TextAlign::Leading,
         )?;
         let source_body = if self.translation.source_text.is_empty() {
@@ -731,8 +965,10 @@ impl AiDrawer {
         )?;
 
         let result_card = Rect::new(20.0, 216.0, self.width - 40.0, 160.0);
-        surface.fill_rounded_rect(result_card, 12.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(result_card, 12.0, ACCENT_CYAN.with_alpha(0.35), 1.0)?;
+        surface.draw_liquid_glass_panel(
+            result_card,
+            LiquidGlassStyle::elevated(12.0).without_shadow(),
+        )?;
         let header_label = if self.translation.cached {
             "TRANSLATION • CACHED"
         } else {
@@ -742,7 +978,11 @@ impl AiDrawer {
             header_label,
             Rect::new(32.0, 224.0, self.width - 64.0, 18.0),
             10.5,
-            ACCENT_CYAN,
+            if self.translation.cached {
+                SYSTEM_BLUE
+            } else {
+                TEXT_TERTIARY
+            },
             TextAlign::Leading,
         )?;
         let translated_body = if self.translation.translated_text.is_empty() {
@@ -763,40 +1003,59 @@ impl AiDrawer {
             TextAlign::Leading,
         )?;
 
-        let clear_rect = self.translate_clear_rect();
-        surface.fill_rounded_rect(clear_rect, 8.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(clear_rect, 8.0, GLASS_BORDER, 1.0)?;
-        surface.draw_text("Clear", clear_rect, 11.5, TEXT_SECONDARY, TextAlign::Center)?;
+        let clear_raw = self.translate_clear_rect();
+        let clear_rect = self.button_rect(clear_raw);
+        surface.draw_liquid_glass_button(
+            clear_rect,
+            8.0,
+            None,
+            self.is_hovered(clear_raw),
+            self.is_pressed(clear_raw),
+        )?;
+        surface.draw_sf_symbol(
+            Rect::new(clear_rect.x + 12.0, clear_rect.y + 9.0, 13.0, 13.0),
+            SfSymbol::Trash,
+            TEXT_SECONDARY,
+            1.3,
+        )?;
+        surface.draw_text(
+            "Clear",
+            Rect::new(clear_rect.x + 26.0, clear_rect.y, clear_rect.width - 32.0, clear_rect.height),
+            11.5,
+            TEXT_SECONDARY,
+            TextAlign::Center,
+        )?;
 
-        let copy_rect = self.translate_copy_rect();
+        let copy_raw = self.translate_copy_rect();
+        let copy_rect = self.button_rect(copy_raw);
         let has_result = !self.translation.translated_text.is_empty();
-        surface.fill_rounded_rect(
+        surface.draw_liquid_glass_button(
             copy_rect,
             8.0,
-            if has_result {
-                ACCENT_CYAN.with_alpha(0.22)
-            } else {
-                STATUS_OFFLINE.with_alpha(0.22)
-            },
+            if has_result { Some(SYSTEM_BLUE) } else { None },
+            self.is_hovered(copy_raw),
+            self.is_pressed(copy_raw),
         )?;
-        surface.stroke_rounded_rect(
-            copy_rect,
-            8.0,
-            if has_result {
-                ACCENT_CYAN.with_alpha(0.6)
-            } else {
-                GLASS_BORDER
-            },
-            1.0,
+        surface.draw_sf_symbol(
+            Rect::new(copy_rect.x + 14.0, copy_rect.y + 9.0, 13.0, 13.0),
+            SfSymbol::Copy,
+            if has_result { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            1.4,
         )?;
-        surface.draw_text("Copy", copy_rect, 11.5, TEXT_PRIMARY, TextAlign::Center)?;
+        surface.draw_text_bold(
+            "Copy",
+            Rect::new(copy_rect.x + 28.0, copy_rect.y, copy_rect.width - 34.0, copy_rect.height),
+            11.5,
+            if has_result { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            TextAlign::Center,
+        )?;
 
         if let Some(notice) = &self.translation.status_notice {
             surface.draw_text(
                 notice,
                 Rect::new(20.0, 434.0, self.width - 40.0, 22.0),
                 11.0,
-                STATUS_SUCCESS,
+                STATUS_LIVE_GREEN,
                 TextAlign::Leading,
             )?;
         }
@@ -810,24 +1069,33 @@ impl AiDrawer {
         }
 
         // Developer card
-        let dev_card = Rect::new(20.0, 56.0, self.width - 40.0, 194.0);
-        surface.fill_rounded_rect(dev_card, 12.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(dev_card, 12.0, GLASS_BORDER, 1.0)?;
-        surface.draw_text(
+        let dev_card = Rect::new(20.0, 58.0, self.width - 40.0, 192.0);
+        surface.draw_liquid_glass_panel(
+            dev_card,
+            LiquidGlassStyle::elevated(12.0).without_shadow(),
+        )?;
+        surface.draw_sf_symbol(
+            Rect::new(34.0, 71.0, 15.0, 15.0),
+            SfSymbol::Terminal,
+            TEXT_PRIMARY,
+            1.4,
+        )?;
+        surface.draw_text_bold(
             "Developer",
-            Rect::new(34.0, 68.0, 180.0, 22.0),
+            Rect::new(54.0, 68.0, 160.0, 22.0),
             13.5,
             TEXT_PRIMARY,
             TextAlign::Leading,
         )?;
 
         let branch_pill = Rect::new(self.width - 174.0, 66.0, 140.0, 24.0);
-        surface.fill_rounded_rect(branch_pill, 6.0, ACCENT_CYAN.with_alpha(0.16))?;
+        surface.fill_rounded_rect(branch_pill, 7.0, GLASS_CONTROL)?;
+        surface.stroke_rounded_rect(branch_pill, 7.0, GLASS_HAIRLINE, 0.8)?;
         surface.draw_text(
             &self.developer.branch,
             branch_pill,
             11.0,
-            ACCENT_CYAN,
+            TEXT_PRIMARY,
             TextAlign::Center,
         )?;
 
@@ -850,9 +1118,9 @@ impl AiDrawer {
         )?;
 
         let scan_color = if self.developer.secret_findings_count == 0 {
-            STATUS_SUCCESS
+            STATUS_LIVE_GREEN
         } else {
-            STATUS_ALERT
+            STATUS_LIVE_RED
         };
         let scan_summary = format!(
             "Secret Scan: {} finding(s)",
@@ -876,12 +1144,24 @@ impl AiDrawer {
             )?;
         }
 
-        let dev_btn = self.dev_check_rect();
-        surface.fill_rounded_rect(dev_btn, 8.0, ACCENT_CYAN.with_alpha(0.20))?;
-        surface.stroke_rounded_rect(dev_btn, 8.0, ACCENT_CYAN.with_alpha(0.55), 1.0)?;
-        surface.draw_text(
-            "Run Dev Check",
+        let dev_raw = self.dev_check_rect();
+        let dev_btn = self.button_rect(dev_raw);
+        surface.draw_liquid_glass_button(
             dev_btn,
+            8.0,
+            None,
+            self.is_hovered(dev_raw),
+            self.is_pressed(dev_raw),
+        )?;
+        surface.draw_sf_symbol(
+            Rect::new(dev_btn.x + 9.0, dev_btn.y + 9.0, 13.0, 13.0),
+            SfSymbol::ShieldCheck,
+            TEXT_PRIMARY,
+            1.3,
+        )?;
+        surface.draw_text(
+            "Dev Check",
+            Rect::new(dev_btn.x + 22.0, dev_btn.y, dev_btn.width - 26.0, dev_btn.height),
             11.5,
             TEXT_PRIMARY,
             TextAlign::Center,
@@ -889,11 +1169,19 @@ impl AiDrawer {
 
         // Documents card
         let docs_card = Rect::new(20.0, 266.0, self.width - 40.0, 174.0);
-        surface.fill_rounded_rect(docs_card, 12.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(docs_card, 12.0, GLASS_BORDER, 1.0)?;
-        surface.draw_text(
+        surface.draw_liquid_glass_panel(
+            docs_card,
+            LiquidGlassStyle::elevated(12.0).without_shadow(),
+        )?;
+        surface.draw_sf_symbol(
+            Rect::new(34.0, 281.0, 15.0, 15.0),
+            SfSymbol::Document,
+            TEXT_PRIMARY,
+            1.4,
+        )?;
+        surface.draw_text_bold(
             "Documents",
-            Rect::new(34.0, 278.0, 180.0, 22.0),
+            Rect::new(54.0, 278.0, 160.0, 22.0),
             13.5,
             TEXT_PRIMARY,
             TextAlign::Leading,
@@ -902,12 +1190,13 @@ impl AiDrawer {
         let total_jobs =
             self.documents.active_jobs + self.documents.completed_jobs + self.documents.failed_jobs;
         let jobs_pill = Rect::new(self.width - 144.0, 276.0, 110.0, 24.0);
-        surface.fill_rounded_rect(jobs_pill, 6.0, STATUS_SUCCESS.with_alpha(0.16))?;
+        surface.fill_rounded_rect(jobs_pill, 7.0, GLASS_CONTROL)?;
+        surface.stroke_rounded_rect(jobs_pill, 7.0, GLASS_HAIRLINE, 0.8)?;
         surface.draw_text(
             &format!("{total_jobs} job(s)"),
             jobs_pill,
             11.0,
-            STATUS_SUCCESS,
+            TEXT_SECONDARY,
             TextAlign::Center,
         )?;
 
@@ -938,12 +1227,24 @@ impl AiDrawer {
             TextAlign::Leading,
         )?;
 
-        let docs_btn = self.refresh_docs_rect();
-        surface.fill_rounded_rect(docs_btn, 8.0, STATUS_SUCCESS.with_alpha(0.20))?;
-        surface.stroke_rounded_rect(docs_btn, 8.0, STATUS_SUCCESS.with_alpha(0.55), 1.0)?;
-        surface.draw_text(
-            "Refresh Docs",
+        let docs_raw = self.refresh_docs_rect();
+        let docs_btn = self.button_rect(docs_raw);
+        surface.draw_liquid_glass_button(
             docs_btn,
+            8.0,
+            None,
+            self.is_hovered(docs_raw),
+            self.is_pressed(docs_raw),
+        )?;
+        surface.draw_sf_symbol(
+            Rect::new(docs_btn.x + 9.0, docs_btn.y + 9.0, 13.0, 13.0),
+            SfSymbol::Refresh,
+            TEXT_PRIMARY,
+            1.3,
+        )?;
+        surface.draw_text(
+            "Refresh",
+            Rect::new(docs_btn.x + 22.0, docs_btn.y, docs_btn.width - 26.0, docs_btn.height),
             11.5,
             TEXT_PRIMARY,
             TextAlign::Center,
@@ -1196,5 +1497,48 @@ mod tests {
             Some(DrawerAction::Close)
         );
         assert!(!drawer.visible);
+    }
+
+    #[test]
+    fn drawer_uses_apple_springs_and_renders_liquid_glass_with_sf_symbols() {
+        let mut drawer = AiDrawer::new();
+        drawer.open();
+        assert!(drawer.is_animating());
+        for _ in 0..90 {
+            drawer.tick(1.0 / 60.0);
+        }
+        assert!(!drawer.is_animating());
+
+        drawer.push_user_message("u1", "Summarize workspace");
+        drawer.begin_assistant_stream("a1");
+        drawer.append_stream_chunk("Ready with Liquid Glass.");
+        drawer.finish_assistant_stream();
+        drawer.attach_items(vec![DrawerAttachment {
+            id: "s1".to_string(),
+            name: "design.md".to_string(),
+            path: "C:\\design.md".to_string(),
+            kind: "Document".to_string(),
+        }]);
+        drawer.push_approval_card(ApprovalCard {
+            id: "apr-1".to_string(),
+            tool_name: "git_status".to_string(),
+            summary: "Inspect repository".to_string(),
+            risk_level: "low".to_string(),
+            status: ApprovalStatus::Pending,
+        });
+
+        let surface = match NativeSurface::new("AiDrawerLiquidTest", -2200, -2200, 440, 500) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        for tab in DrawerTab::ALL {
+            drawer.select_tab(tab);
+            for _ in 0..45 {
+                drawer.tick(1.0 / 60.0);
+            }
+            surface.begin_draw();
+            drawer.render(&surface).expect("AiDrawer::render should succeed");
+            surface.end_draw_and_present().expect("present should succeed");
+        }
     }
 }

@@ -1,17 +1,22 @@
 //! Interactive Native Settings Window rendered with Direct2D (`NativeSurface`).
 //!
-//! Matches `island/src/Settings.tsx` (`~740x520` px) with crisp white text,
-//! left sidebar tabs (`General`, `Notch`, `Dock`, `Overlays`, `Hime AI`, `About`),
-//! interactive toggles & mode cyclers, and full mouse click + keyboard hit-testing.
+//! Styled after Apple macOS System Settings HIG & Liquid Glass:
+//! - Translucent smoked obsidian Liquid Glass window (`740x520` px)
+//! - Monochrome label hierarchy with single understated Apple tint (`#0A84FF`) for active toggles & tabs
+//! - Crisp `SfSymbol` vector icons throughout (zero ASCII `"x"` / `"•"` / ad-hoc glyphs)
+//! - Smooth analytic Apple Spring transitions for tab switching, toggles, hover states, and press micro-scale
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
-use crate::animation::SpringValue;
-use crate::d2d::{NativeSurface, Rect, TextAlign};
+use crate::animation::{Spring, SpringValue};
+use crate::d2d::{LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
 use crate::theme::{
-    ACCENT_CYAN, DOCK_SURFACE, GLASS_BORDER, GLASS_SURFACE, NOTCH_BG_SOLID, STATUS_OFFLINE,
-    STATUS_SUCCESS, SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    Color, DIVIDER_HAIRLINE, GLASS_CLEAR, GLASS_CONTROL, GLASS_CONTROL_HOVER, GLASS_ELEVATED,
+    GLASS_HAIRLINE, STATUS_LIVE_GREEN, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TEXT_PRIMARY,
+    TEXT_SECONDARY, TEXT_TERTIARY,
 };
 
 pub const SETTINGS_WIDTH: f32 = 740.0;
@@ -24,6 +29,10 @@ const SIDEBAR_WIDTH: f32 = 176.0;
 const CONTENT_PAD_X: f32 = 22.0;
 const ROW_HEIGHT: f32 = 46.0;
 const ROW_GAP: f32 = 8.0;
+const TAB_START_Y: f32 = TITLEBAR_HEIGHT + 68.0;
+const TAB_HEIGHT: f32 = 34.0;
+const TAB_STEP_Y: f32 = 38.0;
+const PRESS_MICRO_SCALE: f32 = 0.968;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettingsTab {
@@ -71,6 +80,21 @@ impl SettingsTab {
             Self::HimeAi => "Hime AI assistant, 9Router gateway, and model configuration.",
             Self::About => "Version, config storage path, and open source notices.",
         }
+    }
+
+    pub fn symbol(self) -> SfSymbol {
+        match self {
+            Self::General => SfSymbol::Gear,
+            Self::Notch => SfSymbol::SettingsSliders,
+            Self::Dock => SfSymbol::TrayGrid,
+            Self::Overlays => SfSymbol::VolumeHigh,
+            Self::HimeAi => SfSymbol::Sparkle,
+            Self::About => SfSymbol::ShieldCheck,
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|&t| t == self).unwrap_or(0)
     }
 }
 
@@ -303,7 +327,7 @@ pub enum SettingsControl {
     Close,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RowControlId {
     ToggleTimeFormat24h,
     ToggleNotifSuppression,
@@ -346,42 +370,59 @@ struct RenderedRow {
 
 enum RowVisual {
     Toggle(bool),
-    Pill(String, crate::theme::Color),
-    Button(String, crate::theme::Color),
+    Picker(String),
+    Button {
+        label: String,
+        status_dot: Option<Color>,
+    },
     SummaryCard {
+        icon: SfSymbol,
         count: usize,
         action_label: &'static str,
-        accent: crate::theme::Color,
     },
     Info(String),
 }
 
-/// Interactive Direct2D Settings window (`740x520` px) matching `Settings.tsx`.
+/// Interactive Direct2D Settings window (`740x520` px) following Apple macOS Settings HIG.
 pub struct SettingsPanel {
     pub state: SettingsState,
     pub visible: bool,
     pub active_tab: SettingsTab,
     pub selected_index: Option<usize>,
     hovered_target: Option<HitTarget>,
+    pressed_target: Option<HitTarget>,
     status_notice: Option<String>,
     open_spring: SpringValue,
+    tab_indicator_y: SpringValue,
+    content_fade: SpringValue,
+    hover_progress: SpringValue,
+    press_scale: SpringValue,
+    toggle_springs: HashMap<RowControlId, SpringValue>,
     width: f32,
     height: f32,
 }
 
 impl SettingsPanel {
     pub fn new() -> Self {
-        Self {
+        let mut panel = Self {
             state: SettingsState::default(),
             visible: false,
             active_tab: SettingsTab::General,
             selected_index: None,
             hovered_target: None,
+            pressed_target: None,
             status_notice: None,
-            open_spring: SpringValue::snappy(0.0),
+            open_spring: SpringValue::emerge(0.0),
+            tab_indicator_y: SpringValue::smooth(TAB_START_Y),
+            content_fade: SpringValue::emerge(1.0),
+            hover_progress: SpringValue::interactive(0.0),
+            press_scale: SpringValue::knob_settle(1.0),
+            toggle_springs: HashMap::new(),
             width: SETTINGS_WIDTH,
             height: SETTINGS_HEIGHT,
-        }
+        };
+        panel.snap_internal_springs();
+        panel
     }
 
     pub fn open(&mut self) {
@@ -390,12 +431,15 @@ impl SettingsPanel {
             self.selected_index = Some(0);
         }
         self.open_spring.snap_to(1.0);
+        self.snap_internal_springs();
     }
 
     pub fn close(&mut self) {
         self.visible = false;
         self.hovered_target = None;
+        self.pressed_target = None;
         self.open_spring.snap_to(0.0);
+        self.snap_internal_springs();
     }
 
     pub fn toggle(&mut self) {
@@ -407,8 +451,16 @@ impl SettingsPanel {
     }
 
     pub fn select_tab(&mut self, tab: SettingsTab) {
+        let changed = self.active_tab != tab;
         self.active_tab = tab;
         self.selected_index = Some(0);
+        if changed {
+            self.tab_indicator_y
+                .animate_to(Self::tab_y(tab), Spring::SMOOTH);
+            self.content_fade.snap_to(0.15);
+            self.content_fade.launch_to(1.0, Spring::EMERGE, 1.0);
+            self.sync_toggle_targets(true);
+        }
     }
 
     pub fn set_status_notice(&mut self, msg: Option<String>) {
@@ -416,13 +468,33 @@ impl SettingsPanel {
     }
 
     pub fn tick(&mut self, dt: f32) -> bool {
-        let was_settled = self.open_spring.is_settled();
+        let was_settled = !self.is_animating();
         self.open_spring.tick(dt);
-        !was_settled || !self.open_spring.is_settled()
+        self.tab_indicator_y.tick(dt);
+        self.content_fade.tick(dt);
+        self.hover_progress.tick(dt);
+        self.press_scale.tick(dt);
+        for spring in self.toggle_springs.values_mut() {
+            spring.tick(dt);
+        }
+        if self.press_scale.is_settled() && self.press_scale.target >= 0.999 {
+            self.pressed_target = None;
+        }
+        !was_settled || self.is_animating()
     }
 
     pub fn is_animating(&self) -> bool {
-        !self.open_spring.is_settled()
+        if !self.open_spring.is_settled() {
+            return true;
+        }
+        if !self.visible {
+            return false;
+        }
+        !self.tab_indicator_y.is_settled()
+            || !self.content_fade.is_settled()
+            || !self.hover_progress.is_settled()
+            || !self.press_scale.is_settled()
+            || self.toggle_springs.values().any(|s| !s.is_settled())
     }
 
     /// Updates hover highlight for mouse movement at `(x, y)` in DIP coordinates.
@@ -434,6 +506,8 @@ impl SettingsPanel {
         };
         if next != self.hovered_target {
             self.hovered_target = next;
+            let target_alpha = if next.is_some() { 1.0 } else { 0.0 };
+            self.hover_progress.animate_to(target_alpha, Spring::INTERACTIVE);
             true
         } else {
             false
@@ -452,13 +526,14 @@ impl SettingsPanel {
         }
     }
 
-    /// Hit-tests a click at `(x, y)`, mutates `self.state` / `self.active_tab`, and returns
-    /// the [`SettingsAction`] for the host shell to persist and apply live.
+    /// Hit-tests a click at `(x, y)`, mutates `self.state` / `self.active_tab`, triggers
+    /// press micro-scale feedback, and returns the [`SettingsAction`] for the host shell.
     pub fn handle_click(&mut self, x: f32, y: f32) -> Option<SettingsAction> {
         if !self.visible {
             return None;
         }
         let target = self.hit_test_target(x, y)?;
+        self.trigger_press_feedback(target);
         match target {
             HitTarget::Close => {
                 self.close();
@@ -468,7 +543,11 @@ impl SettingsPanel {
                 self.select_tab(tab);
                 Some(SettingsAction::SelectTab(tab))
             }
-            HitTarget::Row(row) => Some(self.apply_row_control(row)),
+            HitTarget::Row(row) => {
+                let action = self.apply_row_control(row);
+                self.sync_toggle_targets(false);
+                Some(action)
+            }
         }
     }
 
@@ -534,6 +613,7 @@ impl SettingsPanel {
             SettingsControl::TestAndSaveProfile => {}
             SettingsControl::Close => self.close(),
         }
+        self.sync_toggle_targets(false);
     }
 
     fn apply_row_control(&mut self, row: RowControlId) -> SettingsAction {
@@ -570,8 +650,10 @@ impl SettingsPanel {
                     _ => "top",
                 }
                 .to_string();
-                self.state.notch_mode =
-                    NotchMode::from_edge_and_behavior(&self.state.notch_edge, &self.state.notch_behavior);
+                self.state.notch_mode = NotchMode::from_edge_and_behavior(
+                    &self.state.notch_edge,
+                    &self.state.notch_behavior,
+                );
                 SettingsAction::ToggleNotchMode
             }
             RowControlId::ToggleFreeDrag => {
@@ -686,10 +768,7 @@ impl SettingsPanel {
         match vk {
             VK_ESCAPE => Some(SettingsControl::Close),
             VK_LEFT => {
-                let idx = SettingsTab::ALL
-                    .iter()
-                    .position(|t| *t == self.active_tab)
-                    .unwrap_or(0);
+                let idx = self.active_tab.index();
                 let prev = if idx == 0 {
                     SettingsTab::ALL.len() - 1
                 } else {
@@ -699,10 +778,7 @@ impl SettingsPanel {
                 None
             }
             VK_RIGHT => {
-                let idx = SettingsTab::ALL
-                    .iter()
-                    .position(|t| *t == self.active_tab)
-                    .unwrap_or(0);
+                let idx = self.active_tab.index();
                 self.select_tab(SettingsTab::ALL[(idx + 1) % SettingsTab::ALL.len()]);
                 None
             }
@@ -725,6 +801,7 @@ impl SettingsPanel {
             VK_RETURN | VK_SPACE => {
                 let row = self.selected_index.and_then(|i| rows.get(i))?.id;
                 self.apply_row_control(row);
+                self.sync_toggle_targets(false);
                 match row {
                     RowControlId::CycleNotchBehavior | RowControlId::CycleNotchEdge => {
                         Some(SettingsControl::CycleNotchMode)
@@ -774,17 +851,86 @@ impl SettingsPanel {
         None
     }
 
+    fn trigger_press_feedback(&mut self, target: HitTarget) {
+        self.pressed_target = Some(target);
+        self.press_scale.snap_to(PRESS_MICRO_SCALE);
+        self.press_scale.animate_to(1.0, Spring::KNOB_SETTLE);
+    }
+
+    fn snap_internal_springs(&mut self) {
+        self.tab_indicator_y.snap_to(Self::tab_y(self.active_tab));
+        self.content_fade.snap_to(1.0);
+        self.hover_progress
+            .snap_to(if self.hovered_target.is_some() { 1.0 } else { 0.0 });
+        self.press_scale.snap_to(1.0);
+        self.pressed_target = None;
+        self.sync_toggle_targets(true);
+    }
+
+    fn sync_toggle_targets(&mut self, snap: bool) {
+        let pairs = [
+            (RowControlId::ToggleTimeFormat24h, self.state.time_format_24h),
+            (
+                RowControlId::ToggleNotifSuppression,
+                self.state.suppress_native_notifications,
+            ),
+            (RowControlId::ToggleFreeDrag, self.state.free_drag_enabled),
+            (RowControlId::ToggleMusicMode, self.state.music_mode_enabled),
+            (RowControlId::ToggleDockEnabled, self.state.dock_enabled),
+            (
+                RowControlId::ToggleDockWinNumber,
+                self.state.dock_win_number_enabled,
+            ),
+            (
+                RowControlId::ToggleVolumeOverlay,
+                self.state.volume_overlay_enabled,
+            ),
+            (
+                RowControlId::ToggleBrightnessOverlay,
+                self.state.brightness_overlay_enabled,
+            ),
+            (RowControlId::ToggleHimeAi, self.state.hime_ai_enabled),
+            (
+                RowControlId::ToggleTranslateOptIn,
+                self.state.translate_opt_in,
+            ),
+        ];
+        for (id, enabled) in pairs {
+            let target = if enabled { 1.0 } else { 0.0 };
+            let entry = self
+                .toggle_springs
+                .entry(id)
+                .or_insert_with(|| SpringValue::knob_settle(target));
+            if snap {
+                entry.snap_to(target);
+            } else {
+                entry.animate_to(target, Spring::KNOB_SETTLE);
+            }
+        }
+    }
+
+    fn toggle_progress(&self, id: RowControlId, fallback: bool) -> f32 {
+        self.toggle_springs
+            .get(&id)
+            .map(|s| s.value.clamp(0.0, 1.0))
+            .unwrap_or(if fallback { 1.0 } else { 0.0 })
+    }
+
+    fn tab_y(tab: SettingsTab) -> f32 {
+        TAB_START_Y + tab.index() as f32 * TAB_STEP_Y
+    }
+
     fn close_rect(&self) -> Rect {
         Rect::new(self.width - 38.0, 9.0, 24.0, 24.0)
     }
 
     fn tab_rects(&self) -> Vec<(SettingsTab, Rect)> {
-        let mut y = TITLEBAR_HEIGHT + 68.0;
+        let mut y = TAB_START_Y;
         SettingsTab::ALL
             .iter()
             .map(|&tab| {
-                let r = Rect::new(10.0, y, SIDEBAR_WIDTH - 20.0, 34.0);
-                y += 38.0;
+                let r = Rect::new(10.0, y, SIDEBAR_WIDTH - 20.0, TAB_HEIGHT);
+                y += TAB_STEP_Y;
                 (tab, r)
             })
             .collect()
@@ -809,7 +955,10 @@ impl SettingsPanel {
                     id: RowControlId::ResetToDefaults,
                     title: "Reset to Defaults",
                     desc: "Restore all Notch, Dock, Overlay, and AI settings".to_string(),
-                    kind: RowVisual::Button("Reset".to_string(), ACCENT_CYAN),
+                    kind: RowVisual::Button {
+                        label: "Reset".to_string(),
+                        status_dot: None,
+                    },
                 },
             ],
             SettingsTab::Notch => vec![
@@ -817,16 +966,13 @@ impl SettingsPanel {
                     id: RowControlId::CycleNotchBehavior,
                     title: "Notch Behavior",
                     desc: "Fixed (always visible), Smart (auto-hide), or Peek".to_string(),
-                    kind: RowVisual::Pill(
-                        capitalize_mode(&self.state.notch_behavior),
-                        ACCENT_CYAN,
-                    ),
+                    kind: RowVisual::Picker(capitalize_mode(&self.state.notch_behavior)),
                 },
                 RenderedRow {
                     id: RowControlId::CycleNotchEdge,
                     title: "Notch Screen Edge",
                     desc: "Anchor the Dynamic Island to Top, Left, or Right".to_string(),
-                    kind: RowVisual::Pill(capitalize_mode(&self.state.notch_edge), ACCENT_CYAN),
+                    kind: RowVisual::Picker(capitalize_mode(&self.state.notch_edge)),
                 },
                 RenderedRow {
                     id: RowControlId::ToggleFreeDrag,
@@ -852,7 +998,7 @@ impl SettingsPanel {
                     id: RowControlId::CycleDockMode,
                     title: "Dock Behavior",
                     desc: "Fixed (always show), Auto-Hide, or Smart overlap".to_string(),
-                    kind: RowVisual::Pill(capitalize_mode(&self.state.dock_mode), ACCENT_CYAN),
+                    kind: RowVisual::Picker(capitalize_mode(&self.state.dock_mode)),
                 },
                 RenderedRow {
                     id: RowControlId::ToggleDockWinNumber,
@@ -863,15 +1009,18 @@ impl SettingsPanel {
                 RenderedRow {
                     id: RowControlId::ClearPinnedApps,
                     title: "Pinned Applications",
-                    desc: format!("{} pinned app(s) saved in settings.json", self.state.dock_pinned.len()),
-                    kind: RowVisual::Button(
-                        if self.state.dock_pinned.is_empty() {
+                    desc: format!(
+                        "{} pinned app(s) saved in settings.json",
+                        self.state.dock_pinned.len()
+                    ),
+                    kind: RowVisual::Button {
+                        label: if self.state.dock_pinned.is_empty() {
                             "Empty".to_string()
                         } else {
                             "Clear Pinned".to_string()
                         },
-                        TEXT_SECONDARY,
-                    ),
+                        status_dot: None,
+                    },
                 },
             ],
             SettingsTab::Overlays => vec![
@@ -905,16 +1054,13 @@ impl SettingsPanel {
                     id: RowControlId::CycleProviderPreset,
                     title: "AI Provider Preset",
                     desc: self.state.hime_router_url.clone(),
-                    kind: RowVisual::Pill(
-                        self.state.active_profile.preset.label().to_string(),
-                        ACCENT_CYAN,
-                    ),
+                    kind: RowVisual::Picker(self.state.active_profile.preset.label().to_string()),
                 },
                 RenderedRow {
                     id: RowControlId::CycleRouterModel,
                     title: "Default Model",
                     desc: "Click to cycle model (Custom preset accepts typing)".to_string(),
-                    kind: RowVisual::Pill(self.state.hime_router_model.clone(), TEXT_PRIMARY),
+                    kind: RowVisual::Picker(self.state.hime_router_model.clone()),
                 },
                 RenderedRow {
                     id: RowControlId::TestAndSaveProfile,
@@ -924,18 +1070,18 @@ impl SettingsPanel {
                     } else {
                         "Gateway offline or standby — click to test & save".to_string()
                     },
-                    kind: RowVisual::Button(
-                        if self.state.router_9_detected {
-                            "Connected • Test".to_string()
+                    kind: RowVisual::Button {
+                        label: if self.state.router_9_detected {
+                            "Connected".to_string()
                         } else {
                             "Test & Save".to_string()
                         },
-                        if self.state.router_9_detected {
-                            STATUS_SUCCESS
+                        status_dot: Some(if self.state.router_9_detected {
+                            STATUS_LIVE_GREEN
                         } else {
-                            ACCENT_CYAN
-                        },
-                    ),
+                            STATUS_MUTED
+                        }),
+                    },
                 },
                 RenderedRow {
                     id: RowControlId::ToggleTranslateOptIn,
@@ -947,9 +1093,8 @@ impl SettingsPanel {
                     id: RowControlId::CycleProactiveBudget,
                     title: "Proactive Budget",
                     desc: proactive_budget_desc(&self.state.proactive_budget).to_string(),
-                    kind: RowVisual::Pill(
+                    kind: RowVisual::Picker(
                         proactive_budget_label(&self.state.proactive_budget).to_string(),
-                        ACCENT_CYAN,
                     ),
                 },
                 RenderedRow {
@@ -957,9 +1102,9 @@ impl SettingsPanel {
                     title: "Memory",
                     desc: format!("{} entries", self.state.memory_count),
                     kind: RowVisual::SummaryCard {
+                        icon: SfSymbol::ListChecklist,
                         count: self.state.memory_count,
                         action_label: "Refresh",
-                        accent: ACCENT_CYAN,
                     },
                 },
                 RenderedRow {
@@ -967,9 +1112,9 @@ impl SettingsPanel {
                     title: "Skills",
                     desc: format!("{} loaded", self.state.skills_count),
                     kind: RowVisual::SummaryCard {
+                        icon: SfSymbol::Sparkle,
                         count: self.state.skills_count,
                         action_label: "Reload",
-                        accent: STATUS_SUCCESS,
                     },
                 },
                 RenderedRow {
@@ -977,9 +1122,9 @@ impl SettingsPanel {
                     title: "MCP Servers",
                     desc: format!("{} connected", self.state.mcp_count),
                     kind: RowVisual::SummaryCard {
+                        icon: SfSymbol::Terminal,
                         count: self.state.mcp_count,
                         action_label: "Reload",
-                        accent: ACCENT_CYAN,
                     },
                 },
             ],
@@ -987,7 +1132,7 @@ impl SettingsPanel {
                 RenderedRow {
                     id: RowControlId::AboutInfo,
                     title: "Hime Island Native",
-                    desc: "Pure Rust Direct2D + DirectWrite + DirectComposition".to_string(),
+                    desc: "Pure Rust Direct2D + DirectWrite + Layered Composition".to_string(),
                     kind: RowVisual::Info("v1.0.0-rc.1".to_string()),
                 },
                 RenderedRow {
@@ -1016,7 +1161,7 @@ impl SettingsPanel {
                 .filter(|r| !matches!(r.kind, RowVisual::SummaryCard { .. }))
                 .count();
             let mut out = Vec::with_capacity(rows.len());
-            let mut y = TITLEBAR_HEIGHT + 70.0; // 112.0 (contains y=130 for row 0)
+            let mut y = TITLEBAR_HEIGHT + 70.0;
             let compact_h = 41.0;
             let compact_gap = 5.0;
             for row in rows.iter().take(stacked_count) {
@@ -1065,9 +1210,25 @@ impl SettingsPanel {
     }
 
     fn render_size_for_surface(&self, sw: f32, sh: f32) -> (f32, f32) {
-        let draw_w = if sw > 10.0 { sw.min(self.width) } else { self.width };
-        let draw_h = if sh > 10.0 { sh.min(self.height) } else { self.height };
+        let draw_w = if sw > 10.0 {
+            sw.min(self.width)
+        } else {
+            self.width
+        };
+        let draw_h = if sh > 10.0 {
+            sh.min(self.height)
+        } else {
+            self.height
+        };
         (draw_w, draw_h)
+    }
+
+    fn target_scale(&self, target: HitTarget) -> f32 {
+        if self.pressed_target == Some(target) {
+            self.press_scale.value.clamp(0.94, 1.0)
+        } else {
+            1.0
+        }
     }
 
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
@@ -1079,268 +1240,438 @@ impl SettingsPanel {
         let (draw_w, draw_h) = self.render_size_for_surface(sw, sh);
 
         let panel_rect = Rect::new(0.0, 0.0, draw_w, draw_h);
-        surface.set_rounded_region(panel_rect, 14.0);
-        surface.fill_rounded_rect(panel_rect, 14.0, NOTCH_BG_SOLID.with_alpha(0.96))?;
-        surface.stroke_rounded_rect(panel_rect, 14.0, GLASS_BORDER, 1.0)?;
+        surface.set_rounded_region(panel_rect, 16.0);
+        surface.draw_liquid_glass_panel(
+            panel_rect,
+            LiquidGlassStyle::regular(16.0).without_shadow(),
+        )?;
 
-        // Title bar
+        // Subtle macOS window titlebar reflecting active pane
         surface.draw_text(
-            "SETTINGS",
-            Rect::new(18.0, 8.0, 140.0, 26.0),
-            11.5,
-            TEXT_PRIMARY.with_alpha(0.75),
+            "Settings",
+            Rect::new(18.0, 8.0, 120.0, 26.0),
+            12.0,
+            TEXT_TERTIARY,
             TextAlign::Leading,
         )?;
-        let close_r = Rect::new(draw_w - 38.0, 9.0, 24.0, 24.0);
-        let close_bg = if self.hovered_target == Some(HitTarget::Close) {
-            SURFACE_ELEVATED
-        } else {
-            GLASS_SURFACE.with_alpha(0.45)
-        };
-        surface.fill_rounded_rect(close_r, 12.0, close_bg)?;
-        surface.draw_text("X", close_r, 11.5, TEXT_PRIMARY, TextAlign::Center)?;
 
-        // Sidebar background & divider
-        if draw_h > TITLEBAR_HEIGHT + 20.0 {
-            let sidebar_bg = Rect::new(1.0, TITLEBAR_HEIGHT, SIDEBAR_WIDTH - 1.0, draw_h - TITLEBAR_HEIGHT - 1.0);
-            surface.fill_rounded_rect(sidebar_bg, 0.0, DOCK_SURFACE.with_alpha(0.45))?;
-            surface.fill_rounded_rect(
-                Rect::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT, 1.0, draw_h - TITLEBAR_HEIGHT),
-                0.0,
-                GLASS_BORDER,
-            )?;
+        // Crisp vector CloseX button inside Liquid Glass circle
+        let close_base = Rect::new(draw_w - 38.0, 9.0, 24.0, 24.0);
+        let close_r = scale_rect_centered(close_base, self.target_scale(HitTarget::Close));
+        let close_hovered = self.hovered_target == Some(HitTarget::Close);
+        let close_pressed = self.pressed_target == Some(HitTarget::Close);
+        surface.draw_liquid_glass_button(close_r, 12.0, None, close_hovered, close_pressed)?;
+        surface.draw_sf_symbol(
+            inset_rect(close_r, 6.0),
+            SfSymbol::CloseX,
+            if close_hovered {
+                TEXT_PRIMARY
+            } else {
+                TEXT_SECONDARY
+            },
+            1.5,
+        )?;
 
-            // Sidebar header
-            surface.draw_text(
-                "Hime Island",
-                Rect::new(18.0, TITLEBAR_HEIGHT + 10.0, SIDEBAR_WIDTH - 24.0, 22.0),
-                15.0,
-                TEXT_PRIMARY,
-                TextAlign::Leading,
-            )?;
-            surface.draw_text(
-                "Make it yours",
-                Rect::new(18.0, TITLEBAR_HEIGHT + 32.0, SIDEBAR_WIDTH - 24.0, 16.0),
-                11.0,
-                TEXT_SECONDARY,
-                TextAlign::Leading,
-            )?;
+        if draw_h <= TITLEBAR_HEIGHT + 20.0 {
+            return Ok(());
+        }
 
-            // Sidebar tabs
-            for (tab, rect) in self.tab_rects() {
-                if rect.y + rect.height > draw_h - 8.0 {
-                    continue;
-                }
-                let is_active = self.active_tab == tab;
-                let is_hovered = self.hovered_target == Some(HitTarget::Tab(tab));
-                if is_active {
-                    surface.fill_rounded_rect(rect, 8.0, SURFACE_ELEVATED)?;
-                    surface.stroke_rounded_rect(rect, 8.0, GLASS_BORDER, 1.0)?;
-                    surface.fill_rounded_rect(
-                        Rect::new(rect.x + 3.0, rect.y + 8.0, 3.0, rect.height - 16.0),
-                        1.5,
-                        ACCENT_CYAN,
-                    )?;
-                } else if is_hovered {
-                    surface.fill_rounded_rect(rect, 8.0, SURFACE_ELEVATED.with_alpha(0.55))?;
-                }
-                let text_color = if is_active || is_hovered {
-                    TEXT_PRIMARY
-                } else {
-                    TEXT_PRIMARY.with_alpha(0.84)
-                };
-                surface.draw_text(
-                    tab.label(),
-                    Rect::new(rect.x + 14.0, rect.y, rect.width - 20.0, rect.height),
-                    12.5,
-                    text_color,
-                    TextAlign::Leading,
+        // Sidebar smoked glass pane & hairline dividers
+        let sidebar_bg = Rect::new(
+            1.0,
+            TITLEBAR_HEIGHT,
+            SIDEBAR_WIDTH - 1.0,
+            draw_h - TITLEBAR_HEIGHT - 1.0,
+        );
+        surface.fill_rounded_rect(sidebar_bg, 0.0, GLASS_CLEAR.with_alpha(0.42))?;
+        surface.fill_rounded_rect(
+            Rect::new(SIDEBAR_WIDTH, 1.0, 1.0, draw_h - 2.0),
+            0.0,
+            DIVIDER_HAIRLINE,
+        )?;
+        surface.fill_rounded_rect(
+            Rect::new(SIDEBAR_WIDTH + 1.0, TITLEBAR_HEIGHT, draw_w - SIDEBAR_WIDTH - 2.0, 1.0),
+            0.0,
+            DIVIDER_HAIRLINE,
+        )?;
+
+        // Sidebar app badge & title
+        let badge_rect = Rect::new(18.0, TITLEBAR_HEIGHT + 13.0, 28.0, 28.0);
+        surface.draw_liquid_glass_panel(badge_rect, LiquidGlassStyle::elevated(8.0))?;
+        surface.draw_sf_symbol(
+            inset_rect(badge_rect, 6.0),
+            SfSymbol::Sparkle,
+            TEXT_PRIMARY,
+            1.4,
+        )?;
+        surface.draw_text_bold(
+            "Hime",
+            Rect::new(54.0, TITLEBAR_HEIGHT + 10.0, SIDEBAR_WIDTH - 64.0, 20.0),
+            14.0,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+        surface.draw_text(
+            "System Shell",
+            Rect::new(54.0, TITLEBAR_HEIGHT + 29.0, SIDEBAR_WIDTH - 64.0, 16.0),
+            10.5,
+            TEXT_SECONDARY,
+            TextAlign::Leading,
+        )?;
+
+        // Animated active tab indicator pill sliding smoothly with Spring::SMOOTH
+        let ind_y = self.tab_indicator_y.value;
+        if ind_y + TAB_HEIGHT <= draw_h - 8.0 {
+            let ind_rect = scale_rect_centered(
+                Rect::new(10.0, ind_y, SIDEBAR_WIDTH - 20.0, TAB_HEIGHT),
+                self.target_scale(HitTarget::Tab(self.active_tab)),
+            );
+            surface.draw_liquid_glass_panel(
+                ind_rect,
+                LiquidGlassStyle::tinted(SYSTEM_BLUE_TINT, 8.0).without_shadow(),
+            )?;
+        }
+
+        // Sidebar tabs with crisp vector SfSymbol icons
+        for (tab, base_rect) in self.tab_rects() {
+            if base_rect.y + base_rect.height > draw_h - 8.0 {
+                continue;
+            }
+            let is_active = self.active_tab == tab;
+            let is_hovered = self.hovered_target == Some(HitTarget::Tab(tab));
+            let rect = scale_rect_centered(base_rect, self.target_scale(HitTarget::Tab(tab)));
+
+            if !is_active && is_hovered {
+                surface.fill_rounded_rect(
+                    rect,
+                    8.0,
+                    GLASS_CONTROL.with_alpha_mul(self.hover_progress.value.clamp(0.4, 1.0)),
                 )?;
             }
 
-            // Content header
-            let content_x = SIDEBAR_WIDTH + CONTENT_PAD_X;
-            let content_w = (draw_w - content_x - CONTENT_PAD_X).max(120.0);
+            let icon_color = if is_active {
+                SYSTEM_BLUE
+            } else if is_hovered {
+                TEXT_PRIMARY
+            } else {
+                TEXT_SECONDARY
+            };
+            let text_color = if is_active || is_hovered {
+                TEXT_PRIMARY
+            } else {
+                TEXT_PRIMARY.with_alpha(0.84)
+            };
+
+            let icon_rect = Rect::new(rect.x + 10.0, rect.y + (rect.height - 15.0) * 0.5, 15.0, 15.0);
+            surface.draw_sf_symbol(icon_rect, tab.symbol(), icon_color, 1.45)?;
             surface.draw_text(
-                self.active_tab.label(),
-                Rect::new(content_x, TITLEBAR_HEIGHT + 10.0, content_w, 26.0),
-                18.0,
-                TEXT_PRIMARY,
+                tab.label(),
+                Rect::new(rect.x + 32.0, rect.y, rect.width - 38.0, rect.height),
+                12.5,
+                text_color,
                 TextAlign::Leading,
             )?;
-            surface.draw_text(
-                self.active_tab.subtitle(),
-                Rect::new(content_x, TITLEBAR_HEIGHT + 38.0, content_w, 18.0),
-                11.5,
-                TEXT_SECONDARY,
-                TextAlign::Leading,
-            )?;
+        }
 
-            // Content rows
-            let rows = self.rows_for_active_tab();
-            let rects = self.row_rects();
-            let base_content_w = (self.width - content_x - CONTENT_PAD_X).max(1.0);
-            let width_scale = content_w / base_content_w;
-            for (idx, (row, (_, rect))) in rows.into_iter().zip(rects.into_iter()).enumerate() {
-                if rect.y + rect.height > draw_h - 14.0 {
-                    continue;
-                }
-                let r = if matches!(row.kind, RowVisual::SummaryCard { .. }) {
-                    Rect::new(
-                        content_x + (rect.x - content_x) * width_scale,
-                        rect.y,
-                        rect.width * width_scale,
-                        rect.height,
-                    )
-                } else {
-                    Rect::new(rect.x, rect.y, content_w, rect.height)
-                };
-                let hovered = self.hovered_target == Some(HitTarget::Row(row.id));
-                let selected = self.selected_index == Some(idx);
+        // Content header with subtle tab-change fade
+        let content_alpha = self.content_fade.value.clamp(0.0, 1.0);
+        let content_x = SIDEBAR_WIDTH + CONTENT_PAD_X;
+        let content_w = (draw_w - content_x - CONTENT_PAD_X).max(120.0);
+        surface.draw_text_bold(
+            self.active_tab.label(),
+            Rect::new(content_x, TITLEBAR_HEIGHT + 12.0, content_w, 26.0),
+            18.0,
+            TEXT_PRIMARY.with_alpha_mul(content_alpha),
+            TextAlign::Leading,
+        )?;
+        surface.draw_text(
+            self.active_tab.subtitle(),
+            Rect::new(content_x, TITLEBAR_HEIGHT + 39.0, content_w, 18.0),
+            11.5,
+            TEXT_SECONDARY.with_alpha_mul(content_alpha),
+            TextAlign::Leading,
+        )?;
 
-                surface.fill_rounded_rect(
-                    r,
-                    10.0,
-                    if hovered {
-                        SURFACE_ELEVATED
-                    } else {
-                        SURFACE_ELEVATED.with_alpha(0.82)
-                    },
+        // Content rows
+        let rows = self.rows_for_active_tab();
+        let rects = self.row_rects();
+        let base_content_w = (self.width - content_x - CONTENT_PAD_X).max(1.0);
+        let width_scale = content_w / base_content_w;
+
+        for (idx, (row, (_, rect))) in rows.into_iter().zip(rects.into_iter()).enumerate() {
+            if rect.y + rect.height > draw_h - 14.0 {
+                continue;
+            }
+            let base_r = if matches!(row.kind, RowVisual::SummaryCard { .. }) {
+                Rect::new(
+                    content_x + (rect.x - content_x) * width_scale,
+                    rect.y,
+                    rect.width * width_scale,
+                    rect.height,
+                )
+            } else {
+                Rect::new(rect.x, rect.y, content_w, rect.height)
+            };
+            let r = scale_rect_centered(base_r, self.target_scale(HitTarget::Row(row.id)));
+            let hovered = self.hovered_target == Some(HitTarget::Row(row.id));
+            let selected = self.selected_index == Some(idx);
+
+            let card_fill = if hovered {
+                GLASS_ELEVATED.with_alpha_mul(content_alpha)
+            } else {
+                GLASS_ELEVATED.with_alpha_mul(0.74 * content_alpha)
+            };
+            surface.fill_rounded_rect(r, 10.0, card_fill)?;
+            let border_color = if selected {
+                SYSTEM_BLUE.with_alpha(0.75 * content_alpha)
+            } else if hovered {
+                GLASS_HAIRLINE.with_alpha_mul(1.25 * content_alpha)
+            } else {
+                DIVIDER_HAIRLINE.with_alpha_mul(content_alpha)
+            };
+            surface.stroke_rounded_rect(r, 10.0, border_color, if selected { 1.2 } else { 1.0 })?;
+
+            if let RowVisual::SummaryCard {
+                icon,
+                count,
+                action_label,
+            } = row.kind
+            {
+                let icon_rect = Rect::new(r.x + 10.0, r.y + 9.0, 14.0, 14.0);
+                surface.draw_sf_symbol(
+                    icon_rect,
+                    icon,
+                    TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                    1.4,
                 )?;
-                if selected {
-                    surface.stroke_rounded_rect(r, 10.0, ACCENT_CYAN.with_alpha(0.8), 1.2)?;
-                } else {
-                    surface.stroke_rounded_rect(r, 10.0, GLASS_BORDER, 1.0)?;
-                }
-
-                if let RowVisual::SummaryCard {
-                    count,
-                    action_label,
-                    accent,
-                } = row.kind
-                {
-                    surface.draw_text(
-                        row.title,
-                        Rect::new(r.x + 10.0, r.y + 8.0, (r.width - 66.0).max(40.0), 18.0),
-                        11.5,
-                        TEXT_PRIMARY,
-                        TextAlign::Leading,
-                    )?;
-                    let badge = Rect::new(r.x + r.width - 50.0, r.y + 7.0, 40.0, 20.0);
-                    surface.fill_rounded_rect(badge, 6.0, accent.with_alpha(0.18))?;
-                    surface.draw_text(
-                        &count.to_string(),
-                        badge,
-                        11.0,
-                        accent,
-                        TextAlign::Center,
-                    )?;
-
-                    let btn = Rect::new(r.x + 10.0, r.y + 35.0, (r.width - 20.0).max(40.0), 22.0);
-                    surface.fill_rounded_rect(btn, 6.0, accent.with_alpha(0.14))?;
-                    surface.stroke_rounded_rect(btn, 6.0, accent.with_alpha(0.42), 1.0)?;
-                    surface.draw_text(
-                        action_label,
-                        btn,
-                        11.0,
-                        TEXT_PRIMARY,
-                        TextAlign::Center,
-                    )?;
-                    continue;
-                }
-
-                // Pure white title & readable secondary subtitle
                 surface.draw_text(
                     row.title,
-                    Rect::new(r.x + 14.0, r.y + 5.0, r.width * 0.62, 18.0),
-                    12.0,
-                    TEXT_PRIMARY,
-                    TextAlign::Leading,
-                )?;
-                surface.draw_text(
-                    &row.desc,
-                    Rect::new(r.x + 14.0, r.y + 22.0, r.width * 0.64, 16.0),
-                    10.5,
-                    TEXT_SECONDARY,
+                    Rect::new(r.x + 28.0, r.y + 7.0, (r.width - 78.0).max(40.0), 18.0),
+                    11.5,
+                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
                     TextAlign::Leading,
                 )?;
 
-                // Right-hand interactive control
-                match row.kind {
-                    RowVisual::Toggle(on) => {
-                        let sw_w = 40.0;
-                        let sw_h = 22.0;
-                        let sw_x = r.x + r.width - sw_w - 14.0;
-                        let sw_y = r.y + (r.height - sw_h) * 0.5;
-                        let track_color = if on { ACCENT_CYAN } else { STATUS_OFFLINE.with_alpha(0.55) };
-                        surface.fill_rounded_rect(
+                let badge = Rect::new(r.x + r.width - 46.0, r.y + 7.0, 36.0, 18.0);
+                surface.fill_rounded_rect(
+                    badge,
+                    6.0,
+                    GLASS_CONTROL.with_alpha_mul(content_alpha),
+                )?;
+                surface.draw_text(
+                    &count.to_string(),
+                    badge,
+                    11.0,
+                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    TextAlign::Center,
+                )?;
+
+                let btn = Rect::new(r.x + 10.0, r.y + 35.0, (r.width - 20.0).max(40.0), 22.0);
+                surface.fill_rounded_rect(
+                    btn,
+                    7.0,
+                    if hovered {
+                        GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                    } else {
+                        GLASS_CONTROL.with_alpha_mul(content_alpha)
+                    },
+                )?;
+                surface.stroke_rounded_rect(
+                    btn,
+                    7.0,
+                    GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                    1.0,
+                )?;
+                let refresh_r = Rect::new(btn.x + btn.width * 0.5 - 30.0, btn.y + 5.0, 12.0, 12.0);
+                surface.draw_sf_symbol(
+                    refresh_r,
+                    SfSymbol::Refresh,
+                    TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                    1.3,
+                )?;
+                surface.draw_text(
+                    action_label,
+                    Rect::new(btn.x + 10.0, btn.y, btn.width - 10.0, btn.height),
+                    11.0,
+                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    TextAlign::Center,
+                )?;
+                continue;
+            }
+
+            // Crisp monochrome title & secondary subtitle
+            surface.draw_text(
+                row.title,
+                Rect::new(r.x + 14.0, r.y + 6.0, r.width * 0.62, 18.0),
+                12.0,
+                TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                TextAlign::Leading,
+            )?;
+            surface.draw_text(
+                &row.desc,
+                Rect::new(r.x + 14.0, r.y + 23.0, r.width * 0.64, 16.0),
+                10.5,
+                TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                TextAlign::Leading,
+            )?;
+
+            // Right-hand interactive control
+            match row.kind {
+                RowVisual::Toggle(on) => {
+                    let sw_w = 40.0;
+                    let sw_h = 22.0;
+                    let sw_x = r.x + r.width - sw_w - 14.0;
+                    let sw_y = r.y + (r.height - sw_h) * 0.5;
+                    let prog = self.toggle_progress(row.id, on);
+                    let off_track = GLASS_CONTROL_HOVER;
+                    let track_color = off_track
+                        .lerp(SYSTEM_BLUE, prog)
+                        .with_alpha_mul(content_alpha);
+                    surface.fill_rounded_rect(
+                        Rect::new(sw_x, sw_y, sw_w, sw_h),
+                        sw_h * 0.5,
+                        track_color,
+                    )?;
+                    if prog < 0.5 {
+                        surface.stroke_rounded_rect(
                             Rect::new(sw_x, sw_y, sw_w, sw_h),
                             sw_h * 0.5,
-                            track_color,
-                        )?;
-                        let knob_d = 16.0;
-                        let knob_x = if on {
-                            sw_x + sw_w - knob_d - 3.0
-                        } else {
-                            sw_x + 3.0
-                        };
-                        surface.fill_rounded_rect(
-                            Rect::new(knob_x, sw_y + 3.0, knob_d, knob_d),
-                            knob_d * 0.5,
-                            TEXT_PRIMARY,
-                        )?;
-                    }
-                    RowVisual::Pill(val, accent) | RowVisual::Button(val, accent) => {
-                        let pill_w = 138.0_f32.min(r.width * 0.34);
-                        let pill_h = 26.0;
-                        let pill_rect = Rect::new(
-                            r.x + r.width - pill_w - 14.0,
-                            r.y + (r.height - pill_h) * 0.5,
-                            pill_w,
-                            pill_h,
-                        );
-                        surface.fill_rounded_rect(
-                            pill_rect,
-                            8.0,
-                            accent.with_alpha(0.16),
-                        )?;
-                        surface.stroke_rounded_rect(
-                            pill_rect,
-                            8.0,
-                            accent.with_alpha(0.45),
+                            GLASS_HAIRLINE.with_alpha_mul((1.0 - prog) * content_alpha),
                             1.0,
                         )?;
+                    }
+                    let knob_d = 16.0;
+                    let knob_x = sw_x + 3.0 + (sw_w - knob_d - 6.0) * prog;
+                    surface.fill_rounded_rect(
+                        Rect::new(knob_x, sw_y + 3.0, knob_d, knob_d),
+                        knob_d * 0.5,
+                        TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    )?;
+                }
+                RowVisual::Picker(val) => {
+                    let pill_w = 144.0_f32.min(r.width * 0.35);
+                    let pill_h = 26.0;
+                    let pill_rect = Rect::new(
+                        r.x + r.width - pill_w - 14.0,
+                        r.y + (r.height - pill_h) * 0.5,
+                        pill_w,
+                        pill_h,
+                    );
+                    surface.fill_rounded_rect(
+                        pill_rect,
+                        7.0,
+                        if hovered {
+                            GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                        } else {
+                            GLASS_CONTROL.with_alpha_mul(content_alpha)
+                        },
+                    )?;
+                    surface.stroke_rounded_rect(
+                        pill_rect,
+                        7.0,
+                        GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                        1.0,
+                    )?;
+                    surface.draw_text(
+                        &val,
+                        Rect::new(pill_rect.x + 10.0, pill_rect.y, pill_rect.width - 28.0, pill_rect.height),
+                        11.5,
+                        TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                        TextAlign::Leading,
+                    )?;
+                    surface.draw_sf_symbol(
+                        Rect::new(
+                            pill_rect.x + pill_rect.width - 18.0,
+                            pill_rect.y + 7.0,
+                            11.0,
+                            11.0,
+                        ),
+                        SfSymbol::ChevronDown,
+                        TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                        1.4,
+                    )?;
+                }
+                RowVisual::Button { label, status_dot } => {
+                    let pill_w = 132.0_f32.min(r.width * 0.33);
+                    let pill_h = 26.0;
+                    let pill_rect = Rect::new(
+                        r.x + r.width - pill_w - 14.0,
+                        r.y + (r.height - pill_h) * 0.5,
+                        pill_w,
+                        pill_h,
+                    );
+                    surface.fill_rounded_rect(
+                        pill_rect,
+                        7.0,
+                        if hovered {
+                            GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                        } else {
+                            GLASS_CONTROL.with_alpha_mul(content_alpha)
+                        },
+                    )?;
+                    surface.stroke_rounded_rect(
+                        pill_rect,
+                        7.0,
+                        GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                        1.0,
+                    )?;
+                    if let Some(dot_color) = status_dot {
+                        surface.fill_circle(
+                            pill_rect.x + 14.0,
+                            pill_rect.y + pill_rect.height * 0.5,
+                            3.5,
+                            dot_color.with_alpha_mul(content_alpha),
+                        )?;
                         surface.draw_text(
-                            &val,
+                            &label,
+                            Rect::new(
+                                pill_rect.x + 22.0,
+                                pill_rect.y,
+                                pill_rect.width - 28.0,
+                                pill_rect.height,
+                            ),
+                            11.5,
+                            TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                            TextAlign::Center,
+                        )?;
+                    } else {
+                        surface.draw_text(
+                            &label,
                             pill_rect,
                             11.5,
-                            TEXT_PRIMARY,
+                            TEXT_PRIMARY.with_alpha_mul(content_alpha),
                             TextAlign::Center,
                         )?;
                     }
-                    RowVisual::Info(val) => {
-                        surface.draw_text(
-                            &val,
-                            Rect::new(r.x + r.width * 0.65, r.y, r.width * 0.35 - 14.0, r.height),
-                            11.5,
-                            TEXT_PRIMARY,
-                            TextAlign::Trailing,
-                        )?;
-                    }
-                    RowVisual::SummaryCard { .. } => {}
                 }
-            }
-
-            if let Some(notice) = &self.status_notice {
-                if draw_h > 470.0 {
+                RowVisual::Info(val) => {
                     surface.draw_text(
-                        notice,
-                        Rect::new(content_x, draw_h - 30.0, content_w, 20.0),
-                        11.0,
-                        STATUS_SUCCESS,
-                        TextAlign::Leading,
+                        &val,
+                        Rect::new(r.x + r.width * 0.65, r.y, r.width * 0.35 - 14.0, r.height),
+                        11.5,
+                        TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                        TextAlign::Trailing,
                     )?;
                 }
+                RowVisual::SummaryCard { .. } => {}
+            }
+        }
+
+        if let Some(notice) = &self.status_notice {
+            if draw_h > 470.0 {
+                surface.draw_sf_symbol(
+                    Rect::new(content_x, draw_h - 26.0, 12.0, 12.0),
+                    SfSymbol::Check,
+                    STATUS_LIVE_GREEN,
+                    1.5,
+                )?;
+                surface.draw_text(
+                    notice,
+                    Rect::new(content_x + 18.0, draw_h - 30.0, content_w - 18.0, 20.0),
+                    11.0,
+                    TEXT_SECONDARY,
+                    TextAlign::Leading,
+                )?;
             }
         }
 
@@ -1416,6 +1747,29 @@ fn point_in_rect(x: f32, y: f32, r: Rect) -> bool {
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
 }
 
+fn inset_rect(r: Rect, pad: f32) -> Rect {
+    Rect::new(
+        r.x + pad,
+        r.y + pad,
+        (r.width - pad * 2.0).max(2.0),
+        (r.height - pad * 2.0).max(2.0),
+    )
+}
+
+fn scale_rect_centered(r: Rect, scale: f32) -> Rect {
+    if (scale - 1.0).abs() < 1e-4 {
+        return r;
+    }
+    let w = r.width * scale;
+    let h = r.height * scale;
+    Rect::new(
+        r.x + (r.width - w) * 0.5,
+        r.y + (r.height - h) * 0.5,
+        w,
+        h,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1456,40 +1810,41 @@ mod tests {
         // Close button top-right
         assert_eq!(panel.hit_test_action(714.0, 20.0), Some(SettingsAction::Close));
 
-        // Click Notch tab in left sidebar (index 1 -> y = 42 + 68 + 38 = 148..182)
+        // Click Notch tab in left sidebar
         assert_eq!(
             panel.handle_click(60.0, 160.0),
             Some(SettingsAction::SelectTab(SettingsTab::Notch))
         );
         assert_eq!(panel.active_tab, SettingsTab::Notch);
+        assert!(panel.is_animating());
 
-        // First row on Notch tab: Notch Behavior (y = 42 + 74 = 116..162)
+        // First row on Notch tab: Notch Behavior
         assert_eq!(
             panel.handle_click(300.0, 130.0),
             Some(SettingsAction::ToggleNotchMode)
         );
         assert_eq!(panel.state.notch_behavior, "fixed");
 
-        // Third row on Notch tab: Free Drag (y = 116 + 2 * 54 = 224..270)
+        // Third row on Notch tab: Free Drag
         assert_eq!(
             panel.handle_click(300.0, 240.0),
             Some(SettingsAction::ToggleFreeDrag)
         );
         assert!(panel.state.free_drag_enabled);
 
-        // Switch to Dock tab (index 2 -> y = 42 + 68 + 2*38 = 186..220)
+        // Switch to Dock tab
         assert_eq!(
             panel.handle_click(60.0, 200.0),
             Some(SettingsAction::SelectTab(SettingsTab::Dock))
         );
-        // Second row on Dock tab: Dock Behavior (y = 116 + 54 = 170..216)
+        // Second row on Dock tab: Dock Behavior
         assert_eq!(
             panel.handle_click(300.0, 185.0),
             Some(SettingsAction::ToggleDockMode)
         );
         assert_eq!(panel.state.dock_mode, "smart");
 
-        // Switch to Hime AI tab (index 4 -> y = 42 + 68 + 4*38 = 262..296)
+        // Switch to Hime AI tab
         assert_eq!(
             panel.handle_click(60.0, 278.0),
             Some(SettingsAction::SelectTab(SettingsTab::HimeAi))
@@ -1545,6 +1900,72 @@ mod tests {
         panel.close();
         assert!(!panel.visible);
         assert_eq!(panel.open_spring.value, 0.0);
+        assert!(!panel.is_animating());
+    }
+
+    #[test]
+    fn spring_animations_settle_on_tab_switch_toggle_and_press() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+        assert!(!panel.is_animating());
+
+        // Switching tab triggers indicator slide + content fade
+        panel.handle_click(60.0, 160.0);
+        assert_eq!(panel.active_tab, SettingsTab::Notch);
+        assert!(panel.is_animating());
+        assert!(panel.press_scale.value < 1.0);
+
+        for _ in 0..90 {
+            panel.tick(1.0 / 60.0);
+        }
+        assert!(!panel.is_animating());
+        assert!((panel.tab_indicator_y.value - SettingsPanel::tab_y(SettingsTab::Notch)).abs() < 0.05);
+        assert!((panel.press_scale.value - 1.0).abs() < 0.02);
+
+        // Toggling a switch animates its knob spring and settles cleanly
+        let (rx, ry) = {
+            let r = panel
+                .row_rects()
+                .into_iter()
+                .find(|(id, _)| *id == RowControlId::ToggleFreeDrag)
+                .unwrap()
+                .1;
+            (r.x + r.width * 0.5, r.y + r.height * 0.5)
+        };
+        panel.handle_click(rx, ry);
+        assert!(panel.state.free_drag_enabled);
+        assert!(panel.is_animating());
+        for _ in 0..60 {
+            panel.tick(1.0 / 60.0);
+        }
+        assert!(!panel.is_animating());
+        assert!((panel.toggle_progress(RowControlId::ToggleFreeDrag, false) - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn settings_window_renders_liquid_glass_and_sf_symbols_without_error() {
+        let surface = match NativeSurface::new(
+            "HimeSettingsTest",
+            -2000,
+            -2000,
+            SETTINGS_WINDOW_WIDTH,
+            SETTINGS_WINDOW_HEIGHT,
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut panel = SettingsPanel::new();
+        panel.open();
+        panel.set_status_notice(Some("Connected to 9Router".to_string()));
+        for &tab in &SettingsTab::ALL {
+            panel.select_tab(tab);
+            for _ in 0..45 {
+                panel.tick(1.0 / 60.0);
+            }
+            surface.begin_draw();
+            panel.render(&surface).expect("settings render");
+            surface.end_draw_and_present().expect("settings present");
+        }
     }
 
     fn rects_overlap(a: Rect, b: Rect) -> bool {

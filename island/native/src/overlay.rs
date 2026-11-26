@@ -1,41 +1,36 @@
 //! Native Dual Edge Overlays (`OverlayHud`, `DualEdgeOverlays`) rendered via Direct2D.
 //!
-//! - **Left Edge (`HudEdge::Left`, `HudKind::Volume`):** Always-present `6x56` edge handle
-//!   pill that smoothly expands on hover, scroll, or volume change into a `68x210` vertical
-//!   glass capsule with a cyan/white gradient slider, crisp vector speaker icon, white `%`,
-//!   and friendly audio device label.
-//! - **Right Edge (`HudEdge::Right`, `HudKind::Brightness`):** Always-present `6x56` edge
-//!   handle pill that smoothly expands into a `68x210` vertical glass capsule with a
-//!   yellow-orange/white gradient slider, crisp rotating vector sun icon, and white `%`.
+//! Follows Apple Liquid Glass & Motion HIG:
+//! - **Minimized / Idle State:** 100% invisible (0 alpha, empty 0x0 region, click-through).
+//! - **Left Edge (`HudEdge::Left`, `HudKind::Volume`):** Smoothly emerges (`Spring::EMERGE`)
+//!   on left-edge hover, scroll, or volume OSD change as a translucent `58x196` Liquid Glass
+//!   capsule containing only percentage, monochrome glass slider bar, and `SfSymbol` speaker icon.
+//! - **Right Edge (`HudEdge::Right`, `HudKind::Brightness`):** Smoothly emerges on right-edge
+//!   hover, scroll, or brightness OSD change with percentage, monochrome glass slider bar, and
+//!   `SfSymbol::BrightnessSun`.
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
-    D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
-};
-use windows::Win32::Graphics::Direct2D::{
-    ID2D1StrokeStyle, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
-};
-use windows_numerics::Vector2 as D2D_POINT_2F;
 
-use crate::animation::SpringValue;
-use crate::d2d::{EdgeSide, NativeSurface, Rect, TextAlign};
+use crate::animation::{Spring, SpringValue};
+use crate::d2d::{EdgeSide, LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
 use crate::theme::{
-    Color, ACCENT_CYAN, DOCK_SURFACE, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_OFFLINE,
-    STATUS_WARNING, SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    GLASS_CONTROL_HOVER, GLASS_HAIRLINE, GLASS_SPECULAR_TOP, SLIDER_FILL, SLIDER_TRACK,
+    STATUS_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 const DEFAULT_AUTO_HIDE_SECS: f32 = 2.5;
-const IDLE_PILL_WIDTH: f32 = 6.0;
-const IDLE_PILL_HEIGHT: f32 = 56.0;
-const EXPANDED_PANEL_WIDTH: f32 = 68.0;
-const EXPANDED_PANEL_HEIGHT: f32 = 210.0;
+const EXPANDED_PANEL_WIDTH: f32 = 58.0;
+const EXPANDED_PANEL_HEIGHT: f32 = 196.0;
+const PANEL_EDGE_MARGIN: f32 = 8.0;
+const PANEL_CORNER_RADIUS: f32 = 24.0;
 const SLIDER_TRACK_WIDTH: f32 = 12.0;
-const SLIDER_HIT_MARGIN_X: f32 = 10.0;
-const SLIDER_HIT_MARGIN_Y: f32 = 4.0;
-const EDGE_WAKE_MARGIN: f32 = 6.0;
+const SLIDER_HIT_MARGIN_X: f32 = 12.0;
+const SLIDER_HIT_MARGIN_Y: f32 = 6.0;
+const EDGE_WAKE_WIDTH: f32 = 6.0;
+const EDGE_WAKE_HEIGHT: f32 = 140.0;
+const EDGE_HOVER_BRIDGE: f32 = 12.0;
+const MIN_EMERGE_SCALE: f32 = 0.90;
 
 /// Screen edge where the HUD appears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -55,8 +50,11 @@ pub enum HudKind {
     Brightness,
 }
 
-/// Native Direct2D edge-anchored HUD for Volume (left) and Brightness (right)
-/// with always-present `6x56` idle edge pill and spring-expanded `68x210` slider capsule.
+/// Native Direct2D edge-anchored HUD for Volume (left) and Brightness (right).
+///
+/// Completely invisible (`0` alpha / empty region / click-through) when idle; emerges
+/// with Apple `Spring::EMERGE` into a `58x196` Liquid Glass slider capsule on edge hover
+/// or OSD updates, and collapses cleanly with `Spring::RECEDE` on timeout or outside click.
 #[derive(Debug, Clone)]
 pub struct OverlayHud {
     pub edge: HudEdge,
@@ -82,7 +80,7 @@ impl Default for OverlayHud {
 
 impl OverlayHud {
     /// Creates an enabled edge HUD anchored to `edge` (`Left` -> Volume, `Right` -> Brightness),
-    /// resting as a `6x56` idle edge pill.
+    /// resting completely invisible until woken by hover or OSD change.
     pub fn new(edge: HudEdge) -> Self {
         let kind = match edge {
             HudEdge::Left => HudKind::Volume,
@@ -112,18 +110,17 @@ impl OverlayHud {
             enabled: true,
             is_hovered: false,
             is_dragging: false,
-            visibility: SpringValue::gentle(1.0),
-            expand: SpringValue::snappy(0.0),
-            bar_fill: SpringValue::snappy(0.5),
+            visibility: SpringValue::emerge(0.0),
+            expand: SpringValue::emerge(0.0),
+            bar_fill: SpringValue::knob_settle(0.5),
             auto_hide_timer: 0.0,
             auto_hide_duration: DEFAULT_AUTO_HIDE_SECS,
         }
     }
 
-    /// Enables or disables this edge overlay. When disabled, even the idle pill is hidden.
+    /// Enables or disables this edge overlay. When disabled, it immediately collapses and hides.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
-        self.visibility.set_target(if enabled { 1.0 } else { 0.0 });
         if !enabled {
             self.hide();
         }
@@ -136,11 +133,10 @@ impl OverlayHud {
         self.percent = clamped;
         self.muted = muted;
         self.device_name = sanitize_device_name(device_name.as_deref());
-        self.expand.set_target(1.0);
-        self.bar_fill
-            .set_target(if muted { 0.0 } else { clamped as f32 / 100.0 });
+        let fill = if muted { 0.0 } else { clamped as f32 / 100.0 };
+        self.bar_fill.animate_to(fill, Spring::KNOB_SETTLE);
         if self.enabled {
-            self.visibility.set_target(1.0);
+            self.launch_open();
             self.auto_hide_timer = self.auto_hide_duration;
         }
     }
@@ -152,23 +148,23 @@ impl OverlayHud {
         self.percent = clamped;
         self.muted = false;
         self.device_name = None;
-        self.expand.set_target(1.0);
-        self.bar_fill.set_target(clamped as f32 / 100.0);
+        self.bar_fill
+            .animate_to(clamped as f32 / 100.0, Spring::KNOB_SETTLE);
         if self.enabled {
-            self.visibility.set_target(1.0);
+            self.launch_open();
             self.auto_hide_timer = self.auto_hide_duration;
         }
     }
 
-    /// Updates hover state. Hovering expands the edge pill into the `68x210` slider capsule.
+    /// Updates hover state. Hovering the edge wakes and emerges the `58x196` Liquid Glass capsule.
     pub fn set_hovered(&mut self, hovered: bool) {
         self.is_hovered = hovered;
         if hovered {
             if self.enabled {
-                self.expand.set_target(1.0);
+                self.launch_open();
             }
         } else if !self.is_dragging && self.auto_hide_timer <= 0.0 {
-            self.expand.set_target(0.0);
+            self.launch_close();
         }
     }
 
@@ -177,10 +173,16 @@ impl OverlayHud {
         self.is_dragging = dragging;
         if dragging {
             if self.enabled {
-                self.expand.set_target(1.0);
+                self.launch_open();
             }
         } else {
             self.auto_hide_timer = self.auto_hide_duration;
+            let fill = if self.muted {
+                0.0
+            } else {
+                self.percent as f32 / 100.0
+            };
+            self.bar_fill.animate_to(fill, Spring::KNOB_SETTLE);
         }
     }
 
@@ -215,10 +217,14 @@ impl OverlayHud {
             return false;
         }
         self.muted = !self.muted;
-        self.bar_fill
-            .set_target(if self.muted { 0.0 } else { self.percent as f32 / 100.0 });
+        let fill = if self.muted {
+            0.0
+        } else {
+            self.percent as f32 / 100.0
+        };
+        self.bar_fill.animate_to(fill, Spring::KNOB_SETTLE);
         if self.enabled {
-            self.expand.set_target(1.0);
+            self.launch_open();
             self.auto_hide_timer = self.auto_hide_duration;
         }
         self.muted
@@ -230,29 +236,61 @@ impl OverlayHud {
         if self.kind == HudKind::Volume {
             self.muted = clamped == 0;
         }
-        self.bar_fill
-            .set_target(if self.muted { 0.0 } else { clamped as f32 / 100.0 });
+        let fill = if self.muted {
+            0.0
+        } else {
+            clamped as f32 / 100.0
+        };
+        let spring = if self.is_dragging {
+            Spring::INTERACTIVE
+        } else {
+            Spring::KNOB_SETTLE
+        };
+        self.bar_fill.animate_to(fill, spring);
         if self.enabled {
-            self.expand.set_target(1.0);
+            self.launch_open();
             self.auto_hide_timer = self.auto_hide_duration;
         }
     }
 
-    /// Collapses the expanded panel back to the `6x56` idle edge pill.
+    fn launch_open(&mut self) {
+        if self.expand.target < 0.5 {
+            self.expand.launch_to(1.0, Spring::EMERGE, 1.0);
+        }
+        if self.visibility.target < 0.5 {
+            self.visibility.launch_to(1.0, Spring::EMERGE, 1.0);
+        }
+    }
+
+    fn launch_close(&mut self) {
+        if self.expand.target > 0.5 {
+            self.expand.launch_to(0.0, Spring::RECEDE, 1.0);
+        }
+        if self.visibility.target > 0.5 {
+            self.visibility.launch_to(0.0, Spring::RECEDE, 1.0);
+        }
+    }
+
+    /// Collapses the expanded capsule immediately back to invisible idle state (`Spring::RECEDE`).
     pub fn hide(&mut self) {
         self.auto_hide_timer = 0.0;
         self.is_hovered = false;
         self.is_dragging = false;
-        self.expand.set_target(0.0);
+        self.launch_close();
     }
 
-    /// Advances the auto-hide timer and spring animations by `dt` seconds.
+    /// Advances the auto-hide timer and Apple spring animations by `dt` seconds.
     /// Returns `true` while still animating or while an active auto-hide timer is running.
     pub fn tick(&mut self, dt: f32) -> bool {
-        if dt > 0.0 && dt.is_finite() && !self.is_hovered && !self.is_dragging && self.auto_hide_timer > 0.0 {
+        if dt > 0.0
+            && dt.is_finite()
+            && !self.is_hovered
+            && !self.is_dragging
+            && self.auto_hide_timer > 0.0
+        {
             self.auto_hide_timer = (self.auto_hide_timer - dt).max(0.0);
             if self.auto_hide_timer == 0.0 {
-                self.expand.set_target(0.0);
+                self.launch_close();
             }
         }
         self.visibility.tick(dt);
@@ -264,53 +302,68 @@ impl OverlayHud {
             || !self.bar_fill.is_settled()
     }
 
-    /// Returns `true` when the edge overlay surface (idle pill or expanded capsule) should be shown.
+    /// Returns `true` when the edge overlay surface is awake, expanding, or receding.
+    /// When idle, returns `false` so the host hides the HWND and keeps it 100% click-through.
     pub fn is_visible(&self) -> bool {
-        self.enabled && (self.visibility.value > 0.01 || self.visibility.target > 0.01)
+        self.enabled && self.is_expanded()
     }
 
-    /// Returns `true` when the HUD is expanded (hovered, dragging, timer active, or animating open).
+    /// Returns `true` when the HUD is expanded (hovered, dragging, timer active, or animating).
     pub fn is_expanded(&self) -> bool {
         self.enabled
             && (self.is_hovered
                 || self.is_dragging
                 || self.auto_hide_timer > 0.0
-                || self.expand.value > 0.05
-                || self.expand.target > 0.5)
+                || self.expand.value > 0.01
+                || self.expand.target > 0.5
+                || self.visibility.value > 0.01
+                || self.visibility.target > 0.5)
     }
 
-    /// Computes the current bounding rectangle (interpolated between `6x56` idle pill and
-    /// `68x210` expanded capsule) anchored flush to the configured screen edge.
+    /// Invisible screen-edge hover trigger rectangle (in surface-local DIPs) used to wake
+    /// the minimized overlay without rendering any visible pixels.
+    pub fn wake_hit_rect(&self, surface_rect: Rect) -> Rect {
+        let h = EDGE_WAKE_HEIGHT.min(surface_rect.height.max(EDGE_WAKE_HEIGHT));
+        let y = surface_rect.y + ((surface_rect.height - h) * 0.5).max(0.0);
+        let x = match self.edge {
+            HudEdge::Left => surface_rect.x,
+            HudEdge::Right => surface_rect.x + (surface_rect.width - EDGE_WAKE_WIDTH).max(0.0),
+        };
+        Rect::new(x, y, EDGE_WAKE_WIDTH, h)
+    }
+
+    /// Computes the current bounding rectangle: empty (`0x0`) when idle, or gliding smoothly
+    /// from the screen edge into the floating `58x196` capsule.
     pub fn computed_rect(&self, surface_width: f32, surface_height: f32) -> Rect {
         let t = self.expand.value.clamp(0.0, 1.0);
-        let w = IDLE_PILL_WIDTH + (EXPANDED_PANEL_WIDTH - IDLE_PILL_WIDTH) * t;
-        let h = IDLE_PILL_HEIGHT + (EXPANDED_PANEL_HEIGHT - IDLE_PILL_HEIGHT) * t;
-        self.edge_anchored_rect(surface_width, surface_height, w, h)
-    }
+        if !self.enabled || t <= 0.01 {
+            let edge_x = match self.edge {
+                HudEdge::Left => 0.0,
+                HudEdge::Right => surface_width.max(0.0),
+            };
+            return Rect::new(edge_x, (surface_height * 0.5).max(0.0), 0.0, 0.0);
+        }
 
-    /// Computes the full `68x210` expanded panel rectangle anchored flush to `self.edge`.
-    pub fn expanded_rect(&self, surface_width: f32, surface_height: f32) -> Rect {
-        self.edge_anchored_rect(
-            surface_width,
-            surface_height,
-            EXPANDED_PANEL_WIDTH,
-            EXPANDED_PANEL_HEIGHT,
-        )
-    }
-
-    fn edge_anchored_rect(
-        &self,
-        surface_width: f32,
-        surface_height: f32,
-        width: f32,
-        height: f32,
-    ) -> Rect {
+        let scale = MIN_EMERGE_SCALE + (1.0 - MIN_EMERGE_SCALE) * t;
+        let w = EXPANDED_PANEL_WIDTH * scale;
+        let h = EXPANDED_PANEL_HEIGHT * scale;
+        let slide = (1.0 - t) * (EXPANDED_PANEL_WIDTH + PANEL_EDGE_MARGIN);
         let x = match self.edge {
-            HudEdge::Left => 0.0,
-            HudEdge::Right => (surface_width - width).max(0.0),
+            HudEdge::Left => PANEL_EDGE_MARGIN - slide,
+            HudEdge::Right => (surface_width - PANEL_EDGE_MARGIN - w) + slide,
         };
-        let y = ((surface_height - height) * 0.5).max(0.0);
-        Rect::new(x, y, width, height)
+        let y = ((surface_height - h) * 0.5).max(0.0);
+        Rect::new(x, y, w, h)
+    }
+
+    /// Computes the full `58x196` expanded panel rectangle anchored near `self.edge`.
+    pub fn expanded_rect(&self, surface_width: f32, surface_height: f32) -> Rect {
+        let x = match self.edge {
+            HudEdge::Left => PANEL_EDGE_MARGIN,
+            HudEdge::Right => (surface_width - PANEL_EDGE_MARGIN - EXPANDED_PANEL_WIDTH).max(0.0),
+        };
+        let y = ((surface_height - EXPANDED_PANEL_HEIGHT) * 0.5).max(0.0);
+        Rect::new(x, y, EXPANDED_PANEL_WIDTH, EXPANDED_PANEL_HEIGHT)
     }
 
     /// Returns the vertical slider track rectangle when the HUD is expanded.
@@ -326,8 +379,8 @@ impl OverlayHud {
         let panel_abs_x = surface_rect.x + panel.x;
         let panel_abs_y = surface_rect.y + panel.y;
         let track_x = panel_abs_x + (panel.width - SLIDER_TRACK_WIDTH) * 0.5;
-        let track_y = panel_abs_y + 34.0;
-        let track_h = (panel.height - 88.0).max(40.0);
+        let track_y = panel_abs_y + 40.0;
+        let track_h = (panel.height - 96.0).max(40.0);
         Some(Rect::new(track_x, track_y, SLIDER_TRACK_WIDTH, track_h))
     }
 
@@ -346,27 +399,34 @@ impl OverlayHud {
         Some(ratio)
     }
 
-    /// Returns `true` when `(x, y)` hits the idle pill or expanded capsule (with a small edge wake margin).
+    /// Returns `true` when `(x, y)` hits the awake capsule (bridged smoothly to the screen edge).
     pub fn hit_test_pill(&self, x: f32, y: f32, surface_rect: Rect) -> bool {
         if !self.is_visible() {
             return false;
         }
         let local_rect = self.computed_rect(surface_rect.width, surface_rect.height);
+        if local_rect.width <= 0.0 || local_rect.height <= 0.0 {
+            return false;
+        }
         let rx = surface_rect.x + local_rect.x;
         let ry = surface_rect.y + local_rect.y;
         let (hx, hw) = match self.edge {
-            HudEdge::Left => (rx, local_rect.width + EDGE_WAKE_MARGIN),
-            HudEdge::Right => (
-                (rx - EDGE_WAKE_MARGIN).max(surface_rect.x),
-                local_rect.width + EDGE_WAKE_MARGIN,
+            HudEdge::Left => (
+                surface_rect.x,
+                (rx - surface_rect.x).max(0.0) + local_rect.width + EDGE_HOVER_BRIDGE,
             ),
+            HudEdge::Right => {
+                let left_bound = (rx - EDGE_HOVER_BRIDGE).max(surface_rect.x);
+                let right_bound = surface_rect.x + surface_rect.width;
+                (left_bound, (right_bound - left_bound).max(0.0))
+            }
         };
-        let hy = ry - 4.0;
-        let hh = local_rect.height + 8.0;
+        let hy = ry - 6.0;
+        let hh = local_rect.height + 12.0;
         x >= hx && x <= hx + hw && y >= hy && y <= hy + hh
     }
 
-    /// Returns `true` when `(x, y)` hits the icon button at the bottom of the expanded panel.
+    /// Returns `true` when `(x, y)` hits the speaker mute button at the bottom of the expanded panel.
     pub fn hit_test_mute_button(&self, x: f32, y: f32, surface_rect: Rect) -> bool {
         if self.kind != HudKind::Volume || !self.is_expanded() {
             return false;
@@ -377,10 +437,10 @@ impl OverlayHud {
             self.expanded_rect(surface_rect.width, surface_rect.height)
         };
         let icon_rect = Rect::new(
-            surface_rect.x + panel.x + 12.0,
-            surface_rect.y + panel.y + panel.height - 50.0,
-            panel.width - 24.0,
-            30.0,
+            surface_rect.x + panel.x + 8.0,
+            surface_rect.y + panel.y + panel.height - 48.0,
+            (panel.width - 16.0).max(24.0),
+            36.0,
         );
         x >= icon_rect.x
             && x <= icon_rect.x + icon_rect.width
@@ -388,95 +448,80 @@ impl OverlayHud {
             && y <= icon_rect.y + icon_rect.height
     }
 
-    /// Renders either the sleek `6x56` idle edge pill or the expanded `68x210` glass capsule.
+    /// Renders either an invisible empty region (when idle) or the Liquid Glass slider capsule.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let vis_alpha = self.visibility.value.clamp(0.0, 1.0);
-        if !self.enabled || vis_alpha <= 0.01 {
-            return Ok(());
-        }
-
-        let (sw, sh) = surface.dip_size();
         let t = self.expand.value.clamp(0.0, 1.0);
-        let rect = self.computed_rect(sw, sh);
         let edge_side = match self.edge {
             HudEdge::Left => EdgeSide::Left,
             HudEdge::Right => EdgeSide::Right,
         };
-        let corner_r = 3.0 + 15.0 * t;
 
-        surface.set_edge_surface_region(rect, 0.0, corner_r, edge_side, false);
-
-        if t < 0.22 {
-            // Idle Edge Pill (`6x56`) flush against left/right edge
-            let pill_bg = NOTCH_BG_SOLID.with_alpha(0.92 * vis_alpha);
-            surface.draw_edge_surface(
-                rect,
+        if !self.enabled || vis_alpha <= 0.02 || t <= 0.02 {
+            surface.set_edge_surface_region(
+                Rect::new(0.0, 0.0, 0.0, 0.0),
                 0.0,
-                corner_r,
+                0.0,
                 edge_side,
                 false,
-                pill_bg,
-                Some(GLASS_BORDER.with_alpha(0.45 * vis_alpha)),
-            )?;
-
-            let accent_color = match self.kind {
-                HudKind::Volume if self.muted => STATUS_OFFLINE,
-                HudKind::Volume => ACCENT_CYAN,
-                HudKind::Brightness => STATUS_WARNING,
-            };
-            let bar_x = match self.edge {
-                HudEdge::Left => rect.x + 1.5,
-                HudEdge::Right => rect.x + rect.width - 3.5,
-            };
-            let indicator = Rect::new(bar_x, rect.y + 12.0, 2.0, (rect.height - 24.0).max(8.0));
-            surface.fill_rounded_rect(indicator, 1.0, accent_color.with_alpha(0.88 * vis_alpha))?;
+            );
             return Ok(());
         }
 
-        // Expanded Edge Panel (`68x210`)
-        let content_alpha = ((t - 0.15) / 0.85).clamp(0.0, 1.0) * vis_alpha;
-        surface.draw_edge_surface(
-            rect,
-            0.0,
-            corner_r,
-            edge_side,
-            false,
-            DOCK_SURFACE.with_alpha(0.95 * vis_alpha),
-            Some(GLASS_BORDER.with_alpha(0.32 * vis_alpha)),
-        )?;
-
-        if rect.width < 40.0 || content_alpha <= 0.02 {
+        let (sw, sh) = surface.dip_size();
+        let rect = self.computed_rect(sw, sh);
+        if rect.width <= 1.0 || rect.height <= 1.0 {
+            surface.set_edge_surface_region(
+                Rect::new(0.0, 0.0, 0.0, 0.0),
+                0.0,
+                0.0,
+                edge_side,
+                false,
+            );
             return Ok(());
         }
 
-        // 1. White percentage header (`#FFFFFF`)
+        surface.set_edge_surface_region(rect, 0.0, PANEL_CORNER_RADIUS, edge_side, false);
+
+        // Translucent Apple Liquid Glass floating capsule
+        let mut glass_style = LiquidGlassStyle::clear(PANEL_CORNER_RADIUS)
+            .with_shadow(8.0, 2.0, 0.22 * vis_alpha);
+        glass_style.hovered = self.is_hovered;
+        glass_style.pressed = self.is_dragging;
+        surface.draw_liquid_glass_panel(rect, glass_style)?;
+
+        let content_alpha = ((t - 0.12) / 0.88).clamp(0.0, 1.0) * vis_alpha;
+        if rect.width < 36.0 || content_alpha <= 0.02 {
+            return Ok(());
+        }
+
+        // 1. Crisp monochrome percentage readout
         let pct_text = if self.kind == HudKind::Volume && self.muted {
             "0%".to_string()
         } else {
             format!("{}%", self.percent)
         };
-        let pct_rect = Rect::new(rect.x + 4.0, rect.y + 10.0, rect.width - 8.0, 18.0);
-        surface.draw_text(
-            &pct_text,
-            pct_rect,
-            13.0,
-            TEXT_PRIMARY.with_alpha(content_alpha),
-            TextAlign::Center,
-        )?;
+        let pct_color = if self.kind == HudKind::Volume && self.muted {
+            TEXT_SECONDARY.with_alpha_mul(content_alpha)
+        } else {
+            TEXT_PRIMARY.with_alpha_mul(content_alpha)
+        };
+        let pct_rect = Rect::new(rect.x + 4.0, rect.y + 14.0, rect.width - 8.0, 18.0);
+        surface.draw_text(&pct_text, pct_rect, 12.5, pct_color, TextAlign::Center)?;
 
-        // 2. Vertical gradient slider bar
+        // 2. Sleek monochrome Liquid Glass vertical slider bar
         let track = Rect::new(
             rect.x + (rect.width - SLIDER_TRACK_WIDTH) * 0.5,
-            rect.y + 34.0,
+            rect.y + 40.0,
             SLIDER_TRACK_WIDTH,
-            (rect.height - 88.0).max(40.0),
+            (rect.height - 96.0).max(40.0),
         );
         let track_r = SLIDER_TRACK_WIDTH * 0.5;
-        surface.fill_rounded_rect(track, track_r, SURFACE_ELEVATED.with_alpha(0.85 * content_alpha))?;
-        let track_border = match self.kind {
-            HudKind::Volume if !self.muted => ACCENT_CYAN.with_alpha(0.28 * content_alpha),
-            HudKind::Brightness => STATUS_WARNING.with_alpha(0.28 * content_alpha),
-            _ => GLASS_BORDER.with_alpha(0.22 * content_alpha),
+        surface.fill_rounded_rect(track, track_r, SLIDER_TRACK.with_alpha_mul(content_alpha))?;
+        let track_border = if self.is_dragging {
+            GLASS_SPECULAR_TOP.with_alpha_mul(content_alpha)
+        } else {
+            GLASS_HAIRLINE.with_alpha_mul(0.8 * content_alpha)
         };
         surface.stroke_rounded_rect(track, track_r, track_border, 1.0)?;
 
@@ -489,137 +534,45 @@ impl OverlayHud {
                 track.width,
                 fill_h,
             );
-            self.fill_vertical_gradient_bar(surface, fill_rect, track_r, content_alpha)?;
-        }
-
-        // 3. Crisp vector icon below slider
-        let icon_cx = rect.x + rect.width * 0.5;
-        let icon_cy = rect.y + rect.height - 35.0;
-        match self.kind {
-            HudKind::Volume => draw_speaker_icon(
-                surface,
-                icon_cx,
-                icon_cy,
-                16.0,
-                self.muted,
-                if self.muted {
-                    STATUS_OFFLINE.with_alpha(content_alpha)
-                } else {
-                    TEXT_PRIMARY.with_alpha(content_alpha)
-                },
-            )?,
-            HudKind::Brightness => draw_sun_icon(
-                surface,
-                icon_cx,
-                icon_cy,
-                16.0,
-                self.percent as f32 / 100.0,
-                Color::from_rgb_u8(0xFF, 0xB7, 0x03).with_alpha(content_alpha),
-            )?,
-        }
-
-        // 4. Friendly device / mode subtitle at bottom
-        let subtitle = match self.kind {
-            HudKind::Volume => {
-                if self.muted {
-                    "Muted".to_string()
-                } else {
-                    short_device_label(self.device_name.as_deref())
-                }
-            }
-            HudKind::Brightness => "Display".to_string(),
-        };
-        let sub_rect = Rect::new(rect.x + 4.0, rect.y + rect.height - 20.0, rect.width - 8.0, 14.0);
-        surface.draw_text(
-            &subtitle,
-            sub_rect,
-            9.5,
-            TEXT_SECONDARY.with_alpha(0.92 * content_alpha),
-            TextAlign::Center,
-        )?;
-
-        Ok(())
-    }
-
-    fn fill_vertical_gradient_bar(
-        &self,
-        surface: &NativeSurface,
-        fill_rect: Rect,
-        radius: f32,
-        alpha: f32,
-    ) -> Result<()> {
-        let stops = match self.kind {
-            HudKind::Volume if self.muted => [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: STATUS_OFFLINE.with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.5,
-                    color: STATUS_OFFLINE.with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: STATUS_OFFLINE.with_alpha(0.8 * alpha).to_d2d(),
-                },
-            ],
-            HudKind::Volume => [
-                // Cyan / white vertical gradient
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: Color::from_rgb_u8(0xFF, 0xFF, 0xFF).with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.35,
-                    color: Color::from_rgb_u8(0x38, 0xD6, 0xF5).with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: Color::from_rgb_u8(0x00, 0x96, 0xFF).with_alpha(alpha).to_d2d(),
-                },
-            ],
-            HudKind::Brightness => [
-                // Yellow-orange / white vertical gradient
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: Color::from_rgb_u8(0xFF, 0xFF, 0xFF).with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.35,
-                    color: Color::from_rgb_u8(0xFF, 0xB7, 0x03).with_alpha(alpha).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: Color::from_rgb_u8(0xFB, 0x85, 0x00).with_alpha(alpha).to_d2d(),
-                },
-            ],
-        };
-
-        let target = surface.render_target();
-        unsafe {
-            let collection = target.CreateGradientStopCollection(
-                &stops,
-                D2D1_GAMMA_2_2,
-                D2D1_EXTEND_MODE_CLAMP,
-            )?;
-            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                startPoint: D2D_POINT_2F {
-                    X: fill_rect.x,
-                    Y: fill_rect.y,
-                },
-                endPoint: D2D_POINT_2F {
-                    X: fill_rect.x,
-                    Y: fill_rect.y + fill_rect.height,
-                },
+            let fill_color = if self.kind == HudKind::Volume && self.muted {
+                STATUS_MUTED.with_alpha(0.55 * content_alpha)
+            } else if self.is_dragging {
+                TEXT_PRIMARY.with_alpha(content_alpha)
+            } else {
+                SLIDER_FILL.with_alpha_mul(content_alpha)
             };
-            let brush = target.CreateLinearGradientBrush(&props, None, &collection)?;
-            let rr = D2D1_ROUNDED_RECT {
-                rect: fill_rect.to_d2d(),
-                radiusX: radius,
-                radiusY: radius,
-            };
-            target.FillRoundedRectangle(&rr, &brush);
+            surface.fill_rounded_rect(fill_rect, track_r, fill_color)?;
         }
+
+        // 3. Crisp SF-Symbol vector icon at bottom (no text subtitle)
+        let icon_box = Rect::new(
+            rect.x + (rect.width - 22.0) * 0.5,
+            rect.y + rect.height - 42.0,
+            22.0,
+            22.0,
+        );
+        if self.kind == HudKind::Volume && self.is_hovered {
+            let pill = Rect::new(
+                rect.x + (rect.width - 32.0) * 0.5,
+                rect.y + rect.height - 47.0,
+                32.0,
+                32.0,
+            );
+            surface.fill_rounded_rect(pill, 16.0, GLASS_CONTROL_HOVER.with_alpha_mul(0.45 * content_alpha))?;
+        }
+        let (symbol, icon_color) = match self.kind {
+            HudKind::Volume if self.muted || self.percent == 0 => (
+                SfSymbol::VolumeMuted,
+                TEXT_SECONDARY.with_alpha_mul(content_alpha),
+            ),
+            HudKind::Volume => (SfSymbol::VolumeHigh, TEXT_PRIMARY.with_alpha_mul(content_alpha)),
+            HudKind::Brightness => (
+                SfSymbol::BrightnessSun,
+                TEXT_PRIMARY.with_alpha_mul(content_alpha),
+            ),
+        };
+        surface.draw_sf_symbol(icon_box, symbol, icon_color, 1.6)?;
+
         Ok(())
     }
 }
@@ -673,193 +626,70 @@ pub fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn short_device_label(raw: Option<&str>) -> String {
-    let Some(name) = sanitize_device_name(raw) else {
-        return "Audio".to_string();
-    };
-    let concise = name
-        .split(" (")
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&name);
-    if concise.chars().count() <= 10 {
-        concise.to_string()
-    } else {
-        let mut out: String = concise.chars().take(9).collect();
-        out.push('…');
-        out
-    }
-}
-
-fn draw_speaker_icon(
-    surface: &NativeSurface,
-    cx: f32,
-    cy: f32,
-    size: f32,
-    muted: bool,
-    color: Color,
-) -> Result<()> {
-    let s = size.max(10.0) * 0.5;
-    let target = surface.render_target();
-    let factory = surface.d2d_factory();
-    unsafe {
-        let brush = target.CreateSolidColorBrush(&color.to_d2d(), None)?;
-        let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
-            startCap: D2D1_CAP_STYLE_ROUND,
-            endCap: D2D1_CAP_STYLE_ROUND,
-            ..Default::default()
-        };
-        let round_cap: ID2D1StrokeStyle = factory.CreateStrokeStyle(&stroke_props, None)?.into();
-
-        // Speaker cone polygon
-        let geo = factory.CreatePathGeometry()?;
-        let sink = geo.Open()?;
-        sink.BeginFigure(pt(cx - s * 0.72, cy - s * 0.28), D2D1_FIGURE_BEGIN_FILLED);
-        sink.AddLine(pt(cx - s * 0.32, cy - s * 0.28));
-        sink.AddLine(pt(cx + s * 0.08, cy - s * 0.62));
-        sink.AddLine(pt(cx + s * 0.08, cy + s * 0.62));
-        sink.AddLine(pt(cx - s * 0.32, cy + s * 0.28));
-        sink.AddLine(pt(cx - s * 0.72, cy + s * 0.28));
-        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-        sink.Close()?;
-        target.FillGeometry(&geo, &brush, None);
-
-        let stroke_w = (size * 0.1).max(1.3);
-        if muted {
-            target.DrawLine(
-                pt(cx + s * 0.26, cy - s * 0.3),
-                pt(cx + s * 0.76, cy + s * 0.3),
-                &brush,
-                stroke_w,
-                Some(&round_cap),
-            );
-            target.DrawLine(
-                pt(cx + s * 0.76, cy - s * 0.3),
-                pt(cx + s * 0.26, cy + s * 0.3),
-                &brush,
-                stroke_w,
-                Some(&round_cap),
-            );
-        } else {
-            for r in [s * 0.36, s * 0.64] {
-                let wave = factory.CreatePathGeometry()?;
-                let wsink = wave.Open()?;
-                wsink.BeginFigure(pt(cx + r * 0.65, cy - r * 0.72), D2D1_FIGURE_BEGIN_HOLLOW);
-                wsink.AddLine(pt(cx + r * 0.95, cy));
-                wsink.AddLine(pt(cx + r * 0.65, cy + r * 0.72));
-                wsink.EndFigure(D2D1_FIGURE_END_OPEN);
-                wsink.Close()?;
-                target.DrawGeometry(&wave, &brush, stroke_w, Some(&round_cap));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn draw_sun_icon(
-    surface: &NativeSurface,
-    cx: f32,
-    cy: f32,
-    size: f32,
-    brightness_ratio: f32,
-    color: Color,
-) -> Result<()> {
-    let s = size.max(10.0) * 0.5;
-    let angle_offset = brightness_ratio.clamp(0.0, 1.0) * std::f32::consts::PI;
-    let target = surface.render_target();
-    let factory = surface.d2d_factory();
-    unsafe {
-        let brush = target.CreateSolidColorBrush(&color.to_d2d(), None)?;
-        let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
-            startCap: D2D1_CAP_STYLE_ROUND,
-            endCap: D2D1_CAP_STYLE_ROUND,
-            ..Default::default()
-        };
-        let round_cap: ID2D1StrokeStyle = factory.CreateStrokeStyle(&stroke_props, None)?.into();
-        let stroke_w = (size * 0.1).max(1.3);
-
-        target.DrawEllipse(
-            &D2D1_ELLIPSE {
-                point: pt(cx, cy),
-                radiusX: s * 0.38,
-                radiusY: s * 0.38,
-            },
-            &brush,
-            stroke_w,
-            None,
-        );
-
-        for i in 0..8 {
-            let theta = angle_offset + (i as f32) * (std::f32::consts::PI * 0.25);
-            let (sin_t, cos_t) = theta.sin_cos();
-            let r0 = s * 0.62;
-            let r1 = s * 0.88;
-            target.DrawLine(
-                pt(cx + cos_t * r0, cy + sin_t * r0),
-                pt(cx + cos_t * r1, cy + sin_t * r1),
-                &brush,
-                stroke_w,
-                Some(&round_cap),
-            );
-        }
-    }
-    Ok(())
-}
-
-#[inline]
-const fn pt(x: f32, y: f32) -> D2D_POINT_2F {
-    D2D_POINT_2F { X: x, Y: y }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dual_edge_defaults_left_volume_and_right_brightness() {
+    fn dual_edge_defaults_start_invisible_and_idle() {
         let pair = DualEdgeOverlays::new();
         assert_eq!(pair.volume.edge, HudEdge::Left);
         assert_eq!(pair.volume.kind, HudKind::Volume);
         assert_eq!(pair.brightness.edge, HudEdge::Right);
         assert_eq!(pair.brightness.kind, HudKind::Brightness);
 
-        assert!(pair.volume.is_visible());
-        assert!(pair.brightness.is_visible());
+        assert!(!pair.volume.is_visible());
+        assert!(!pair.brightness.is_visible());
         assert!(!pair.volume.is_expanded());
         assert!(!pair.brightness.is_expanded());
+
+        let idle_left = pair.volume.computed_rect(80.0, 240.0);
+        let idle_right = pair.brightness.computed_rect(80.0, 240.0);
+        assert_eq!(idle_left.width, 0.0);
+        assert_eq!(idle_left.height, 0.0);
+        assert_eq!(idle_right.width, 0.0);
+        assert_eq!(idle_right.height, 0.0);
     }
 
     #[test]
-    fn idle_pill_is_6x56_flush_and_expands_to_68x210_on_hover_or_show() {
+    fn edge_hover_or_osd_emerges_to_58x196_and_outside_hide_recedes_to_invisible() {
         let mut left = OverlayHud::volume_left();
-        let lr_idle = left.computed_rect(120.0, 240.0);
-        assert_eq!(lr_idle.x, 0.0);
-        assert_eq!(lr_idle.width, 6.0);
-        assert_eq!(lr_idle.height, 56.0);
-
         let mut right = OverlayHud::brightness_right();
-        let rr_idle = right.computed_rect(120.0, 240.0);
-        assert_eq!(rr_idle.x, 120.0 - 6.0);
-        assert_eq!(rr_idle.width, 6.0);
-        assert_eq!(rr_idle.height, 56.0);
+        let surf_rect = Rect::new(0.0, 0.0, 80.0, 240.0);
+
+        let left_wake = left.wake_hit_rect(surf_rect);
+        let right_wake = right.wake_hit_rect(surf_rect);
+        assert_eq!(left_wake.x, 0.0);
+        assert_eq!(right_wake.x + right_wake.width, 80.0);
 
         left.set_hovered(true);
         right.show_brightness(75);
-        for _ in 0..120 {
+        for _ in 0..90 {
             left.tick(1.0 / 60.0);
             right.tick(1.0 / 60.0);
         }
 
-        let lr_exp = left.computed_rect(120.0, 240.0);
-        assert_eq!(lr_exp.x, 0.0);
-        assert!((lr_exp.width - 68.0).abs() < 0.1);
-        assert!((lr_exp.height - 210.0).abs() < 0.1);
+        assert!(left.is_visible());
+        assert!(right.is_visible());
 
-        let rr_exp = right.computed_rect(120.0, 240.0);
-        assert!((rr_exp.x - (120.0 - 68.0)).abs() < 0.1);
-        assert!((rr_exp.width - 68.0).abs() < 0.1);
-        assert!((rr_exp.height - 210.0).abs() < 0.1);
+        let lr_exp = left.computed_rect(80.0, 240.0);
+        assert!((lr_exp.x - PANEL_EDGE_MARGIN).abs() < 0.1);
+        assert!((lr_exp.width - EXPANDED_PANEL_WIDTH).abs() < 0.1);
+        assert!((lr_exp.height - EXPANDED_PANEL_HEIGHT).abs() < 0.1);
+
+        let rr_exp = right.computed_rect(80.0, 240.0);
+        assert!((rr_exp.x - (80.0 - PANEL_EDGE_MARGIN - EXPANDED_PANEL_WIDTH)).abs() < 0.1);
+        assert!((rr_exp.width - EXPANDED_PANEL_WIDTH).abs() < 0.1);
+        assert!((rr_exp.height - EXPANDED_PANEL_HEIGHT).abs() < 0.1);
+
+        // Immediate outside-click collapse via hide()
+        left.hide();
+        for _ in 0..90 {
+            left.tick(1.0 / 60.0);
+        }
+        assert!(!left.is_visible());
+        assert!(!left.is_expanded());
+        assert_eq!(left.computed_rect(80.0, 240.0).width, 0.0);
     }
 
     #[test]
@@ -889,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_hide_timer_collapses_back_to_idle_pill_after_timeout() {
+    fn auto_hide_timer_collapses_back_to_invisible_after_timeout() {
         let mut hud = OverlayHud::brightness_right();
         hud.show_brightness(60);
 
@@ -898,6 +728,7 @@ mod tests {
             hud.tick(1.0 / 60.0);
         }
         assert!(hud.is_expanded());
+        assert!(hud.is_visible());
         assert!(hud.expand.value > 0.5);
 
         // Advance past auto-hide duration + settle time.
@@ -905,22 +736,25 @@ mod tests {
             hud.tick(1.0 / 60.0);
         }
         assert!(!hud.is_expanded());
-        assert!(hud.is_visible());
+        assert!(!hud.is_visible());
         assert_eq!(hud.expand.value, 0.0);
-        assert_eq!(hud.computed_rect(100.0, 240.0).width, 6.0);
+        assert_eq!(hud.computed_rect(80.0, 240.0).width, 0.0);
     }
 
     #[test]
-    fn hit_test_slider_and_scroll_wheel_update_values() {
+    fn hit_test_slider_mute_and_scroll_wheel_update_values() {
         let mut hud = OverlayHud::volume_left();
-        let surface_rect = Rect::new(0.0, 0.0, 100.0, 240.0);
+        let surface_rect = Rect::new(0.0, 0.0, 80.0, 240.0);
 
-        // Collapsed idle pill has no active slider hit target.
+        // Idle HUD has no active slider or pill hit target.
         assert_eq!(hud.hit_test_slider(34.0, 100.0, surface_rect), None);
-        assert!(hud.hit_test_pill(2.0, 120.0, surface_rect));
+        assert!(!hud.hit_test_pill(2.0, 120.0, surface_rect));
 
         hud.show_volume(40, false, Some("Speakers".into()));
         hud.expand.snap_to(1.0);
+        hud.visibility.snap_to(1.0);
+        assert!(hud.hit_test_pill(2.0, 120.0, surface_rect));
+        assert!(hud.hit_test_pill(30.0, 120.0, surface_rect));
 
         let track = hud.slider_rect(surface_rect).expect("slider rect");
         let mid_x = track.x + track.width * 0.5;
@@ -935,38 +769,51 @@ mod tests {
         assert!((top_ratio - 1.0).abs() < 1e-3);
         assert!((mid_ratio - 0.5).abs() < 1e-3);
         assert!(bot_ratio.abs() < 1e-3);
-        assert_eq!(hud.hit_test_slider(95.0, track.y + 10.0, surface_rect), None);
+        assert_eq!(hud.hit_test_slider(79.0, track.y + 10.0, surface_rect), None);
+
+        // Mute button hit test at bottom of capsule
+        let panel = hud.expanded_rect(surface_rect.width, surface_rect.height);
+        assert!(hud.hit_test_mute_button(
+            panel.x + panel.width * 0.5,
+            panel.y + panel.height - 30.0,
+            surface_rect
+        ));
+        assert!(hud.toggle_mute());
+        assert!(hud.muted);
 
         assert_eq!(hud.set_percent_from_ratio(0.75), 75);
         assert_eq!(hud.percent, 75);
+        assert!(!hud.muted);
         assert_eq!(hud.on_scroll(2.0), 83);
         assert_eq!(hud.on_scroll(-30.0), 0);
         assert!(hud.muted);
     }
 
     #[test]
-    fn dual_edge_overlays_render_idle_and_expanded_gradients_without_error() {
-        let surface = match NativeSurface::new("HimeOverlayTest", -2000, -2000, 120, 240) {
+    fn dual_edge_overlays_render_invisible_idle_and_liquid_glass_without_error() {
+        let surface = match NativeSurface::new("HimeOverlayTest", -2000, -2000, 80, 240) {
             Ok(s) => s,
             Err(_) => return,
         };
         let mut pair = DualEdgeOverlays::new();
 
-        // Idle 6x56 edge pills
+        // Idle: draws 0 pixels / 0 alpha and clears region
         surface.begin_draw();
-        pair.volume.render(&surface).expect("idle left pill render");
-        surface.end_draw_and_present().expect("idle left pill present");
+        pair.volume.render(&surface).expect("idle left render");
+        surface.end_draw_and_present().expect("idle left present");
 
         surface.begin_draw();
-        pair.brightness.render(&surface).expect("idle right pill render");
-        surface.end_draw_and_present().expect("idle right pill present");
+        pair.brightness.render(&surface).expect("idle right render");
+        surface.end_draw_and_present().expect("idle right present");
 
-        // Expanded 68x210 gradient slider capsules
+        // Expanded Liquid Glass capsules
         pair.show_volume(72, false, Some("Headphones (USB)".into()));
         pair.show_brightness(84);
         pair.volume.expand.snap_to(1.0);
+        pair.volume.visibility.snap_to(1.0);
         pair.volume.bar_fill.snap_to(0.72);
         pair.brightness.expand.snap_to(1.0);
+        pair.brightness.visibility.snap_to(1.0);
         pair.brightness.bar_fill.snap_to(0.84);
 
         surface.begin_draw();

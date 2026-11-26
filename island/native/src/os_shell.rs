@@ -8,13 +8,15 @@
 //! - Win32 `WM_DROPFILES` (`DragAcceptFiles` + `HDROP`) extraction into [`FileShelf`].
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{c_void, OsString};
 use std::fs;
 use std::io::Write;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 use windows::core::{BOOL, PCSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
@@ -25,7 +27,10 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ABM_GETSTATE, ABM_GETTASKBARPOS,
     ABM_SETSTATE, APPBARDATA, HDROP,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LEFT, VK_LWIN, VK_RIGHT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics, GetWindowLongA,
     GetWindowLongW, GetWindowRect, IsWindowVisible, SetForegroundWindow,
@@ -618,14 +623,82 @@ pub fn is_notch_edge_hovered(
     if notch.is_hidden {
         let margin = wake_margin_px.max(1.0);
         let wake_rect = match notch.edge {
-            NotchEdge::Top => Rect::new(rect.x, 0.0, rect.width, rect.height + margin),
-            NotchEdge::Left => Rect::new(0.0, rect.y, rect.width + margin, rect.height),
-            NotchEdge::Right => Rect::new(sw - rect.width - margin, rect.y, rect.width + margin, rect.height),
+            NotchEdge::Top => {
+                let span = rect.width.max(220.0);
+                let x = (sw - span) * 0.5;
+                Rect::new(x, 0.0, span, rect.height.max(1.0) + margin)
+            }
+            NotchEdge::Left => {
+                let span = rect.height.max(200.0);
+                let y = (sh - span) * 0.5;
+                Rect::new(0.0, y, rect.width.max(1.0) + margin, span)
+            }
+            NotchEdge::Right => {
+                let span = rect.height.max(200.0);
+                let y = (sh - span) * 0.5;
+                let w = rect.width.max(1.0) + margin;
+                Rect::new(sw - w, y, w, span)
+            }
         };
         is_point_in_rect(rx, ry, wake_rect)
     } else {
         is_point_in_rect(rx, ry, rect)
     }
+}
+
+/// Returns `true` when `(cursor_x, cursor_y)` in screen coordinates lies inside the bottom-edge
+/// wake zone for a hidden [`DockBar`] (so 100%-invisible AutoHide/Smart Docks wake smoothly).
+pub fn is_dock_edge_hovered(
+    cursor_x: f32,
+    cursor_y: f32,
+    dock: &DockBar,
+    screen: ScreenBounds,
+    wake_margin_px: f32,
+) -> bool {
+    let rx = cursor_x - screen.x as f32;
+    let ry = cursor_y - screen.y as f32;
+    let sw = screen.width.max(1) as f32;
+    let sh = screen.height.max(1) as f32;
+    if rx < 0.0 || rx > sw || ry < 0.0 || ry > sh {
+        return false;
+    }
+
+    let surf_rect = Rect::new(0.0, 0.0, sw, sh);
+    let dock_rect = dock.dock_rect(surf_rect);
+    if dock.is_hidden {
+        let margin = wake_margin_px.max(4.0);
+        let span = dock_rect.width.max(240.0).min(sw);
+        let wake_x = ((sw - span) * 0.5).max(0.0);
+        let wake_rect = Rect::new(wake_x, (sh - margin).max(0.0), span, margin);
+        is_point_in_rect(rx, ry, wake_rect)
+    } else {
+        is_point_in_rect(rx, ry, dock_rect)
+    }
+}
+
+/// Returns `true` when `(cursor_x, cursor_y)` in screen coordinates lies in the vertical
+/// edge-wake zone for the left (Volume) or right (Brightness) invisible edge overlay.
+pub fn is_overlay_edge_hovered(
+    cursor_x: f32,
+    cursor_y: f32,
+    is_left: bool,
+    screen: ScreenBounds,
+    wake_margin_px: f32,
+    band_height: f32,
+) -> bool {
+    let rx = cursor_x - screen.x as f32;
+    let ry = cursor_y - screen.y as f32;
+    let sw = screen.width.max(1) as f32;
+    let sh = screen.height.max(1) as f32;
+    let margin = wake_margin_px.max(4.0);
+    let band_h = band_height.clamp(48.0, sh);
+    let top = (sh - band_h) * 0.5;
+    let wake_rect = if is_left {
+        Rect::new(0.0, top, margin, band_h)
+    } else {
+        Rect::new((sw - margin).max(0.0), top, margin, band_h)
+    };
+    is_point_in_rect(rx, ry, wake_rect)
 }
 
 /// Returns `true` when pointer events should pass through (`WS_EX_TRANSPARENT`)
@@ -661,11 +734,36 @@ pub fn should_enable_click_through(
 // 3. Drag-and-Drop (`WM_DROPFILES`)
 // ---------------------------------------------------------------------------
 
-/// Enables or disables Win32 `WM_DROPFILES` acceptance on `hwnd`.
+/// Enables or disables Win32 `WM_DROPFILES` acceptance on `hwnd`, including UIPI message filter
+/// allowance for Explorer drag-and-drop (`WM_DROPFILES`, `WM_COPYGLOBALDATA`, `WM_COPYDATA`).
 pub fn enable_drag_drop(hwnd: HWND, accept: bool) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn ChangeWindowMessageFilterEx(
+            hwnd: isize,
+            message: u32,
+            action: u32,
+            pchangefilterstruct: *mut c_void,
+        ) -> i32;
+    }
+    const MSGFLT_ALLOW: u32 = 1;
+    const MSGFLT_RESET: u32 = 0;
+    const WM_DROPFILES_MSG: u32 = 0x0233;
+    const WM_COPYDATA_MSG: u32 = 0x004A;
+    const WM_COPYGLOBALDATA_MSG: u32 = 0x0049;
+
     unsafe {
         DragAcceptFiles(hwnd, accept);
+        let action = if accept { MSGFLT_ALLOW } else { MSGFLT_RESET };
+        for msg in [WM_DROPFILES_MSG, WM_COPYGLOBALDATA_MSG, WM_COPYDATA_MSG] {
+            let _ = ChangeWindowMessageFilterEx(hwnd.0 as isize, msg, action, std::ptr::null_mut());
+        }
     }
+}
+
+/// Alias for [`enable_drag_drop`] to make Notch/Drawer file-drop wiring explicit.
+pub fn enable_file_drop(hwnd: HWND, accept: bool) {
+    enable_drag_drop(hwnd, accept);
 }
 
 /// Toggles `WS_EX_NOACTIVATE` so an interactive surface (Drawer / Settings) can accept keyboard focus.
@@ -742,6 +840,304 @@ pub fn handle_wm_dropfiles(wparam: WPARAM, shelf: &mut FileShelf) -> Vec<PathBuf
         shelf.add_paths(&paths);
     }
     paths
+}
+
+/// Returns `true` if `hwnd` is the Windows Explorer Desktop shell window (`Progman` / `WorkerW`)
+/// so `DockMode::Smart` and `notch_mode == "smart"` do not treat an empty desktop as overlapping.
+pub fn is_desktop_shell_hwnd(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut class = [0u8; 64];
+    let len = unsafe { GetClassNameA(hwnd, &mut class) };
+    if len <= 0 {
+        return false;
+    }
+    matches!(&class[..len as usize], b"Progman" | b"WorkerW")
+}
+
+// ---------------------------------------------------------------------------
+// 4. Windows 10/11 Virtual Desktops ("Spaces")
+// ---------------------------------------------------------------------------
+
+/// Metadata for a Windows 10/11 Virtual Desktop ("Space").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualDesktopInfo {
+    /// Canonical lowercase GUID string (`"{...}"`) or fallback `"desktop-1"`.
+    pub id: String,
+    /// Display name from Registry (`Name` value) or fallback `"Desktop N"`.
+    pub name: String,
+    /// Zero-based desktop index matching `VirtualDesktopIDs` order.
+    pub index: usize,
+    /// True if this is the active desktop (`CurrentVirtualDesktop`).
+    pub active: bool,
+}
+
+const VIRTUAL_DESKTOPS_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops";
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        hKey: isize,
+        lpSubKey: windows::core::PCWSTR,
+        ulOptions: u32,
+        samDesired: u32,
+        phkResult: *mut isize,
+    ) -> i32;
+    fn RegQueryValueExW(
+        hKey: isize,
+        lpValueName: windows::core::PCWSTR,
+        lpReserved: *mut u32,
+        lpType: *mut u32,
+        lpData: *mut u8,
+        lpcbData: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(hKey: isize) -> i32;
+}
+
+fn to_wide_null(s: &str) -> Vec<u16> {
+    OsString::from(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn read_hkcu_value(subkey: &str, value_name: &str) -> Option<(u32, Vec<u8>)> {
+    const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
+    const KEY_READ: u32 = 0x0002_0019;
+
+    let subkey_w = to_wide_null(subkey);
+    let val_w = to_wide_null(value_name);
+    let mut hkey: isize = 0;
+    unsafe {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            windows::core::PCWSTR(subkey_w.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        ) != 0
+        {
+            return None;
+        }
+        let mut reg_type: u32 = 0;
+        let mut size: u32 = 0;
+        let rc_size = RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(val_w.as_ptr()),
+            std::ptr::null_mut(),
+            &mut reg_type,
+            std::ptr::null_mut(),
+            &mut size,
+        );
+        if rc_size != 0 || size == 0 || size > 65_536 {
+            let _ = RegCloseKey(hkey);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let rc_read = RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(val_w.as_ptr()),
+            std::ptr::null_mut(),
+            &mut reg_type,
+            buf.as_mut_ptr(),
+            &mut size,
+        );
+        let _ = RegCloseKey(hkey);
+        if rc_read != 0 {
+            return None;
+        }
+        buf.truncate(size as usize);
+        Some((reg_type, buf))
+    }
+}
+
+fn read_hkcu_binary(subkey: &str, value_name: &str) -> Option<Vec<u8>> {
+    const REG_BINARY: u32 = 3;
+    let (ty, data) = read_hkcu_value(subkey, value_name)?;
+    (ty == REG_BINARY).then_some(data)
+}
+
+fn read_hkcu_string(subkey: &str, value_name: &str) -> Option<String> {
+    const REG_SZ: u32 = 1;
+    let (ty, data) = read_hkcu_value(subkey, value_name)?;
+    if ty != REG_SZ || data.len() < 2 {
+        return None;
+    }
+    let u16s: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&w| w != 0)
+        .collect();
+    let s = String::from_utf16_lossy(&u16s).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Formats a 16-byte Windows GUID binary blob as uppercase `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`.
+pub fn format_windows_guid_upper(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 16 {
+        return None;
+    }
+    let d1 = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let d2 = u16::from_le_bytes(bytes[4..6].try_into().ok()?);
+    let d3 = u16::from_le_bytes(bytes[6..8].try_into().ok()?);
+    Some(format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        d1,
+        d2,
+        d3,
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    ))
+}
+
+/// Pure helper that converts raw `VirtualDesktopIDs` + `CurrentVirtualDesktop` registry bytes
+/// and a desktop-name lookup closure into ordered [`VirtualDesktopInfo`] entries.
+pub fn parse_virtual_desktops_from_bytes<F>(
+    ids_bytes: Option<&[u8]>,
+    current_bytes: Option<&[u8]>,
+    mut lookup_name: F,
+) -> Vec<VirtualDesktopInfo>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let current_upper = current_bytes
+        .filter(|b| b.len() >= 16)
+        .and_then(|b| format_windows_guid_upper(&b[..16]));
+
+    let mut guids: Vec<String> = ids_bytes
+        .unwrap_or(&[])
+        .chunks_exact(16)
+        .filter_map(format_windows_guid_upper)
+        .collect();
+
+    if guids.is_empty() {
+        if let Some(ref cur) = current_upper {
+            guids.push(cur.clone());
+        } else {
+            return vec![VirtualDesktopInfo {
+                id: "desktop-1".to_string(),
+                name: "Desktop 1".to_string(),
+                index: 0,
+                active: true,
+            }];
+        }
+    }
+
+    let mut any_active = false;
+    let mut out: Vec<VirtualDesktopInfo> = guids
+        .into_iter()
+        .enumerate()
+        .map(|(index, guid_upper)| {
+            let active = current_upper.as_deref() == Some(guid_upper.as_str());
+            any_active |= active;
+            let name = lookup_name(&guid_upper)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("Desktop {}", index + 1));
+            VirtualDesktopInfo {
+                id: guid_upper.to_ascii_lowercase(),
+                name,
+                index,
+                active,
+            }
+        })
+        .collect();
+
+    if !any_active {
+        if let Some(first) = out.first_mut() {
+            first.active = true;
+        }
+    }
+    out
+}
+
+/// Lists Windows 10/11 Virtual Desktops safely from `HKCU\...\Explorer\VirtualDesktops`.
+/// Never panics; falls back to a single `"Desktop 1"` entry if Registry keys are absent.
+pub fn list_virtual_desktops() -> Vec<VirtualDesktopInfo> {
+    let ids = read_hkcu_binary(VIRTUAL_DESKTOPS_KEY, "VirtualDesktopIDs");
+    let current = read_hkcu_binary(VIRTUAL_DESKTOPS_KEY, "CurrentVirtualDesktop");
+    parse_virtual_desktops_from_bytes(ids.as_deref(), current.as_deref(), |guid_upper| {
+        let desktop_key = format!(r"{VIRTUAL_DESKTOPS_KEY}\Desktops\{guid_upper}");
+        read_hkcu_string(&desktop_key, "Name")
+    })
+}
+
+fn make_key_input(vk: VIRTUAL_KEY, extended: bool, key_up: bool) -> INPUT {
+    let mut flags = windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0);
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn send_win_ctrl_combo(key: VIRTUAL_KEY, extended_key: bool, repeats: usize) -> bool {
+    if repeats == 0 {
+        return true;
+    }
+    let steps = repeats.min(32);
+    for step in 0..steps {
+        let inputs = [
+            make_key_input(VK_LWIN, true, false),
+            make_key_input(VK_CONTROL, false, false),
+            make_key_input(key, extended_key, false),
+            make_key_input(key, extended_key, true),
+            make_key_input(VK_CONTROL, false, true),
+            make_key_input(VK_LWIN, true, true),
+        ];
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        if sent != inputs.len() as u32 {
+            return false;
+        }
+        if step + 1 < steps {
+            thread::sleep(Duration::from_millis(35));
+        }
+    }
+    true
+}
+
+/// Switches to the Virtual Desktop at `target_index` using `Win + Ctrl + Left/Right`.
+pub fn switch_virtual_desktop(target_index: usize) -> bool {
+    let list = list_virtual_desktops();
+    if target_index >= list.len() {
+        return false;
+    }
+    let current_idx = list.iter().position(|d| d.active).unwrap_or(0);
+    if target_index == current_idx {
+        return true;
+    }
+    if target_index > current_idx {
+        send_win_ctrl_combo(VK_RIGHT, true, target_index - current_idx)
+    } else {
+        send_win_ctrl_combo(VK_LEFT, true, current_idx - target_index)
+    }
+}
+
+/// Creates a new Windows Virtual Desktop using `Win + Ctrl + D`.
+pub fn create_virtual_desktop() -> bool {
+    const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
+    send_win_ctrl_combo(VK_D, false, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -869,5 +1265,73 @@ mod tests {
         assert_eq!(parsed_primary.right, 1920);
         let parsed_secs = parse_marker_secondaries(&text);
         assert_eq!(parsed_secs.get(&12345_isize).unwrap().left, -1920);
+    }
+
+    #[test]
+    fn dock_and_overlay_edge_hover_wake_when_hidden() {
+        use crate::dock::DockMode;
+
+        let screen = ScreenBounds::new(0, 0, 1920, 1080);
+        let mut dock = DockBar::new();
+        dock.add_item(DockItem::new("files", "Files", "explorer.exe", true));
+        dock.set_mode(DockMode::AutoHide);
+        for _ in 0..90 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!(dock.is_hidden);
+
+        // Cursor at bottom center screen edge wakes hidden Dock
+        assert!(is_dock_edge_hovered(960.0, 1078.0, &dock, screen, 8.0));
+        // Cursor far above bottom edge or far side does not wake Dock
+        assert!(!is_dock_edge_hovered(960.0, 900.0, &dock, screen, 8.0));
+        assert!(!is_dock_edge_hovered(10.0, 1078.0, &dock, screen, 8.0));
+
+        // Left & right overlay edge bands wake only near mid-height edges
+        assert!(is_overlay_edge_hovered(2.0, 540.0, true, screen, 8.0, 240.0));
+        assert!(!is_overlay_edge_hovered(2.0, 100.0, true, screen, 8.0, 240.0));
+        assert!(is_overlay_edge_hovered(1918.0, 540.0, false, screen, 8.0, 240.0));
+        assert!(!is_overlay_edge_hovered(1800.0, 540.0, false, screen, 8.0, 240.0));
+    }
+
+    #[test]
+    fn virtual_desktop_registry_bytes_parse_guids_names_and_active() {
+        // Real little-endian Windows GUID bytes: {DFD37548-7649-470E-99F3-0411EC22CABE}
+        let g1: [u8; 16] = [
+            0x48, 0x75, 0xD3, 0xDF, 0x49, 0x76, 0x0E, 0x47, 0x99, 0xF3, 0x04, 0x11, 0xEC, 0x22,
+            0xCA, 0xBE,
+        ];
+        let g2: [u8; 16] = [
+            0xBA, 0xC0, 0x73, 0x71, 0x12, 0x72, 0xD7, 0x4F, 0x85, 0x74, 0x62, 0x56, 0x3C, 0x3B,
+            0x4B, 0xEE,
+        ];
+        assert_eq!(
+            format_windows_guid_upper(&g1).as_deref(),
+            Some("{DFD37548-7649-470E-99F3-0411EC22CABE}")
+        );
+
+        let mut both = Vec::new();
+        both.extend_from_slice(&g1);
+        both.extend_from_slice(&g2);
+
+        let list = parse_virtual_desktops_from_bytes(Some(&both), Some(&g2), |guid| {
+            if guid == "{7173C0BA-7212-4FD7-8574-62563C3B4BEE}" {
+                Some("Work".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "{dfd37548-7649-470e-99f3-0411ec22cabe}");
+        assert_eq!(list[0].name, "Desktop 1");
+        assert!(!list[0].active);
+        assert_eq!(list[1].id, "{7173c0ba-7212-4fd7-8574-62563c3b4bee}");
+        assert_eq!(list[1].name, "Work");
+        assert!(list[1].active);
+
+        // Missing registry blobs fall back safely to single Desktop 1
+        let fallback = parse_virtual_desktops_from_bytes(None, None, |_| None);
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].name, "Desktop 1");
+        assert!(fallback[0].active);
     }
 }
