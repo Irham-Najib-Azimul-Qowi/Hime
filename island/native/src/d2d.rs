@@ -1,7 +1,9 @@
 //! Direct2D + DirectWrite + DirectComposition window & rendering surface.
 
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -43,20 +45,55 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, RegisterClassExW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, PostMessageW, RegisterClassExW,
     SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
     GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
-    self, Color, ACCENT_CYAN, ACCENT_GLOW, FONT_FAMILY, STATUS_ALERT, STATUS_OFFLINE,
-    STATUS_SUCCESS, STATUS_WARNING, TRANSPARENT,
+    Color, ACCENT_CYAN, ACCENT_GLOW, FONT_FAMILY, STATUS_ALERT, STATUS_OFFLINE, STATUS_SUCCESS,
+    STATUS_WARNING, TRANSPARENT,
 };
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("HimeIslandNativeSurface");
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
+static EVENT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Custom window message posted to the controller HWND when a surface queues input events.
+pub const WM_SURFACE_EVENT: u32 = WM_APP + 2;
+
+/// Input / drag-and-drop event forwarded from a [`NativeSurface`] window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SurfaceEventKind {
+    MouseMove { x: f32, y: f32 },
+    LeftButtonDown { x: f32, y: f32 },
+    LeftButtonUp { x: f32, y: f32 },
+    DropFiles { wparam: usize },
+}
+
+/// Event emitted by a [`NativeSurface`] window, tagged with its `HWND` (`isize`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceEvent {
+    pub hwnd: isize,
+    pub kind: SurfaceEventKind,
+}
+
+thread_local! {
+    static SURFACE_EVENTS: RefCell<Vec<SurfaceEvent>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Registers the controller window that should be woken via [`WM_SURFACE_EVENT`].
+pub fn set_surface_event_target(hwnd: HWND) {
+    EVENT_TARGET_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+}
+
+/// Drains all queued [`SurfaceEvent`]s from the current thread.
+pub fn drain_surface_events() -> Vec<SurfaceEvent> {
+    SURFACE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
 
 /// Axis-aligned rectangle in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -716,6 +753,45 @@ unsafe extern "system" fn surface_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let kind = match msg {
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            Some(SurfaceEventKind::MouseMove { x, y })
+        }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            Some(SurfaceEventKind::LeftButtonDown { x, y })
+        }
+        WM_LBUTTONUP => {
+            let x = (lparam.0 & 0xFFFF) as i16 as f32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+            Some(SurfaceEventKind::LeftButtonUp { x, y })
+        }
+        WM_DROPFILES => Some(SurfaceEventKind::DropFiles { wparam: wparam.0 }),
+        _ => None,
+    };
+
+    if let Some(kind) = kind {
+        SURFACE_EVENTS.with(|cell| {
+            cell.borrow_mut().push(SurfaceEvent {
+                hwnd: hwnd.0 as isize,
+                kind,
+            });
+        });
+        let target = EVENT_TARGET_HWND.load(Ordering::Relaxed);
+        if target != 0 {
+            let _ = PostMessageW(
+                Some(HWND(target as *mut std::ffi::c_void)),
+                WM_SURFACE_EVENT,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        return LRESULT(0);
+    }
+
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
@@ -737,6 +813,7 @@ fn check_hr(hr: HRESULT) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme;
 
     #[test]
     fn hime_expression_serde_roundtrip() {

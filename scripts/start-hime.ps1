@@ -1,5 +1,5 @@
 # start-hime.ps1 - Start Hime Ecosystem with Self-Healing Supervisor
-param([switch]$Autostart)
+param([switch]$Autostart, [switch]$Native)
 
 $ErrorActionPreference = "SilentlyContinue"
 $stateDir = "$env:APPDATA\ai.hime.desktop"
@@ -99,6 +99,19 @@ if (-not $core) {
     if ($coreExe) {
         Spawn-Detached $coreExe "" $himeRoot 0
     }
+}
+
+if ($Native) {
+    # 5-Native. Start Pure-Rust Direct2D Shell (includes built-in global hotkeys, no WebView2, no hime_hotkey.exe)
+    $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
+    if (-not $nativeShell) {
+        $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
+        if ($nativeExe) {
+            Spawn-Detached $nativeExe "" $himeRoot 0
+        }
+    }
+    Write-Host "Hime Native Ecosystem Started (Pure-Rust Direct2D Shell + Core)." -ForegroundColor Green
+    exit 0
 }
 
 # 5. Start Island Shell (hime-island.exe) if not running
