@@ -11,21 +11,23 @@
 //! - Running top-level application windows (`EnumWindows` + `DwmGetWindowAttribute`)
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use windows::core::{BOOL, GUID};
+use windows::core::{BOOL, BSTR, GUID, HRESULT, Interface, PCWSTR, PWSTR};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, PROPERTYKEY};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HWND, LPARAM, PROPERTYKEY, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -33,26 +35,32 @@ use windows::Win32::NetworkManagement::IpHelper::{
     MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
 };
 use windows::Win32::NetworkManagement::WiFi::{
-    wlan_interface_state_connected, wlan_intf_opcode_current_connection, WlanCloseHandle,
-    WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanQueryInterface, DOT11_SSID,
-    WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST,
-    WLAN_INTERFACE_STATE,
+    dot11_BSS_type_infrastructure, wlan_interface_state_connected,
+    wlan_intf_opcode_current_connection, WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory,
+    WlanGetAvailableNetworkList, WlanOpenHandle, WlanQueryInterface, DOT11_SSID,
+    WLAN_AVAILABLE_NETWORK, WLAN_AVAILABLE_NETWORK_CONNECTED, WLAN_AVAILABLE_NETWORK_HAS_PROFILE,
+    WLAN_AVAILABLE_NETWORK_LIST, WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO,
+    WLAN_INTERFACE_INFO_LIST, WLAN_INTERFACE_STATE,
 };
 use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6};
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CoUninitialize, CLSCTX_ALL,
+    COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+    STGM_READ,
 };
-use windows::Win32::System::Variant::VT_LPWSTR;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::System::Variant::VT_LPWSTR;
+use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameA, GetWindow, GetWindowLongW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW,
+    EnumWindows, FindWindowExW, GetClassNameA, GetWindow, GetWindowLongW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, HWND_MESSAGE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::dock::DockItem;
@@ -88,6 +96,16 @@ pub struct VolumeStatus {
     pub percent: u8,
     pub muted: bool,
     pub device_name: Option<String>,
+}
+
+/// Discovered nearby Wi-Fi network returned by [`scan_available_wifi_networks`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiNetworkInfo {
+    pub ssid: String,
+    pub signal_percent: u8,
+    pub secured: bool,
+    pub connected: bool,
+    pub saved: bool,
 }
 
 /// Metadata for a visible top-level application window suitable for [`DockBar`](crate::dock::DockBar).
@@ -198,6 +216,9 @@ pub struct TelemetrySnapshot {
     pub network: NetworkStatus,
     pub battery: BatteryStatus,
     pub volume: VolumeStatus,
+    pub brightness: u8,
+    pub available_wifi: Vec<WifiNetworkInfo>,
+    pub tray_count: u32,
     pub music: Option<MusicInfo>,
     pub running_windows: Vec<RunningWindow>,
 }
@@ -210,6 +231,9 @@ impl Default for TelemetrySnapshot {
             network: NetworkStatus::default(),
             battery: BatteryStatus::default(),
             volume: VolumeStatus::default(),
+            brightness: 80,
+            available_wifi: Vec::new(),
+            tray_count: 0,
             music: None,
             running_windows: Vec::new(),
         }
@@ -351,12 +375,24 @@ fn run_poller_loop(
         GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
             .and_then(|op| op.get())
             .ok();
+    let mut poll_tick: u64 = 0;
+    let mut cached_wifi: Vec<WifiNetworkInfo> = Vec::new();
+    let mut cached_tray_count: u32 = 0;
 
     while !stop.load(Ordering::Relaxed) {
         let (hours, minutes) = read_local_clock();
         let network = read_network_status(&mut prev_net);
         let battery = read_battery_status();
         let volume = read_volume_status(enumerator.as_ref());
+        let brightness = read_brightness();
+
+        if poll_tick % 5 == 0 {
+            cached_wifi = scan_available_wifi_networks();
+        }
+        if poll_tick % 3 == 0 {
+            cached_tray_count = read_tray_count();
+        }
+        poll_tick = poll_tick.wrapping_add(1);
 
         if smtc_mgr.is_none() {
             smtc_mgr = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
@@ -372,6 +408,9 @@ fn run_poller_loop(
             network,
             battery,
             volume,
+            brightness,
+            available_wifi: cached_wifi.clone(),
+            tray_count: cached_tray_count,
             music,
             running_windows,
         };
@@ -700,6 +739,972 @@ fn read_volume_status(enumerator: Option<&IMMDeviceEnumerator>) -> VolumeStatus 
     }
 }
 
+/// Clamps a normalized master volume scalar to `[0.0, 1.0]` (treating NaN as `0.0`).
+pub fn clamp_volume_scalar(level: f32) -> f32 {
+    if !level.is_finite() {
+        0.0
+    } else {
+        level.clamp(0.0, 1.0)
+    }
+}
+
+/// Clamps a display brightness percentage to `0..=100`.
+pub fn clamp_brightness_percent(percent: u8) -> u8 {
+    percent.min(100)
+}
+
+struct ThreadComGuard {
+    should_uninit: bool,
+}
+
+impl ThreadComGuard {
+    fn enter() -> Self {
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        Self {
+            should_uninit: hr.is_ok(),
+        }
+    }
+}
+
+impl Drop for ThreadComGuard {
+    fn drop(&mut self) {
+        if self.should_uninit {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+fn default_audio_endpoint() -> std::result::Result<IAudioEndpointVolume, String> {
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("MMDeviceEnumerator failed: {e}"))?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|e| format!("GetDefaultAudioEndpoint failed: {e}"))?;
+        device
+            .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            .map_err(|e| format!("IAudioEndpointVolume failed: {e}"))
+    }
+}
+
+/// Sets the system master output volume using a normalized scalar in `0.0..=1.0`.
+pub fn set_master_volume(level: f32) -> std::result::Result<(), String> {
+    let _com = ThreadComGuard::enter();
+    let endpoint = default_audio_endpoint()?;
+    let clamped = clamp_volume_scalar(level);
+    unsafe {
+        endpoint
+            .SetMasterVolumeLevelScalar(clamped, std::ptr::null())
+            .map_err(|e| format!("SetMasterVolumeLevelScalar failed: {e}"))
+    }
+}
+
+/// Convenience wrapper setting master output volume as an integer percentage (`0..=100`).
+pub fn set_master_volume_percent(percent: u8) -> std::result::Result<(), String> {
+    set_master_volume(percent.min(100) as f32 / 100.0)
+}
+
+/// Toggles master output mute and returns the resulting mute state (`true` = muted).
+pub fn toggle_mute() -> std::result::Result<bool, String> {
+    let _com = ThreadComGuard::enter();
+    let endpoint = default_audio_endpoint()?;
+    unsafe {
+        let currently_muted: bool = endpoint
+            .GetMute()
+            .map(Into::into)
+            .map_err(|e| format!("GetMute failed: {e}"))?;
+        let next_muted = !currently_muted;
+        endpoint
+            .SetMute(next_muted, std::ptr::null())
+            .map_err(|e| format!("SetMute failed: {e}"))?;
+        Ok(next_muted)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System Brightness (WMI `WmiMonitorBrightness` + DXVA2 `dxva2.dll` + Cache)
+// ---------------------------------------------------------------------------
+
+static CACHED_BRIGHTNESS: AtomicU8 = AtomicU8::new(80);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+union RawVariantData {
+    b_val: u8,
+    i_val: i16,
+    l_val: i32,
+    ui_val: u16,
+    ul_val: u32,
+    bstr_val: *const u16,
+    _pad: [u64; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawVariant {
+    vt: u16,
+    w_reserved1: u16,
+    w_reserved2: u16,
+    w_reserved3: u16,
+    data: RawVariantData,
+}
+
+impl Default for RawVariant {
+    fn default() -> Self {
+        Self {
+            vt: 0,
+            w_reserved1: 0,
+            w_reserved2: 0,
+            w_reserved3: 0,
+            data: RawVariantData { _pad: [0; 2] },
+        }
+    }
+}
+
+#[link(name = "oleaut32")]
+extern "system" {
+    fn VariantClear(pvarg: *mut RawVariant) -> HRESULT;
+}
+
+struct ComRaw(*mut c_void);
+
+impl ComRaw {
+    unsafe fn vtable(&self) -> *const *const c_void {
+        *(self.0 as *const *const *const c_void)
+    }
+}
+
+impl Drop for ComRaw {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let release: unsafe extern "system" fn(*mut c_void) -> u32 =
+                    std::mem::transmute(*self.vtable().add(2));
+                release(self.0);
+            }
+        }
+    }
+}
+
+#[inline]
+unsafe fn bstr_raw(b: &BSTR) -> *const u16 {
+    *(b as *const BSTR as *const *const u16)
+}
+
+unsafe fn connect_wmi_services() -> Option<ComRaw> {
+    const CLSID_WBEM_LOCATOR: GUID = GUID::from_u128(0x4590f811_1d3a_11d0_891f_00aa004b2e24);
+    const IID_IWEM_LOCATOR: GUID = GUID::from_u128(0xdc12a687_737f_11cf_884d_00aa004b2e24);
+
+    let locator_unk: windows::core::IUnknown =
+        CoCreateInstance(&CLSID_WBEM_LOCATOR, None, CLSCTX_ALL).ok()?;
+    let mut locator_ptr: *mut c_void = std::ptr::null_mut();
+    if locator_unk.query(&IID_IWEM_LOCATOR, &mut locator_ptr).is_err() || locator_ptr.is_null() {
+        return None;
+    }
+    let locator = ComRaw(locator_ptr);
+
+    let ns = BSTR::from("root\\WMI");
+    let empty = BSTR::new();
+    let mut services_ptr: *mut c_void = std::ptr::null_mut();
+    let connect_server: unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        *const u16,
+        *const u16,
+        *const u16,
+        i32,
+        *const u16,
+        *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*locator.vtable().add(3));
+    let hr = connect_server(
+        locator.0,
+        bstr_raw(&ns),
+        bstr_raw(&empty),
+        bstr_raw(&empty),
+        bstr_raw(&empty),
+        0,
+        bstr_raw(&empty),
+        std::ptr::null_mut(),
+        &mut services_ptr,
+    );
+    if hr.is_err() || services_ptr.is_null() {
+        return None;
+    }
+    let services = ComRaw(services_ptr);
+
+    if let Some(svc_unk) = windows::core::IUnknown::from_raw_borrowed(&services.0) {
+        let _ = CoSetProxyBlanket(
+            svc_unk,
+            10, // RPC_C_AUTHN_WINNT
+            0,  // RPC_C_AUTHZ_NONE
+            PCWSTR::null(),
+            RPC_C_AUTHN_LEVEL_CALL,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            None,
+            EOAC_NONE,
+        );
+    }
+
+    Some(services)
+}
+
+unsafe fn wmi_read_brightness() -> Option<u8> {
+    let services = connect_wmi_services()?;
+    let wql = BSTR::from("WQL");
+    let query = BSTR::from("SELECT CurrentBrightness FROM WmiMonitorBrightness");
+    let mut enum_ptr: *mut c_void = std::ptr::null_mut();
+    let exec_query: unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        *const u16,
+        i32,
+        *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*services.vtable().add(20));
+    if exec_query(
+        services.0,
+        bstr_raw(&wql),
+        bstr_raw(&query),
+        0,
+        std::ptr::null_mut(),
+        &mut enum_ptr,
+    )
+    .is_err()
+        || enum_ptr.is_null()
+    {
+        return None;
+    }
+    let enum_obj = ComRaw(enum_ptr);
+
+    let mut obj_ptr: *mut c_void = std::ptr::null_mut();
+    let mut returned = 0u32;
+    let next_fn: unsafe extern "system" fn(
+        *mut c_void,
+        i32,
+        u32,
+        *mut *mut c_void,
+        *mut u32,
+    ) -> HRESULT = std::mem::transmute(*enum_obj.vtable().add(4));
+    if next_fn(enum_obj.0, -1, 1, &mut obj_ptr, &mut returned).is_err()
+        || returned == 0
+        || obj_ptr.is_null()
+    {
+        return None;
+    }
+    let obj = ComRaw(obj_ptr);
+
+    let mut var = RawVariant::default();
+    let get_fn: unsafe extern "system" fn(
+        *mut c_void,
+        PCWSTR,
+        i32,
+        *mut RawVariant,
+        *mut i32,
+        *mut i32,
+    ) -> HRESULT = std::mem::transmute(*obj.vtable().add(4));
+    let hr = get_fn(
+        obj.0,
+        windows::core::w!("CurrentBrightness"),
+        0,
+        &mut var,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    if hr.is_err() {
+        return None;
+    }
+
+    let val = match var.vt {
+        17 => Some(var.data.b_val),                   // VT_UI1
+        2 => Some(var.data.i_val.clamp(0, 100) as u8), // VT_I2
+        3 => Some(var.data.l_val.clamp(0, 100) as u8), // VT_I4
+        18 => Some(var.data.ui_val.min(100) as u8),    // VT_UI2
+        19 => Some(var.data.ul_val.min(100) as u8),    // VT_UI4
+        _ => None,
+    };
+    let _ = VariantClear(&mut var);
+    val.map(clamp_brightness_percent)
+}
+
+unsafe fn wmi_set_brightness(percent: u8) -> bool {
+    let Some(services) = connect_wmi_services() else {
+        return false;
+    };
+
+    let class_name = BSTR::from("WmiMonitorBrightnessMethods");
+    let mut class_ptr: *mut c_void = std::ptr::null_mut();
+    let get_object: unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        i32,
+        *mut c_void,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*services.vtable().add(6));
+    if get_object(
+        services.0,
+        bstr_raw(&class_name),
+        0,
+        std::ptr::null_mut(),
+        &mut class_ptr,
+        std::ptr::null_mut(),
+    )
+    .is_err()
+        || class_ptr.is_null()
+    {
+        return false;
+    }
+    let class_def = ComRaw(class_ptr);
+
+    let mut in_cls_ptr: *mut c_void = std::ptr::null_mut();
+    let get_method: unsafe extern "system" fn(
+        *mut c_void,
+        PCWSTR,
+        i32,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*class_def.vtable().add(19));
+    if get_method(
+        class_def.0,
+        windows::core::w!("WmiSetBrightness"),
+        0,
+        &mut in_cls_ptr,
+        std::ptr::null_mut(),
+    )
+    .is_err()
+        || in_cls_ptr.is_null()
+    {
+        return false;
+    }
+    let in_cls = ComRaw(in_cls_ptr);
+
+    let wql = BSTR::from("WQL");
+    let query = BSTR::from("SELECT * FROM WmiMonitorBrightnessMethods");
+    let mut enum_ptr: *mut c_void = std::ptr::null_mut();
+    let exec_query: unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        *const u16,
+        i32,
+        *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*services.vtable().add(20));
+    if exec_query(
+        services.0,
+        bstr_raw(&wql),
+        bstr_raw(&query),
+        0,
+        std::ptr::null_mut(),
+        &mut enum_ptr,
+    )
+    .is_err()
+        || enum_ptr.is_null()
+    {
+        return false;
+    }
+    let enum_obj = ComRaw(enum_ptr);
+
+    let next_fn: unsafe extern "system" fn(
+        *mut c_void,
+        i32,
+        u32,
+        *mut *mut c_void,
+        *mut u32,
+    ) -> HRESULT = std::mem::transmute(*enum_obj.vtable().add(4));
+    let exec_method: unsafe extern "system" fn(
+        *mut c_void,
+        *const u16,
+        *const u16,
+        i32,
+        *mut c_void,
+        *mut c_void,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> HRESULT = std::mem::transmute(*services.vtable().add(24));
+
+    let mut applied = false;
+    loop {
+        let mut obj_ptr: *mut c_void = std::ptr::null_mut();
+        let mut returned = 0u32;
+        if next_fn(enum_obj.0, -1, 1, &mut obj_ptr, &mut returned).is_err()
+            || returned == 0
+            || obj_ptr.is_null()
+        {
+            break;
+        }
+        let obj = ComRaw(obj_ptr);
+
+        let mut rel_var = RawVariant::default();
+        let get_fn: unsafe extern "system" fn(
+            *mut c_void,
+            PCWSTR,
+            i32,
+            *mut RawVariant,
+            *mut i32,
+            *mut i32,
+        ) -> HRESULT = std::mem::transmute(*obj.vtable().add(4));
+        if get_fn(
+            obj.0,
+            windows::core::w!("__RELPATH"),
+            0,
+            &mut rel_var,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let relpath_str = if rel_var.vt == 8 && !rel_var.data.bstr_val.is_null() {
+            PCWSTR(rel_var.data.bstr_val).to_string().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let _ = VariantClear(&mut rel_var);
+        if relpath_str.is_empty() {
+            continue;
+        }
+
+        let mut in_params_ptr: *mut c_void = std::ptr::null_mut();
+        let spawn_inst: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> HRESULT =
+            std::mem::transmute(*in_cls.vtable().add(15));
+        if spawn_inst(in_cls.0, 0, &mut in_params_ptr).is_err() || in_params_ptr.is_null() {
+            continue;
+        }
+        let in_params = ComRaw(in_params_ptr);
+
+        let put_fn: unsafe extern "system" fn(
+            *mut c_void,
+            PCWSTR,
+            i32,
+            *const RawVariant,
+            i32,
+        ) -> HRESULT = std::mem::transmute(*in_params.vtable().add(5));
+
+        let mut b_var = RawVariant::default();
+        b_var.vt = 17; // VT_UI1
+        b_var.data.b_val = percent;
+        let _ = put_fn(in_params.0, windows::core::w!("Brightness"), 0, &b_var, 0);
+
+        let mut t_var = RawVariant::default();
+        t_var.vt = 3; // VT_I4
+        t_var.data.l_val = 0;
+        let _ = put_fn(in_params.0, windows::core::w!("Timeout"), 0, &t_var, 0);
+
+        let obj_path = BSTR::from(relpath_str.as_str());
+        let method_name = BSTR::from("WmiSetBrightness");
+        if exec_method(
+            services.0,
+            bstr_raw(&obj_path),
+            bstr_raw(&method_name),
+            0,
+            std::ptr::null_mut(),
+            in_params.0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+        .is_ok()
+        {
+            applied = true;
+        }
+    }
+    applied
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Dxva2PhysicalMonitor {
+    h_physical_monitor: usize,
+    description: [u16; 128],
+}
+
+struct Dxva2Fns {
+    get_num: unsafe extern "system" fn(HMONITOR, *mut u32) -> BOOL,
+    get_mons: unsafe extern "system" fn(HMONITOR, u32, *mut Dxva2PhysicalMonitor) -> BOOL,
+    destroy_mons: unsafe extern "system" fn(u32, *mut Dxva2PhysicalMonitor) -> BOOL,
+    get_bright: unsafe extern "system" fn(usize, *mut u32, *mut u32, *mut u32) -> BOOL,
+    set_bright: unsafe extern "system" fn(usize, u32) -> BOOL,
+}
+
+unsafe fn load_dxva2() -> Option<Dxva2Fns> {
+    let module = LoadLibraryW(windows::core::w!("dxva2.dll")).ok()?;
+    let get_num = GetProcAddress(module, windows::core::s!("GetNumberOfPhysicalMonitorsFromHMONITOR"))?;
+    let get_mons = GetProcAddress(module, windows::core::s!("GetPhysicalMonitorsFromHMONITOR"))?;
+    let destroy_mons = GetProcAddress(module, windows::core::s!("DestroyPhysicalMonitors"))?;
+    let get_bright = GetProcAddress(module, windows::core::s!("GetMonitorBrightness"))?;
+    let set_bright = GetProcAddress(module, windows::core::s!("SetMonitorBrightness"))?;
+    Some(Dxva2Fns {
+        get_num: std::mem::transmute(get_num),
+        get_mons: std::mem::transmute(get_mons),
+        destroy_mons: std::mem::transmute(destroy_mons),
+        get_bright: std::mem::transmute(get_bright),
+        set_bright: std::mem::transmute(set_bright),
+    })
+}
+
+unsafe fn dxva2_read_brightness() -> Option<u8> {
+    let fns = load_dxva2()?;
+    struct Ctx<'a> {
+        fns: &'a Dxva2Fns,
+        found: Option<u8>,
+    }
+    unsafe extern "system" fn enum_proc(
+        hmonitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx<'_>);
+        if ctx.found.is_some() {
+            return false.into();
+        }
+        let mut count = 0u32;
+        if (ctx.fns.get_num)(hmonitor, &mut count).as_bool() && count > 0 {
+            let mut mons = vec![std::mem::zeroed::<Dxva2PhysicalMonitor>(); count as usize];
+            if (ctx.fns.get_mons)(hmonitor, count, mons.as_mut_ptr()).as_bool() {
+                for mon in &mons {
+                    if mon.h_physical_monitor != 0 {
+                        let (mut min_b, mut cur_b, mut max_b) = (0u32, 0u32, 0u32);
+                        if (ctx.fns.get_bright)(
+                            mon.h_physical_monitor,
+                            &mut min_b,
+                            &mut cur_b,
+                            &mut max_b,
+                        )
+                        .as_bool()
+                            && max_b > min_b
+                        {
+                            let pct = (((cur_b.saturating_sub(min_b)) as f32
+                                / (max_b - min_b) as f32)
+                                * 100.0)
+                                .round() as u8;
+                            ctx.found = Some(clamp_brightness_percent(pct));
+                            break;
+                        }
+                    }
+                }
+                let _ = (ctx.fns.destroy_mons)(count, mons.as_mut_ptr());
+            }
+        }
+        ctx.found.is_none().into()
+    }
+    let mut ctx = Ctx {
+        fns: &fns,
+        found: None,
+    };
+    let _ = EnumDisplayMonitors(
+        None,
+        None,
+        Some(enum_proc),
+        LPARAM(&mut ctx as *mut Ctx<'_> as isize),
+    );
+    ctx.found
+}
+
+unsafe fn dxva2_set_brightness(percent: u8) -> bool {
+    let Some(fns) = load_dxva2() else {
+        return false;
+    };
+    struct Ctx<'a> {
+        fns: &'a Dxva2Fns,
+        percent: u8,
+        applied: bool,
+    }
+    unsafe extern "system" fn enum_proc(
+        hmonitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx<'_>);
+        let mut count = 0u32;
+        if (ctx.fns.get_num)(hmonitor, &mut count).as_bool() && count > 0 {
+            let mut mons = vec![std::mem::zeroed::<Dxva2PhysicalMonitor>(); count as usize];
+            if (ctx.fns.get_mons)(hmonitor, count, mons.as_mut_ptr()).as_bool() {
+                for mon in &mons {
+                    if mon.h_physical_monitor != 0 {
+                        if (ctx.fns.set_bright)(mon.h_physical_monitor, ctx.percent as u32)
+                            .as_bool()
+                        {
+                            ctx.applied = true;
+                        }
+                    }
+                }
+                let _ = (ctx.fns.destroy_mons)(count, mons.as_mut_ptr());
+            }
+        }
+        true.into()
+    }
+    let mut ctx = Ctx {
+        fns: &fns,
+        percent,
+        applied: false,
+    };
+    let _ = EnumDisplayMonitors(
+        None,
+        None,
+        Some(enum_proc),
+        LPARAM(&mut ctx as *mut Ctx<'_> as isize),
+    );
+    ctx.applied
+}
+
+/// Reads the current system display brightness (`0..=100`) via WMI (`WmiMonitorBrightness`),
+/// falling back to DXVA2 DDC/CI and finally the last cached brightness value.
+pub fn read_brightness() -> u8 {
+    let _com = ThreadComGuard::enter();
+    let hw = unsafe { wmi_read_brightness().or_else(|| dxva2_read_brightness()) };
+    if let Some(pct) = hw {
+        let clamped = clamp_brightness_percent(pct);
+        CACHED_BRIGHTNESS.store(clamped, Ordering::Relaxed);
+        clamped
+    } else {
+        CACHED_BRIGHTNESS.load(Ordering::Relaxed)
+    }
+}
+
+/// Sets the system display brightness (`0..=100`) via WMI (`WmiMonitorBrightnessMethods`)
+/// and DXVA2 DDC/CI, updating the cached fallback level even if no hardware panel responds.
+pub fn set_brightness(percent: u8) -> std::result::Result<(), String> {
+    let clamped = clamp_brightness_percent(percent);
+    CACHED_BRIGHTNESS.store(clamped, Ordering::Relaxed);
+
+    let _com = ThreadComGuard::enter();
+    let wmi_ok = unsafe { wmi_set_brightness(clamped) };
+    let dxva_ok = unsafe { dxva2_set_brightness(clamped) };
+    if wmi_ok || dxva_ok {
+        Ok(())
+    } else {
+        Err("No WMI or DDC/CI brightness-capable display detected".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Available Wi-Fi Network List (`WlanGetAvailableNetworkList`)
+// ---------------------------------------------------------------------------
+
+/// Merges duplicate SSIDs (keeping highest signal, ORing `connected`/`saved`) and sorts
+/// connected first, then saved, then strongest signal, then SSID ascending.
+pub fn merge_and_sort_wifi_networks(entries: Vec<WifiNetworkInfo>) -> Vec<WifiNetworkInfo> {
+    let mut by_ssid: HashMap<String, WifiNetworkInfo> = HashMap::new();
+    for mut entry in entries {
+        let trimmed = entry.ssid.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match by_ssid.get_mut(&trimmed) {
+            Some(existing) => {
+                existing.signal_percent = existing.signal_percent.max(entry.signal_percent);
+                existing.connected |= entry.connected;
+                existing.saved |= entry.saved;
+                existing.secured |= entry.secured;
+            }
+            None => {
+                entry.ssid = trimmed.clone();
+                entry.signal_percent = entry.signal_percent.min(100);
+                by_ssid.insert(trimmed, entry);
+            }
+        }
+    }
+
+    let mut list: Vec<WifiNetworkInfo> = by_ssid.into_values().collect();
+    list.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then(b.saved.cmp(&a.saved))
+            .then(b.signal_percent.cmp(&a.signal_percent))
+            .then_with(|| a.ssid.to_lowercase().cmp(&b.ssid.to_lowercase()))
+    });
+    list
+}
+
+/// Scans nearby infrastructure Wi-Fi networks via `WlanGetAvailableNetworkList`.
+pub fn scan_available_wifi_networks() -> Vec<WifiNetworkInfo> {
+    let Some(client) = WlanClient::open() else {
+        return Vec::new();
+    };
+    let ifaces = client.interfaces();
+    let target_guid = ifaces
+        .iter()
+        .find(|(_, state)| *state == wlan_interface_state_connected)
+        .or_else(|| ifaces.first())
+        .map(|(guid, _)| *guid);
+    let Some(guid) = target_guid else {
+        return Vec::new();
+    };
+
+    let mut list: *mut WLAN_AVAILABLE_NETWORK_LIST = std::ptr::null_mut();
+    let rc = unsafe { WlanGetAvailableNetworkList(client.0, &guid, 0, None, &mut list) };
+    if rc == ERROR_ACCESS_DENIED.0 || rc != 0 || list.is_null() {
+        if let Some(ssid) = query_connected_wifi_ssid() {
+            return vec![WifiNetworkInfo {
+                ssid,
+                signal_percent: 100,
+                secured: true,
+                connected: true,
+                saved: true,
+            }];
+        }
+        return Vec::new();
+    }
+
+    let mut collected = Vec::new();
+    unsafe {
+        if let Some(header) = list.as_ref() {
+            let count = (header.dwNumberOfItems as usize).min(1024);
+            if count > 0 {
+                let entries: &[WLAN_AVAILABLE_NETWORK] =
+                    std::slice::from_raw_parts(header.Network.as_ptr(), count);
+                for entry in entries {
+                    let bytes = ssid_bytes(&entry.dot11Ssid);
+                    if bytes.is_empty() || entry.dot11BssType != dot11_BSS_type_infrastructure {
+                        continue;
+                    }
+                    let ssid = String::from_utf8_lossy(bytes).into_owned();
+                    collected.push(WifiNetworkInfo {
+                        ssid,
+                        signal_percent: entry.wlanSignalQuality.min(100) as u8,
+                        secured: entry.bSecurityEnabled.as_bool(),
+                        connected: (entry.dwFlags & WLAN_AVAILABLE_NETWORK_CONNECTED) != 0,
+                        saved: (entry.dwFlags & WLAN_AVAILABLE_NETWORK_HAS_PROFILE) != 0,
+                    });
+                }
+            }
+        }
+        WlanFreeMemory(list as *const _);
+    }
+
+    merge_and_sort_wifi_networks(collected)
+}
+
+// ---------------------------------------------------------------------------
+// Live System Tray Icon Count
+// ---------------------------------------------------------------------------
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegOpenKeyExW(
+        hKey: isize,
+        lpSubKey: PCWSTR,
+        ulOptions: u32,
+        samDesired: u32,
+        phkResult: *mut isize,
+    ) -> i32;
+    fn RegEnumKeyExW(
+        hKey: isize,
+        dwIndex: u32,
+        lpName: PWSTR,
+        lpcchName: *mut u32,
+        lpReserved: *mut u32,
+        lpClass: PWSTR,
+        lpcchClass: *mut u32,
+        lpftLastWriteTime: *mut c_void,
+    ) -> i32;
+    fn RegQueryValueExW(
+        hKey: isize,
+        lpValueName: PCWSTR,
+        lpReserved: *mut u32,
+        lpType: *mut u32,
+        lpData: *mut u8,
+        lpcbData: *mut u32,
+    ) -> i32;
+    fn RegCloseKey(hKey: isize) -> i32;
+}
+
+/// Counts live third-party system tray application icons via `Control Panel\NotifyIconSettings`
+/// verified with `Shell_NotifyIconGetRect`.
+pub fn read_tray_count() -> u32 {
+    const HKEY_CURRENT_USER: isize = -2147483647isize; // 0x80000001
+    const KEY_READ: u32 = 0x20019;
+    const REG_SZ: u32 = 1;
+    const REG_DWORD: u32 = 4;
+
+    unsafe fn reg_open(parent: isize, subkey: &str) -> Option<isize> {
+        let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+        let mut out = 0isize;
+        if RegOpenKeyExW(parent, PCWSTR(wide.as_ptr()), 0, KEY_READ, &mut out) == 0 {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    unsafe fn reg_string(hkey: isize, name: &str) -> Option<String> {
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let mut kind = 0u32;
+        let mut size = 0u32;
+        if RegQueryValueExW(
+            hkey,
+            PCWSTR(wide.as_ptr()),
+            std::ptr::null_mut(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut size,
+        ) != 0
+            || kind != REG_SZ
+            || size == 0
+            || size > 65536
+        {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if RegQueryValueExW(
+            hkey,
+            PCWSTR(wide.as_ptr()),
+            std::ptr::null_mut(),
+            &mut kind,
+            buf.as_mut_ptr(),
+            &mut size,
+        ) != 0
+        {
+            return None;
+        }
+        let chars: Vec<u16> = buf[..size as usize]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&ch| ch != 0)
+            .collect();
+        String::from_utf16(&chars).ok()
+    }
+
+    unsafe fn reg_dword(hkey: isize, name: &str) -> Option<u32> {
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let mut kind = 0u32;
+        let mut val = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        if RegQueryValueExW(
+            hkey,
+            PCWSTR(wide.as_ptr()),
+            std::ptr::null_mut(),
+            &mut kind,
+            (&mut val as *mut u32).cast::<u8>(),
+            &mut size,
+        ) == 0
+            && kind == REG_DWORD
+        {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    unsafe extern "system" fn collect_hwnd_exe(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let out = &mut *(lparam.0 as *mut Vec<(isize, String)>);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != 0 {
+            if let Ok(proc_h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut path_buf = [0u16; 1024];
+                let mut len = path_buf.len() as u32;
+                if QueryFullProcessImageNameW(
+                    proc_h,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(path_buf.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok()
+                {
+                    let exe = String::from_utf16_lossy(&path_buf[..len as usize]);
+                    out.push((hwnd.0 as isize, exe));
+                }
+                let _ = CloseHandle(proc_h);
+            }
+        }
+        true.into()
+    }
+
+    unsafe {
+        let Some(root) = reg_open(HKEY_CURRENT_USER, "Control Panel\\NotifyIconSettings") else {
+            return 0;
+        };
+
+        let mut windows: Vec<(isize, String)> = Vec::new();
+        let param = LPARAM(&mut windows as *mut Vec<(isize, String)> as isize);
+        let _ = EnumWindows(Some(collect_hwnd_exe), param);
+        let mut prev = None;
+        while let Ok(hwnd) = FindWindowExW(Some(HWND_MESSAGE), prev, PCWSTR::null(), PCWSTR::null())
+        {
+            let _ = collect_hwnd_exe(hwnd, param);
+            prev = Some(hwnd);
+        }
+
+        let own_exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().to_lowercase());
+        let mut unique_apps: HashSet<String> = HashSet::new();
+
+        for idx in 0..1024u32 {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = name_buf.len() as u32;
+            if RegEnumKeyExW(
+                root,
+                idx,
+                PWSTR(name_buf.as_mut_ptr()),
+                &mut name_len,
+                std::ptr::null_mut(),
+                PWSTR::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+            {
+                break;
+            }
+            let subkey = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let Some(item_key) = reg_open(root, &subkey) else {
+                continue;
+            };
+            let exe_path = reg_string(item_key, "ExecutablePath");
+            let icon_guid = reg_string(item_key, "IconGuid");
+            let uid = reg_dword(item_key, "UID");
+            let _ = RegCloseKey(item_key);
+
+            let Some(path) = exe_path else {
+                continue;
+            };
+            let lower = path.to_lowercase();
+            if lower.ends_with("\\explorer.exe") || own_exe.as_deref() == Some(lower.as_str()) {
+                continue;
+            }
+
+            let mut nid = NOTIFYICONIDENTIFIER {
+                cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+                ..Default::default()
+            };
+            let confirmed = if let Some(guid_str) = icon_guid {
+                if let Ok(guid) =
+                    GUID::try_from(guid_str.trim_start_matches('{').trim_end_matches('}'))
+                {
+                    nid.guidItem = guid;
+                    windows.iter().any(|(_, p)| p.eq_ignore_ascii_case(&path))
+                        && Shell_NotifyIconGetRect(&nid).is_ok()
+                } else {
+                    false
+                }
+            } else if let Some(u) = uid {
+                nid.uID = u;
+                windows.iter().any(|(hwnd, p)| {
+                    if !p.eq_ignore_ascii_case(&path) {
+                        return false;
+                    }
+                    nid.hWnd = HWND(*hwnd as *mut _);
+                    Shell_NotifyIconGetRect(&nid).is_ok()
+                })
+            } else {
+                false
+            };
+
+            if confirmed {
+                unique_apps.insert(lower);
+            }
+        }
+
+        let _ = RegCloseKey(root);
+        unique_apps.len() as u32
+    }
+}
+
 fn read_smtc_music(
     manager: &mut Option<GlobalSystemMediaTransportControlsSessionManager>,
 ) -> Option<MusicInfo> {
@@ -1022,7 +2027,65 @@ mod tests {
     fn telemetry_snapshot_default_is_consistent() {
         let snap = TelemetrySnapshot::default();
         assert_eq!(snap.network.kind, NetworkKind::Offline);
+        assert_eq!(snap.brightness, 80);
+        assert!(snap.available_wifi.is_empty());
+        assert_eq!(snap.tray_count, 0);
         assert!(snap.music.is_none());
         assert!(snap.running_windows.is_empty());
+    }
+
+    #[test]
+    fn clamp_volume_and_brightness_handle_bounds_and_nan() {
+        assert_eq!(clamp_volume_scalar(-0.5), 0.0);
+        assert_eq!(clamp_volume_scalar(1.8), 1.0);
+        assert_eq!(clamp_volume_scalar(f32::NAN), 0.0);
+        assert!((clamp_volume_scalar(0.42) - 0.42).abs() < 1e-5);
+
+        assert_eq!(clamp_brightness_percent(0), 0);
+        assert_eq!(clamp_brightness_percent(75), 75);
+        assert_eq!(clamp_brightness_percent(250), 100);
+        assert!(read_brightness() <= 100);
+    }
+
+    #[test]
+    fn merge_and_sort_wifi_networks_dedupes_and_orders_correctly() {
+        let input = vec![
+            WifiNetworkInfo {
+                ssid: "CafeGuest".to_string(),
+                signal_percent: 45,
+                secured: false,
+                connected: false,
+                saved: false,
+            },
+            WifiNetworkInfo {
+                ssid: "HomeWifi".to_string(),
+                signal_percent: 62,
+                secured: true,
+                connected: false,
+                saved: true,
+            },
+            WifiNetworkInfo {
+                ssid: "HomeWifi".to_string(),
+                signal_percent: 88,
+                secured: true,
+                connected: true,
+                saved: false,
+            },
+            WifiNetworkInfo {
+                ssid: "   ".to_string(),
+                signal_percent: 99,
+                secured: true,
+                connected: false,
+                saved: false,
+            },
+        ];
+
+        let sorted = merge_and_sort_wifi_networks(input);
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].ssid, "HomeWifi");
+        assert_eq!(sorted[0].signal_percent, 88);
+        assert!(sorted[0].connected);
+        assert!(sorted[0].saved);
+        assert_eq!(sorted[1].ssid, "CafeGuest");
     }
 }
