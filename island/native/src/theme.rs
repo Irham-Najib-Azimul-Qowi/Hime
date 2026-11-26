@@ -259,23 +259,23 @@ impl AdaptivePalette {
 // Apple Liquid Glass Materials (Dark Smoked & Light Frosted)
 // ---------------------------------------------------------------------------
 
-/// `Glass.regular` (Dark): obsidian smoked glass (~78% alpha).
-pub const GLASS_REGULAR: Color = Color::from_rgba_u8(0x14, 0x14, 0x18, 0xC7);
+/// `Glass.regular` (Dark): obsidian smoked glass (~43% alpha so blurred backdrop shows through).
+pub const GLASS_REGULAR: Color = Color::from_rgba_u8(0x14, 0x14, 0x18, 0x6E);
 
-/// `Glass.clear` (Dark): lighter translucent smoked glass (~64% alpha).
-pub const GLASS_CLEAR: Color = Color::from_rgba_u8(0x10, 0x10, 0x14, 0xA3);
+/// `Glass.clear` (Dark): lighter translucent smoked glass (~32% alpha).
+pub const GLASS_CLEAR: Color = Color::from_rgba_u8(0x10, 0x10, 0x14, 0x52);
 
-/// Elevated inner card / grouped section surface (Dark, ~82% alpha).
-pub const GLASS_ELEVATED: Color = Color::from_rgba_u8(0x20, 0x20, 0x24, 0xD1);
+/// Elevated inner card / grouped section surface (Dark, ~52% alpha).
+pub const GLASS_ELEVATED: Color = Color::from_rgba_u8(0x20, 0x20, 0x24, 0x85);
 
-/// `Glass.regular` (Light): frosted white glass (~82% alpha).
-pub const LIGHT_GLASS_REGULAR: Color = Color::from_rgba_u8(0xF3, 0xF5, 0xF8, 0xD1);
+/// `Glass.regular` (Light): frosted white glass (~41% alpha so blurred backdrop shows through).
+pub const LIGHT_GLASS_REGULAR: Color = Color::from_rgba_u8(0xF3, 0xF5, 0xF8, 0x68);
 
-/// `Glass.clear` (Light): lighter frosted white glass (~68% alpha).
-pub const LIGHT_GLASS_CLEAR: Color = Color::from_rgba_u8(0xF7, 0xF8, 0xFB, 0xAD);
+/// `Glass.clear` (Light): lighter frosted white glass (~29% alpha).
+pub const LIGHT_GLASS_CLEAR: Color = Color::from_rgba_u8(0xF7, 0xF8, 0xFB, 0x4A);
 
-/// Elevated inner card surface (Light, ~86% alpha).
-pub const LIGHT_GLASS_ELEVATED: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0xDB);
+/// Elevated inner card surface (Light, ~48% alpha).
+pub const LIGHT_GLASS_ELEVATED: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x7A);
 
 /// Subtle translucent control fill (`rgba(255, 255, 255, 0.08)`).
 pub const GLASS_CONTROL: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x14);

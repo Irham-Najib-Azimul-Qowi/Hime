@@ -1711,7 +1711,7 @@ impl DockBar {
                         palette.divider.with_alpha_mul(fly_alpha),
                     )?;
                     let new_hovered = self.hovered_target == Some(DockHoverTarget::NewSpace);
-                    surface.draw_liquid_glass_button(new_r, 7.0, None, new_hovered, false)?;
+                    surface.draw_icon_button(new_r, 7.0, new_hovered, false, false)?;
                     let plus_rect = Rect::new(
                         new_r.x + 5.0,
                         new_r.y + 5.0,
@@ -1743,9 +1743,7 @@ impl DockBar {
                 let tray_rects = self.tray_item_rects(surface_rect, dock);
                 for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
                     let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
-                    if hovered {
-                        surface.draw_liquid_glass_button(*r, 6.0, None, true, false)?;
-                    }
+                    surface.draw_icon_button(*r, 6.0, hovered, false, false)?;
                     if let Some(ref icon_rgba) = entry.icon {
                         surface.draw_bgra_bitmap(
                             *r,
@@ -1762,9 +1760,6 @@ impl DockBar {
                             .unwrap_or('?')
                             .to_uppercase()
                             .to_string();
-                        if !hovered {
-                            surface.draw_liquid_glass_button(*r, 6.0, None, false, false)?;
-                        }
                         surface.draw_text(
                             &initial,
                             *r,
@@ -1813,9 +1808,9 @@ impl DockBar {
         let spaces_hovered = self.hovered_target == Some(DockHoverTarget::Spaces);
         let tray_hovered = self.hovered_target == Some(DockHoverTarget::Tray);
 
-        // 1. Hime AI button (expressive Hime eyes badge)
+        // 1. Hime AI button (expressive Hime eyes badge — frameless at rest)
         if let Some(ai_r) = ai_rect {
-            surface.draw_liquid_glass_button(ai_r, 10.0, None, ai_hovered, false)?;
+            surface.draw_icon_button(ai_r, 10.0, ai_hovered, false, false)?;
             surface.draw_hime_eyes(
                 ai_r.x + ai_r.width * 0.5,
                 ai_r.y + ai_r.height * 0.5,
@@ -1825,14 +1820,8 @@ impl DockBar {
             )?;
         }
 
-        // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`)
-        surface.draw_liquid_glass_button(
-            spaces_rect,
-            10.0,
-            None,
-            spaces_hovered,
-            self.spaces_open,
-        )?;
+        // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`, frameless at rest)
+        surface.draw_icon_button(spaces_rect, 10.0, spaces_hovered, false, self.spaces_open)?;
         let spaces_icon = Rect::new(
             spaces_rect.x + 8.0,
             spaces_rect.y + 8.0,
@@ -1849,13 +1838,17 @@ impl DockBar {
         )?;
 
         // 3. System Tray button (`SfSymbol::TrayGrid` + optional `+N` count)
-        surface.draw_liquid_glass_button(
-            tray_rect,
-            10.0,
-            None,
-            tray_hovered,
-            self.tray_open,
-        )?;
+        if self.system_tray_count > 0 {
+            surface.draw_liquid_glass_button(
+                tray_rect,
+                10.0,
+                None,
+                tray_hovered,
+                self.tray_open,
+            )?;
+        } else {
+            surface.draw_icon_button(tray_rect, 10.0, tray_hovered, false, self.tray_open)?;
+        }
         let tray_fg = palette
             .text_primary
             .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);

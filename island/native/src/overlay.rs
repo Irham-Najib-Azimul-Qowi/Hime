@@ -575,18 +575,14 @@ impl OverlayHud {
             22.0,
             22.0,
         );
-        if self.kind == HudKind::Volume && self.is_hovered {
+        if self.kind == HudKind::Volume && self.is_hovered && content_alpha > 0.75 {
             let pill = Rect::new(
                 rect.x + (rect.width - 32.0) * 0.5,
                 rect.y + rect.height - 53.0,
                 32.0,
                 32.0,
             );
-            surface.fill_rounded_rect(
-                pill,
-                16.0,
-                palette.control_hover.with_alpha_mul(0.55 * content_alpha),
-            )?;
+            surface.draw_icon_button(pill, 16.0, self.is_hovered, self.is_dragging, self.muted)?;
         }
         match self.kind {
             HudKind::Volume => {

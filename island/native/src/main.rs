@@ -120,7 +120,7 @@ const VK_T: u32 = 0x54;
 const PROACTIVE_EVAL_INTERVAL: Duration = Duration::from_secs(60);
 const CORE_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MEDIA_TIMELINE_SYNC_INTERVAL: Duration = Duration::from_secs(1);
-const BACKDROP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const BACKDROP_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 static ORIG_SURFACE_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static EXTRA_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
@@ -1352,23 +1352,31 @@ impl AppShell {
         }
     }
 
-    fn refresh_visible_backdrops(&mut self) {
-        if !self.notch.is_hidden {
+    fn refresh_visible_backdrops(
+        &mut self,
+        notch_settled: bool,
+        dock_settled: bool,
+        vol_settled: bool,
+        bri_settled: bool,
+        set_settled: bool,
+        drw_settled: bool,
+    ) {
+        if notch_settled && !self.notch.is_hidden {
             self.capture_notch_backdrop(false, false);
         }
-        if self.dock.visible && !self.dock.is_hidden {
+        if dock_settled && self.dock.visible && !self.dock.is_hidden {
             self.capture_dock_backdrop(false, false);
         }
-        if self.overlays.volume.is_visible() {
+        if vol_settled && self.overlays.volume.is_visible() {
             self.capture_overlay_backdrop(true, false, false);
         }
-        if self.overlays.brightness.is_visible() {
+        if bri_settled && self.overlays.brightness.is_visible() {
             self.capture_overlay_backdrop(false, false, false);
         }
-        if self.settings.visible {
+        if set_settled && self.settings.visible {
             self.capture_settings_backdrop(false, false);
         }
-        if self.ai_drawer.visible {
+        if drw_settled && self.ai_drawer.visible {
             self.capture_drawer_backdrop(false, false);
         }
     }
@@ -2353,7 +2361,11 @@ impl AppShell {
             SurfaceEventKind::MouseMove { x, y } => {
                 let lx = x / scale;
                 let ly = y / scale;
+                let prev_hover = self.notch.pointer_pos;
                 self.notch.set_pointer_hover(Some((lx, ly)));
+                if prev_hover != self.notch.pointer_pos {
+                    render_now = true;
+                }
                 if self.notch.is_hidden {
                     self.notch.set_hidden(false);
                     render_now = true;
@@ -3097,6 +3109,7 @@ impl AppShell {
                 if self.settings.set_hovered_at(x / scale, y / scale) {
                     self.dirty_settings = true;
                     self.render_all();
+                    self.ensure_fast_timer(ctrl_hwnd);
                 }
             }
             SurfaceEventKind::LeftButtonDown { x, y } => {
@@ -3299,6 +3312,8 @@ impl AppShell {
                 if self.ai_drawer.visible {
                     self.ai_drawer.set_pointer_hover(Some((x / scale, y / scale)));
                     self.dirty_drawer = true;
+                    self.render_all();
+                    self.ensure_fast_timer(ctrl_hwnd);
                 }
             }
         }
@@ -4200,7 +4215,14 @@ impl AppShell {
             || watch_outside_click
             || self.notch.has_active_banner();
 
-        self.refresh_visible_backdrops();
+        self.refresh_visible_backdrops(
+            !notch_anim,
+            !dock_anim,
+            !vol_anim,
+            !bri_anim,
+            !set_anim,
+            !drw_anim,
+        );
         self.sync_overlay_visibility();
         self.render_all();
         self.release_settings_surface_if_idle();

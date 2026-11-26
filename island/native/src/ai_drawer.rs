@@ -630,12 +630,12 @@ impl AiDrawer {
 
         // Close button (`SfSymbol::CloseX`)
         let close_r = self.button_rect(self.close_rect());
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             close_r,
             9.0,
-            None,
             self.is_hovered(self.close_rect()),
             self.is_pressed(self.close_rect()),
+            false,
         )?;
         let close_icon = Rect::new(close_r.x + 7.0, close_r.y + 7.0, 14.0, 14.0);
         surface.draw_sf_symbol(close_icon, SfSymbol::CloseX, p.text_secondary, 1.5)?;
@@ -697,12 +697,12 @@ impl AiDrawer {
             )?;
             let clear_raw = self.clear_attachments_rect();
             let clear_r = self.button_rect(clear_raw);
-            surface.draw_liquid_glass_button(
+            surface.draw_icon_button(
                 clear_r,
                 7.0,
-                None,
                 self.is_hovered(clear_raw),
                 self.is_pressed(clear_raw),
+                false,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(clear_r.x + 8.0, clear_r.y + 7.0, 12.0, 12.0),

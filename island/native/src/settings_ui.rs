@@ -1268,12 +1268,12 @@ impl SettingsPanel {
             TextAlign::Leading,
         )?;
 
-        // Crisp vector CloseX button inside Liquid Glass circle
+        // Crisp vector CloseX button (frameless at rest, borderless pill on hover/press)
         let close_base = Rect::new(draw_w - 38.0, 9.0, 24.0, 24.0);
         let close_r = scale_rect_centered(close_base, self.target_scale(HitTarget::Close));
         let close_hovered = self.hovered_target == Some(HitTarget::Close);
         let close_pressed = self.pressed_target == Some(HitTarget::Close);
-        surface.draw_liquid_glass_button(close_r, 12.0, None, close_hovered, close_pressed)?;
+        surface.draw_icon_button(close_r, 12.0, close_hovered, close_pressed, false)?;
         surface.draw_sf_symbol(
             inset_rect(close_r, 6.0),
             SfSymbol::CloseX,

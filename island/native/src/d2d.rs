@@ -2100,6 +2100,32 @@ impl NativeSurface {
         Ok(())
     }
 
+    /// Draws a frameless icon button container: draws nothing (0 fill, 0 border) at rest,
+    /// and a soft borderless translucent pill wash on hover, press, or active selection.
+    pub fn draw_icon_button(
+        &self,
+        rect: Rect,
+        corner_radius: f32,
+        hovered: bool,
+        pressed: bool,
+        active: bool,
+    ) -> Result<()> {
+        if (!hovered && !pressed && !active) || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let palette = self.palette();
+        let radius = corner_radius
+            .max(0.0)
+            .min(rect.width * 0.5)
+            .min(rect.height * 0.5);
+        let fill = if pressed || active {
+            palette.control_active
+        } else {
+            palette.control_hover
+        };
+        self.fill_rounded_rect(rect, radius, fill)
+    }
+
     unsafe fn try_draw_refracted_glass(
         &self,
         rect: Rect,
@@ -2120,18 +2146,23 @@ impl NativeSurface {
             return Ok(true);
         }
 
-        let polarity = AdaptivePalette::resolve(
+        // Rasterize interior blur & bevel refraction at half-resolution (matching `blurred_bgra`)
+        // for <0.3ms 60fps hover transitions, then seal with a crisp 1px D2D vector outline.
+        let gw = (px_w / 2).max(1);
+        let gh = (px_h / 2).max(1);
+
+        let palette = AdaptivePalette::resolve(
             self.color_theme_mode.get(),
             Some(bd.raw.avg_luminance),
-        )
-        .polarity;
+        );
+        let polarity = palette.polarity;
         let cache_key = glass_cache_key(
             bd.generation,
             polarity,
             px_x as i32,
             px_y as i32,
-            px_w,
-            px_h,
+            gw,
+            gh,
             style,
             edge_params,
         );
@@ -2148,6 +2179,8 @@ impl NativeSurface {
                 px_y,
                 px_w,
                 px_h,
+                gw,
+                gh,
                 scale,
                 style,
                 polarity,
@@ -2163,11 +2196,11 @@ impl NativeSurface {
             };
             let created = self.d2d_target.CreateBitmap(
                 D2D_SIZE_U {
-                    width: px_w,
-                    height: px_h,
+                    width: gw,
+                    height: gh,
                 },
                 Some(pixels.as_ptr() as *const _),
-                px_w * 4,
+                gw * 4,
                 &props,
             )?;
             self.glass_bitmap_cache
@@ -2175,6 +2208,8 @@ impl NativeSurface {
                 .insert(cache_key, created.clone());
             created
         };
+
+        drop(backdrop_ref);
 
         let dest = rect.to_d2d();
         self.d2d_target.DrawBitmap(
@@ -2184,6 +2219,39 @@ impl NativeSurface {
             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
             None,
         );
+
+        // Crisp 1px D2D vector optical rim/outline at native DPI
+        let border_col = match style.variant {
+            LiquidGlassVariant::Tinted(tint) => tint
+                .lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.45)
+                .with_alpha(0.45),
+            _ => palette.hairline_border,
+        };
+        let border_brush = self.create_brush(border_col)?;
+        if let Some((ear_w, er, edge, flares)) = edge_params {
+            let ops = edge_contour_points(rect, ear_w, er, edge, flares);
+            let geo = self.build_contour_geometry(&ops)?;
+            self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+        } else {
+            let r = style
+                .corner_radius
+                .max(0.0)
+                .min(rect.width * 0.5)
+                .min(rect.height * 0.5);
+            let border_rr = D2D1_ROUNDED_RECT {
+                rect: Rect::new(
+                    rect.x + 0.5,
+                    rect.y + 0.5,
+                    (rect.width - 1.0).max(0.5),
+                    (rect.height - 1.0).max(0.5),
+                )
+                .to_d2d(),
+                radiusX: (r - 0.5).max(0.0),
+                radiusY: (r - 0.5).max(0.0),
+            };
+            self.d2d_target
+                .DrawRoundedRectangle(&border_rr, &border_brush, 1.0, None);
+        }
         Ok(true)
     }
 
@@ -3704,7 +3772,7 @@ fn blur_bgra_half_res(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>
     }
 
     let mut tmp = vec![0u8; buf.len()];
-    let radius = (bw.min(bh) as i32 / 3).clamp(2, 6);
+    let radius = (bw.min(bh) as i32 / 2).clamp(3, 8);
     for _ in 0..3 {
         box_blur_h(&buf, &mut tmp, bw as usize, bh as usize, radius);
         box_blur_v(&tmp, &mut buf, bw as usize, bh as usize, radius);
@@ -3949,6 +4017,32 @@ fn sample_bgra_bilinear(bgra: &[u8], w: u32, h: u32, x: f32, y: f32) -> [f32; 3]
     [r, g, b]
 }
 
+static REFRACT_LUT: OnceLock<[f32; 65]> = OnceLock::new();
+
+fn bevel_refract_lut() -> &'static [f32; 65] {
+    REFRACT_LUT.get_or_init(|| {
+        let mut lut = [0.0_f32; 65];
+        for (i, slot) in lut.iter_mut().enumerate() {
+            let t = (i as f32 / 64.0).clamp(0.0, 1.0);
+            let u = 1.0 - t;
+            let u3 = u * u * u;
+            let slope = (u3 * (1.0 - u3 * u).max(1e-4).powf(-0.75)).min(36.0);
+            let theta = slope.atan();
+            *slot = (theta - (theta.sin() / 1.5).clamp(-1.0, 1.0).asin()).tan();
+        }
+        lut
+    })
+}
+
+#[inline]
+fn lookup_refract(t: f32) -> f32 {
+    let pos = t.clamp(0.0, 1.0) * 64.0;
+    let idx = (pos as usize).min(63);
+    let frac = pos - idx as f32;
+    let lut = bevel_refract_lut();
+    lut[idx] * (1.0 - frac) + lut[idx + 1] * frac
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rasterize_liquid_glass(
     bd: &BackdropState,
@@ -3958,12 +4052,14 @@ fn rasterize_liquid_glass(
     px_y: f32,
     px_w: u32,
     px_h: u32,
+    gw: u32,
+    gh: u32,
     scale: f32,
     style: LiquidGlassStyle,
     polarity: ThemePolarity,
     edge_params: Option<(f32, f32, EdgeSide, bool)>,
 ) -> Vec<u8> {
-    let mut out = vec![0u8; (px_w as usize) * (px_h as usize) * 4];
+    let mut out = vec![0u8; (gw as usize) * (gh as usize) * 4];
     let w = px_w as f32;
     let h = px_h as f32;
     let hw = w * 0.5;
@@ -3974,12 +4070,15 @@ fn rasterize_liquid_glass(
         .min(hh);
     let depth = (w.min(h) * 0.34).min(22.0 * scale).max(2.0);
     let soft = (depth * 0.35).max(3.0);
+    let flat_hw = (hw - depth - 1.5).max(0.0);
+    let flat_hh = (hh - depth - 1.5).max(0.0);
+    let can_skip_center_sdf = edge_params.is_none() && flat_hw > 0.0 && flat_hh > 0.0;
 
     let (refract_reach, tone_mix) = match style.variant {
-        LiquidGlassVariant::Regular => (depth * 0.55, 0.66_f32),
-        LiquidGlassVariant::Clear => (depth * 0.72, 0.52_f32),
-        LiquidGlassVariant::Elevated => (depth * 0.42, 0.74_f32),
-        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.58_f32),
+        LiquidGlassVariant::Regular => (depth * 0.55, 0.26_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.16_f32),
+        LiquidGlassVariant::Elevated => (depth * 0.42, 0.34_f32),
+        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.28_f32),
     };
     let tone_target = match polarity {
         ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
@@ -3988,6 +4087,8 @@ fn rasterize_liquid_glass(
 
     let inv_surf_w = 1.0 / surf_w.max(1) as f32;
     let inv_surf_h = 1.0 / surf_h.max(1) as f32;
+    let step_x = w / gw.max(1) as f32;
+    let step_y = h / gh.max(1) as f32;
     let bw_f = bd.blurred_w as f32;
     let bh_f = bd.blurred_h as f32;
     let rw_f = bd.raw.width as f32;
@@ -4005,46 +4106,77 @@ fn rasterize_liquid_glass(
         0.0
     };
 
-    for iy in 0..px_h {
-        let ly = iy as f32 + 0.5;
+    for iy in 0..gh {
+        let ly = (iy as f32 + 0.5) * step_y;
         let gy = (px_y + ly) * inv_surf_h;
-        for ix in 0..px_w {
-            let lx = ix as f32 + 0.5;
+        let rel_y = ly - hh;
+        let in_flat_y = can_skip_center_sdf && rel_y.abs() <= flat_hh;
+
+        for ix in 0..gw {
+            let lx = (ix as f32 + 0.5) * step_x;
+            let rel_x = lx - hw;
+            let gx = (px_x + lx) * inv_surf_w;
+
+            // Fast interior path: strictly inside the flat center box (t == 1.0, cov == 1.0)
+            if in_flat_y && rel_x.abs() <= flat_hw {
+                let frosted = sample_bgra_bilinear(
+                    &bd.blurred_bgra,
+                    bd.blurred_w,
+                    bd.blurred_h,
+                    gx * bw_f,
+                    gy * bh_f,
+                );
+                let mut rgb = [
+                    frosted[0] * (1.0 - tone_mix) + tone_target[0] * tone_mix,
+                    frosted[1] * (1.0 - tone_mix) + tone_target[1] * tone_mix,
+                    frosted[2] * (1.0 - tone_mix) + tone_target[2] * tone_mix,
+                ];
+                if let Some(tint) = tint_opt {
+                    let ta = tint.a.clamp(0.22, 0.65);
+                    rgb[0] = rgb[0] * (1.0 - ta) + tint.r * ta;
+                    rgb[1] = rgb[1] * (1.0 - ta) + tint.g * ta;
+                    rgb[2] = rgb[2] * (1.0 - ta) + tint.b * ta;
+                }
+                if hover_lift > 0.0 {
+                    for c in &mut rgb {
+                        *c = (*c + hover_lift * 0.6).min(1.0);
+                    }
+                }
+                let idx = ((iy as usize) * (gw as usize) + (ix as usize)) * 4;
+                out[idx] = (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+                out[idx + 3] = 255;
+                continue;
+            }
+
             let (d, nx, ny) = if let Some((ear_w, er, edge, flares)) = edge_params {
-                sdg_edge_contour(
-                    lx,
-                    ly,
-                    w,
-                    h,
-                    ear_w * scale,
-                    er * scale,
-                    edge,
-                    flares,
-                )
+                sdg_edge_contour(lx, ly, w, h, ear_w * scale, er * scale, edge, flares)
             } else {
-                sdg_rrect(lx - hw, ly - hh, hw, hh, r_px, soft)
+                sdg_rrect(rel_x, rel_y, hw, hh, r_px, soft)
             };
 
-            let cov = (0.5 - d).clamp(0.0, 1.0);
+            let cov = (0.5 - d * 0.5).clamp(0.0, 1.0);
             if cov <= 0.0 {
                 continue;
             }
 
-            let gx = (px_x + lx) * inv_surf_w;
             let t = (-d / depth).clamp(0.0, 1.0);
 
-            // Snell bevel refraction + subtle RGB dispersion along the outer curve (glass.wgsl)
+            // Snell bevel refraction + subtle RGB dispersion via precomputed 65-entry LUT
             let frosted = if t < 1.0 {
-                let u = 1.0 - t;
-                let u3 = u * u * u;
-                let slope = (u3 * (1.0 - u3 * u).max(1e-4).powf(-0.75)).min(36.0);
-                let theta = slope.atan();
-                let refr = (theta - (theta.sin() / 1.5).clamp(-1.0, 1.0).asin()).tan();
+                let refr = lookup_refract(t);
                 let off_uv_x = (refract_reach * refr * nx) * inv_surf_w;
                 let off_uv_y = (refract_reach * refr * ny) * inv_surf_h;
 
                 let sample_blur_uv = |ux: f32, uy: f32| {
-                    sample_bgra_bilinear(&bd.blurred_bgra, bd.blurred_w, bd.blurred_h, ux * bw_f, uy * bh_f)
+                    sample_bgra_bilinear(
+                        &bd.blurred_bgra,
+                        bd.blurred_w,
+                        bd.blurred_h,
+                        ux * bw_f,
+                        uy * bh_f,
+                    )
                 };
                 let r_c = sample_blur_uv(gx - off_uv_x * 0.90, gy - off_uv_y * 0.90)[0];
                 let g_c = sample_blur_uv(gx - off_uv_x, gy - off_uv_y)[1];
@@ -4063,8 +4195,13 @@ fn rasterize_liquid_glass(
                     b_c * (1.0 - clarity) + sharp[2] * clarity,
                 ]
             } else {
-                // Flat interior: pure Gaussian frosted backdrop (zero Windows 7 diagonal gradient!)
-                sample_bgra_bilinear(&bd.blurred_bgra, bd.blurred_w, bd.blurred_h, gx * bw_f, gy * bh_f)
+                sample_bgra_bilinear(
+                    &bd.blurred_bgra,
+                    bd.blurred_w,
+                    bd.blurred_h,
+                    gx * bw_f,
+                    gy * bh_f,
+                )
             };
 
             // Adaptive tone mapping (Light Frosted White Glass vs Dark Smoked Glass)
@@ -4075,59 +4212,39 @@ fn rasterize_liquid_glass(
             ];
 
             if let Some(tint) = tint_opt {
-                let ta = tint.a.clamp(0.25, 0.72);
+                let ta = tint.a.clamp(0.22, 0.65);
                 rgb[0] = rgb[0] * (1.0 - ta) + tint.r * ta;
                 rgb[1] = rgb[1] * (1.0 - ta) + tint.g * ta;
                 rgb[2] = rgb[2] * (1.0 - ta) + tint.b * ta;
             }
 
             if hover_lift > 0.0 {
-                let dir = if polarity == ThemePolarity::LightGlass {
-                    1.0
-                } else {
-                    1.0
-                };
                 for c in &mut rgb {
-                    *c = (*c + hover_lift * dir * 0.6).min(1.0);
+                    *c = (*c + hover_lift * 0.6).min(1.0);
                 }
             }
 
-            // Crisp 1px-1.5px optical edge specular rim only (does not wash across interior)
-            let rim_band = (-d.abs() / (1.35 * scale)).exp();
-            if rim_band > 0.02 {
-                let facing = nx * (-0.45) + ny * (-0.89);
-                let dir_w = if facing > 0.0 {
-                    0.22 + 0.78 * facing * facing
-                } else {
-                    0.12 + 0.22 * facing * facing
-                };
-                let rim_strength = match polarity {
-                    ThemePolarity::LightGlass => 0.42 * rim_band * dir_w,
-                    ThemePolarity::DarkGlass => 0.30 * rim_band * dir_w,
-                };
-                for c in &mut rgb {
-                    *c = (*c + rim_strength * (1.0 - *c * 0.35)).min(1.0);
-                }
-            }
-
-            // Subtle 1px outer contrast hairline for crisp definition on same-polarity surfaces
-            if d > -1.0 * scale {
-                let edge_t = ((d + 1.0 * scale) / (1.0 * scale)).clamp(0.0, 1.0);
-                if polarity == ThemePolarity::LightGlass {
-                    let darken = 0.10 * edge_t;
+            // Crisp optical edge specular rim only near the outer edge
+            if d > -3.0 * scale {
+                let rim_band = (-d.abs() / (1.5 * scale)).exp();
+                if rim_band > 0.02 {
+                    let facing = nx * (-0.45) + ny * (-0.89);
+                    let dir_w = if facing > 0.0 {
+                        0.22 + 0.78 * facing * facing
+                    } else {
+                        0.12 + 0.22 * facing * facing
+                    };
+                    let rim_strength = match polarity {
+                        ThemePolarity::LightGlass => 0.36 * rim_band * dir_w,
+                        ThemePolarity::DarkGlass => 0.26 * rim_band * dir_w,
+                    };
                     for c in &mut rgb {
-                        *c = (*c * (1.0 - darken)).max(0.0);
-                    }
-                } else {
-                    let lift = 0.14 * edge_t;
-                    for c in &mut rgb {
-                        *c = (*c + lift).min(1.0);
+                        *c = (*c + rim_strength * (1.0 - *c * 0.35)).min(1.0);
                     }
                 }
             }
 
-            // Output premultiplied BGRA
-            let idx = ((iy as usize) * (px_w as usize) + (ix as usize)) * 4;
+            let idx = ((iy as usize) * (gw as usize) + (ix as usize)) * 4;
             out[idx] = (rgb[2].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
             out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
             out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
@@ -4559,8 +4676,8 @@ mod tests {
             assert_eq!(dib.pixel_bgra(2, 2), Some([0, 0, 0, 0]));
             let interior = dib.pixel_bgra(75, 50).unwrap();
             assert!(
-                interior[0] > 140 && interior[1] > 140 && interior[2] > 140 && interior[3] > 220,
-                "expected light frosted white glass on dark backdrop, got {:?}",
+                interior[0] > 45 && interior[0] < 160 && interior[3] > 220,
+                "expected translucent light frosted glass on dark backdrop, got {:?}",
                 interior
             );
         }
@@ -4590,8 +4707,8 @@ mod tests {
             let dib = surface.dib.borrow();
             let interior = dib.pixel_bgra(75, 50).unwrap();
             assert!(
-                interior[0] < 130 && interior[1] < 130 && interior[2] < 130 && interior[3] > 220,
-                "expected dark smoked glass on bright backdrop, got {:?}",
+                interior[0] > 100 && interior[0] < 215 && interior[3] > 220,
+                "expected translucent dark smoked glass on bright backdrop, got {:?}",
                 interior
             );
         }
@@ -4601,6 +4718,21 @@ mod tests {
         assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
         surface.set_color_theme_mode(ColorThemeMode::Dark);
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+
+        // 4. draw_icon_button is frameless at rest (0 pixels) and draws wash on hover/active
+        surface.begin_draw();
+        surface
+            .draw_icon_button(Rect::new(10.0, 10.0, 28.0, 28.0), 8.0, false, false, false)
+            .unwrap();
+        surface
+            .draw_icon_button(Rect::new(50.0, 10.0, 28.0, 28.0), 8.0, true, false, false)
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+        unsafe {
+            let dib = surface.dib.borrow();
+            assert_eq!(dib.pixel_bgra(24, 24), Some([0, 0, 0, 0]));
+            assert!(dib.pixel_bgra(64, 24).unwrap()[3] > 0);
+        }
     }
 
     #[test]

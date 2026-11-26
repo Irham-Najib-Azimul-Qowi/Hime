@@ -1579,12 +1579,12 @@ impl NotchView {
 
         // Header bar: [Prev] [Clock] [Next]  [Segmented Tabs] [Close]
         let prev_r = self.press_rect(layout.prev_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             prev_r,
             7.0,
-            None,
             self.is_hovered(layout.prev_btn),
             self.is_pressed(layout.prev_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(prev_r.x + 5.0, prev_r.y + 5.0, 12.0, 12.0),
@@ -1603,12 +1603,12 @@ impl NotchView {
         )?;
 
         let next_r = self.press_rect(layout.next_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             next_r,
             7.0,
-            None,
             self.is_hovered(layout.next_btn),
             self.is_pressed(layout.next_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(next_r.x + 5.0, next_r.y + 5.0, 12.0, 12.0),
@@ -1687,12 +1687,12 @@ impl NotchView {
 
         // Collapse (X) button via SfSymbol::CloseX
         let close_r = self.press_rect(layout.close_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             close_r,
             7.0,
-            None,
             self.is_hovered(layout.close_btn),
             self.is_pressed(layout.close_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(close_r.x + 5.0, close_r.y + 5.0, 12.0, 12.0),
@@ -1772,12 +1772,12 @@ impl NotchView {
             TextAlign::Leading,
         )?;
         let wifi_more = self.press_rect(cc.wifi_more_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             wifi_more,
             6.0,
-            None,
             self.is_hovered(cc.wifi_more_btn),
             self.is_pressed(cc.wifi_more_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(wifi_more.x + 3.5, wifi_more.y + 5.5, 11.0, 11.0),
@@ -1897,12 +1897,12 @@ impl NotchView {
             TextAlign::Leading,
         )?;
         let gear_r = self.press_rect(cc.settings_gear_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             gear_r,
             7.0,
-            None,
             self.is_hovered(cc.settings_gear_btn),
             self.is_pressed(cc.settings_gear_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(gear_r.x + 4.0, gear_r.y + 6.0, 12.0, 12.0),
@@ -2074,12 +2074,12 @@ impl NotchView {
         surface.draw_text_bold(&title, cal.month_title, 12.0, p.text_primary, TextAlign::Leading)?;
 
         let prev_m = self.press_rect(cal.prev_month_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             prev_m,
             6.0,
-            None,
             self.is_hovered(cal.prev_month_btn),
             self.is_pressed(cal.prev_month_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(prev_m.x + 4.0, prev_m.y + 4.0, 10.0, 10.0),
@@ -2088,12 +2088,12 @@ impl NotchView {
             1.3,
         )?;
         let next_m = self.press_rect(cal.next_month_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             next_m,
             6.0,
-            None,
             self.is_hovered(cal.next_month_btn),
             self.is_pressed(cal.next_month_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(next_m.x + 4.0, next_m.y + 4.0, 10.0, 10.0),
@@ -2215,12 +2215,12 @@ impl NotchView {
         )?;
 
         let reset_r = self.press_rect(cal.pomo_reset_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             reset_r,
             14.0,
-            None,
             self.is_hovered(cal.pomo_reset_btn),
             self.is_pressed(cal.pomo_reset_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(reset_r.x + 8.0, reset_r.y + 8.0, 14.0, 14.0),
@@ -2375,12 +2375,12 @@ impl NotchView {
 
         // Transport controls (`SfSymbol::SkipBack` / `Play` / `Pause` / `SkipForward`)
         let prev_r = self.press_rect(mus.prev_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             prev_r,
             14.0,
-            None,
             self.is_hovered(mus.prev_btn),
             self.is_pressed(mus.prev_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(prev_r.x + 7.5, prev_r.y + 7.5, 13.0, 13.0),
@@ -2390,12 +2390,12 @@ impl NotchView {
         )?;
 
         let pp_r = self.press_rect(mus.play_pause_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             pp_r,
             18.0,
-            None,
             self.is_hovered(mus.play_pause_btn),
             self.is_pressed(mus.play_pause_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(pp_r.x + 10.5, pp_r.y + 10.5, 15.0, 15.0),
@@ -2405,12 +2405,12 @@ impl NotchView {
         )?;
 
         let next_r = self.press_rect(mus.next_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             next_r,
             14.0,
-            None,
             self.is_hovered(mus.next_btn),
             self.is_pressed(mus.next_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(next_r.x + 7.5, next_r.y + 7.5, 13.0, 13.0),
@@ -2497,12 +2497,12 @@ impl NotchView {
             )?;
 
             let minus_r = self.press_rect(mus.offset_minus_btn);
-            surface.draw_liquid_glass_button(
+            surface.draw_icon_button(
                 minus_r,
                 5.0,
-                None,
                 self.is_hovered(mus.offset_minus_btn),
                 self.is_pressed(mus.offset_minus_btn),
+                false,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(minus_r.x + 4.0, minus_r.y + 4.0, 8.0, 8.0),
@@ -2519,12 +2519,12 @@ impl NotchView {
             )?;
 
             let plus_r = self.press_rect(mus.offset_plus_btn);
-            surface.draw_liquid_glass_button(
+            surface.draw_icon_button(
                 plus_r,
                 5.0,
-                None,
                 self.is_hovered(mus.offset_plus_btn),
                 self.is_pressed(mus.offset_plus_btn),
+                false,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(plus_r.x + 4.0, plus_r.y + 4.0, 8.0, 8.0),
@@ -2542,17 +2542,17 @@ impl NotchView {
 
             let rst_r = self.press_rect(mus.offset_reset_btn);
             let rst_active = self.music_lyric_offset_ms != 0;
-            surface.draw_liquid_glass_button(
+            surface.draw_icon_button(
                 rst_r,
                 5.0,
-                if rst_active { Some(p.accent) } else { None },
                 self.is_hovered(mus.offset_reset_btn),
                 self.is_pressed(mus.offset_reset_btn),
+                rst_active,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(rst_r.x + (rst_r.width - 10.0) * 0.5, rst_r.y + 3.0, 10.0, 10.0),
                 SfSymbol::Refresh,
-                if rst_active { TEXT_PRIMARY } else { p.text_primary },
+                if rst_active { p.accent } else { p.text_primary },
                 1.2,
             )?;
         }
@@ -2613,12 +2613,12 @@ impl NotchView {
         )?;
 
         let ref_r = self.press_rect(wf.refresh_btn);
-        surface.draw_liquid_glass_button(
+        surface.draw_icon_button(
             ref_r,
             8.0,
-            None,
             self.is_hovered(wf.refresh_btn),
             self.is_pressed(wf.refresh_btn),
+            false,
         )?;
         surface.draw_sf_symbol(
             Rect::new(ref_r.x + (ref_r.width - 12.0) * 0.5, ref_r.y + 5.0, 12.0, 12.0),
@@ -2827,12 +2827,12 @@ impl NotchView {
         )?;
         if let Some(clear_btn) = sh.clear_btn {
             let clr_r = self.press_rect(clear_btn);
-            surface.draw_liquid_glass_button(
+            surface.draw_icon_button(
                 clr_r,
                 7.0,
-                None,
                 self.is_hovered(clear_btn),
                 self.is_pressed(clear_btn),
+                false,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(clr_r.x + 6.0, clr_r.y + 5.0, 11.0, 11.0),
