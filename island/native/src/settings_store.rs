@@ -46,7 +46,7 @@ pub struct NativeSettings {
 impl Default for NativeSettings {
     fn default() -> Self {
         Self {
-            notch_mode: "fixed".to_string(),
+            notch_mode: "peek".to_string(),
             free_drag_enabled: false,
             notch_edge: "top".to_string(),
             time_format_24h: true,

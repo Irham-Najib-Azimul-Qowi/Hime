@@ -245,7 +245,7 @@ impl Default for SettingsState {
     fn default() -> Self {
         Self {
             notch_mode: NotchMode::Top,
-            notch_behavior: "fixed".to_string(),
+            notch_behavior: "peek".to_string(),
             notch_edge: "top".to_string(),
             free_drag_enabled: false,
             time_format_24h: true,
@@ -1468,7 +1468,7 @@ mod tests {
             panel.handle_click(300.0, 130.0),
             Some(SettingsAction::ToggleNotchMode)
         );
-        assert_eq!(panel.state.notch_behavior, "smart");
+        assert_eq!(panel.state.notch_behavior, "fixed");
 
         // Third row on Notch tab: Free Drag (y = 116 + 2 * 54 = 224..270)
         assert_eq!(

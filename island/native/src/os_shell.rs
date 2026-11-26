@@ -454,6 +454,25 @@ pub fn set_taskbar_visible(visible: bool) -> bool {
     }
 }
 
+/// Re-hides `Shell_TrayWnd` if Windows Explorer made it visible again while Hime Dock is active.
+pub fn ensure_taskbar_hidden() -> bool {
+    unsafe {
+        let tray_class = PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
+        let Ok(tray_hwnd) = FindWindowA(tray_class, PCSTR::null()) else {
+            return false;
+        };
+        if IsWindowVisible(tray_hwnd).as_bool() {
+            return hide_taskbar();
+        }
+        for sec_hwnd in secondary_taskbar_windows() {
+            if IsWindowVisible(sec_hwnd).as_bool() {
+                return hide_taskbar();
+            }
+        }
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. 3-Edge Drag Snap & Mouse Hit-Testing Helpers
 // ---------------------------------------------------------------------------

@@ -901,6 +901,7 @@ struct AppShell {
     dragging_notch_slider: bool,
     drag_moved: bool,
     drag_start_cursor: (i32, i32),
+    notch_leave_at: Option<Instant>,
     suppressed_notif_hwnds: Vec<isize>,
     quit_event: Option<HANDLE>,
     tick_count: u64,
@@ -1040,6 +1041,7 @@ impl AppShell {
             dragging_notch_slider: false,
             drag_moved: false,
             drag_start_cursor: (0, 0),
+            notch_leave_at: None,
             suppressed_notif_hwnds: Vec::new(),
             quit_event,
             tick_count: 0,
@@ -1554,20 +1556,30 @@ impl AppShell {
                 os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX,
             );
             let prev_notch_hidden = self.notch.is_hidden;
-            if near_wake && self.notch.is_hidden {
-                self.notch.set_hidden(false);
-            } else if !over_notch
-                && !near_wake
-                && !self.notch.is_expanded
-                && !self.dragging_notch
-                && !self.dragging_notch_slider
-            {
-                if self.native_settings.notch_mode == "peek" {
-                    self.notch.set_hidden(true);
-                } else if self.native_settings.notch_mode == "smart" {
-                    let overlapped = self.is_foreground_overlapping_notch(primary);
-                    self.notch.set_hidden(overlapped);
+            let keep_notch_visible = over_notch
+                || near_wake
+                || self.notch.is_expanded
+                || self.dragging_notch
+                || self.dragging_notch_slider
+                || self.notch.has_active_banner()
+                || self.notch.ncm_center_alert.is_some();
+
+            if keep_notch_visible {
+                self.notch_leave_at = None;
+                if (near_wake || over_notch) && self.notch.is_hidden {
+                    self.notch.set_hidden(false);
                 }
+            } else if self.native_settings.notch_mode == "peek" {
+                let left_at = *self.notch_leave_at.get_or_insert_with(Instant::now);
+                if left_at.elapsed() >= Duration::from_millis(800) {
+                    self.notch.set_hidden(true);
+                }
+            } else if self.native_settings.notch_mode == "smart" {
+                self.notch_leave_at = None;
+                let overlapped = self.is_foreground_overlapping_notch(primary);
+                self.notch.set_hidden(overlapped);
+            } else {
+                self.notch_leave_at = None;
             }
             if self.notch.is_hidden != prev_notch_hidden {
                 self.dirty_notch = true;
@@ -3527,6 +3539,9 @@ impl AppShell {
         if self.native_settings.suppress_native_notifications && self.tick_count % 2 == 0 {
             self.scan_and_suppress_notifications();
         }
+        if self.dock.visible && self.tick_count % 8 == 0 {
+            os_shell::ensure_taskbar_hidden();
+        }
         if self.tick_count > 0 && self.tick_count % 20 == 0 {
             self.os_worker.send(OsCommand::ScanTrayEntries);
         }
@@ -4626,7 +4641,7 @@ fn main() {
     add_tray_icon(ctrl_hwnd);
 
     let mut shell = AppShell::new(ctrl_hwnd).expect("initialize AppShell");
-    let start_fast = shell.dock.is_animating();
+    let start_fast = shell.dock.is_animating() || shell.notch.is_hidden;
     if start_fast {
         shell.ensure_fast_timer(ctrl_hwnd);
     }

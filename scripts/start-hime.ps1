@@ -35,7 +35,7 @@ if (Test-Path $settingsFile) {
             $changed = $true
         }
         if (-not $json.PSObject.Properties["bloom-notch-mode"] -or [string]::IsNullOrWhiteSpace($json."bloom-notch-mode")) {
-            $json | Add-Member -NotePropertyName "bloom-notch-mode" -NotePropertyValue "fixed" -Force
+            $json | Add-Member -NotePropertyName "bloom-notch-mode" -NotePropertyValue "peek" -Force
             $changed = $true
         }
         if (-not $json.PSObject.Properties["hime-ai-enabled"] -or [string]::IsNullOrWhiteSpace($json."hime-ai-enabled")) {
@@ -53,7 +53,7 @@ if (Test-Path $settingsFile) {
     @{
         "bloom-dock-enabled"     = "true"
         "bloom-dock-mode"        = "auto-hide"
-        "bloom-notch-mode"       = "fixed"
+        "bloom-notch-mode"       = "peek"
         "bloom-scale"            = "1"
         "hime-ai-enabled"        = "false"
         "hime-enabled"           = "false"
