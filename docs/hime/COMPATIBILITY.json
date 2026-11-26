@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "name": "hime-compatibility-manifest",
+  "version": "1.0.0-rc.1",
+  "release_channel": "release-candidate",
+  "release_date": "2026-11-22",
+  "core": {
+    "version": "1.0.0-rc.1",
+    "binary": "hime-core.exe",
+    "cargo_workspace_version": "0.1.0",
+    "edition": "2021",
+    "rustc_min": "1.80.0",
+    "target_platform": "x86_64-pc-windows-msvc"
+  },
+  "shell": {
+    "version": "1.0.0-rc.1",
+    "binary": "hime-island.exe",
+    "framework": "Tauri 2.0 (Rust + WebView2)",
+    "frontend_runner": "Bun",
+    "upstream_baseline": {
+      "repository": "https://github.com/little-systems/bloom.git",
+      "pinned_tag": "v3.10.2",
+      "pinned_commit": "0ab9f2f08b75cfeffd3040330e312c2244d7726a",
+      "commit_date": "2026-11-11 16:50:08 +0530",
+      "license": "GPL-3.0"
+    }
+  },
+  "ai_runtime": {
+    "hermes": {
+      "provider": "NousResearch Hermes Agent",
+      "runtime": "python",
+      "transport": "named_pipe",
+      "auth": "one_time_session_ticket",
+      "idle_timeout_normal_seconds": 600,
+      "idle_timeout_save_mode_seconds": 180,
+      "endpoint": "http://127.0.0.1:20128/v1"
+    },
+    "router": {
+      "provider": "9Router (decolua)",
+      "runtime": "node",
+      "topology": "dual-control-plane",
+      "bind_address": "127.0.0.1",
+      "port": 20128,
+      "security": "localhost_only"
+    }
+  },
+  "storage": {
+    "engine": "SQLite 3 (bundled rusqlite 0.31.0)",
+    "schema_version": 15,
+    "pragmas": {
+      "journal_mode": "WAL",
+      "synchronous": "NORMAL",
+      "foreign_keys": "ON",
+      "busy_timeout_ms": 5000,
+      "cache_size_kb": -2000,
+      "mmap_size_bytes": 0
+    }
+  },
+  "ipc": {
+    "protocol": "JsonRpc 2.0",
+    "magic": [72, 73, 77, 69],
+    "magic_str": "HIME",
+    "version": 1,
+    "header_size_bytes": 12,
+    "max_payload_size_bytes": 16777216,
+    "default_endpoint": "\\\\.\\pipe\\hime-ipc"
+  },
+  "resource_budget": {
+    "idle_target_mb": 350,
+    "save_mode_idle_target_mb": 250,
+    "active_chat_target_mb": 900,
+    "transient_worker_peak_mb": 500
+  }
+}

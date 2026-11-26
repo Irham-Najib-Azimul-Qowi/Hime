@@ -110,13 +110,21 @@ captures/
 *.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite*
 .9router/
 .hermes/
 
 # -----------------------------------------------------------------------------
-# 9. Logs & Agent Scratch Directories
+# 9. Logs, Crash Dumps & Agent Scratch Directories
 # -----------------------------------------------------------------------------
 *.log
+*.dmp
+*.mdmp
+coverage/
+*.tmp
+.hime_staging/
+dev/
+.dev/
 transcript*.jsonl
 scratch/
 # Ignore NTFS junction .agents so Git only tracks canonical .agent/
@@ -133,3 +141,11 @@ RE/9ROUTER/00-source-materials/9router/
 RE/Nusa/00-source-materials/*.exe
 RE/Nusa/00-source-materials/*.zip
 RE/Nusa/00-source-materials/extracted/
+
+# -----------------------------------------------------------------------------
+# 11. Hime Island Monorepo Quarantine and Local Data
+# -----------------------------------------------------------------------------
+_old/
+.dev-data/
+runtimes/hermes/
+runtimes/9router/

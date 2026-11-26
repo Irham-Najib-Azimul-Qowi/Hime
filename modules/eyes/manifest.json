@@ -1,0 +1,23 @@
+{
+  "$schema": "../../contracts/module-manifest.schema.json",
+  "id": "eyes",
+  "version": "1.0.0",
+  "title": "Mata Hime",
+  "desc": "Maskot ekspresi di notch",
+  "icon": "hime-mark",
+  "category": "maskot",
+  "island": {
+    "panels": [],
+    "bubbles": ["eyes-peek"],
+    "settings": "eyes",
+    "keybinds": []
+  },
+  "resources": {
+    "ramEstimateMB": 2,
+    "timers": 0,
+    "listeners": ["notch-ambient"]
+  },
+  "default": {
+    "enabled": true
+  }
+}

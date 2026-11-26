@@ -1,0 +1,2077 @@
+use sha2::Digest;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{info, warn};
+
+use hime_security::policy::{Action, PolicyDecision, PolicyEngine, RiskLevel};
+use hime_security::redaction::{redact_api_keys, redact_chain_of_thought};
+use hime_storage::Database;
+
+use crate::bus::{EventBus, SystemEvent};
+
+/// Tool contract definition in Hime Core.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolDefinition {
+    pub id: String,
+    pub version: String,
+    pub domain: String,
+    pub description: String,
+    pub parameters_schema: serde_json::Value,
+    pub risk_level: RiskLevel,
+    pub idempotent: bool,
+    pub timeout_ms: u64,
+}
+
+/// Execution output of a tool invocation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolResult {
+    pub tool_id: String,
+    pub success: bool,
+    pub output: serde_json::Value,
+    pub error: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub cached: bool,
+    pub requires_approval: bool,
+    pub approval_ticket: Option<String>,
+}
+
+/// Central Tool Gateway for Hime Core.
+///
+/// Implements strict Policy Enforcement (PEP), parameter validation, approval workflows,
+/// idempotency deduplication, output sanitization (SEC-09), and hash-chained audit logging.
+pub struct ToolGateway {
+    tools: Arc<RwLock<HashMap<String, ToolDefinition>>>,
+    storage: Arc<Database>,
+    policy: Arc<PolicyEngine>,
+    event_bus: EventBus,
+    ops_engine: Arc<crate::storage::operations::SafeFileOperationsEngine>,
+    mcp_host: Arc<std::sync::RwLock<Option<Arc<super::mcp_client::McpClientHost>>>>,
+}
+
+impl ToolGateway {
+    pub fn new(storage: Arc<Database>, policy: Arc<PolicyEngine>, event_bus: EventBus) -> Self {
+        let mut map = HashMap::new();
+        for t in Self::create_default_tools() {
+            map.insert(t.id.clone(), t);
+        }
+
+        let base_dir = hime_pal::PlatformPaths::app_data_dir();
+        let ops_engine = Arc::new(crate::storage::operations::SafeFileOperationsEngine::new(storage.clone(), &base_dir).unwrap_or_else(|_| {
+            let tmp = std::env::temp_dir().join(format!("hime_ops_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let _ = std::fs::create_dir_all(&tmp);
+            crate::storage::operations::SafeFileOperationsEngine::new(storage.clone(), &tmp).expect("Failed to init fallback storage ops engine")
+        }));
+
+        Self {
+            tools: Arc::new(RwLock::new(map)),
+            storage,
+            policy,
+            event_bus,
+            ops_engine,
+            mcp_host: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    pub fn with_ops_engine(
+        storage: Arc<Database>,
+        policy: Arc<PolicyEngine>,
+        event_bus: EventBus,
+        ops_engine: Arc<crate::storage::operations::SafeFileOperationsEngine>,
+    ) -> Self {
+        let mut map = HashMap::new();
+        for t in Self::create_default_tools() {
+            map.insert(t.id.clone(), t);
+        }
+
+        Self {
+            tools: Arc::new(RwLock::new(map)),
+            storage,
+            policy,
+            event_bus,
+            ops_engine,
+            mcp_host: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    fn create_default_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                id: "tasks.create".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "tasks".to_string(),
+                description: "Create a new planned task in the Hime task engine".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "priority": { "type": "string", "enum": ["low", "medium", "high"] }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "tasks.list".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "tasks".to_string(),
+                description: "List tasks managed by Hime Task Engine".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "tasks.update".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "tasks".to_string(),
+                description: "Update the status or progress of an existing task".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["id", "status"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "status": { "type": "string" },
+                        "progress": { "type": "number" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "system.info".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "system".to_string(),
+                description: "Retrieve read-only information about the host environment".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 2000,
+            },
+            ToolDefinition {
+                id: "files.stat".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "files".to_string(),
+                description: "Inspect file or directory metadata within allowed security paths".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "notify.send".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "notify".to_string(),
+                description: "Dispatch a non-intrusive desktop notification alert to the user".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["message"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "message": { "type": "string" },
+                        "level": { "type": "string", "enum": ["info", "warning", "error"] }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 2000,
+            },
+            ToolDefinition {
+                id: "translate.selection".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "translation".to_string(),
+                description: "Translate selected or provided text into Indonesian (or specified target language)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": { "type": "string" },
+                        "target_lang": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "storage.search_files".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Search indexed files by query string or keyword in name/path".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.inspect_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Inspect full indexed metadata and content hash of a specific file".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "storage.analyze".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Retrieve disk usage breakdown, largest files, and cleanable candidates".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "top_n": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.find_duplicates".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Find duplicate file groups matching identical SHA-256 hashes".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.propose_move".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Create a proposal to safely reorganize or move a file according to naming rules".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_path", "target_dir"],
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "target_dir": { "type": "string" },
+                        "naming_template": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "storage.execute_move".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Execute an atomic safe file move (staging, hash verification, Hime Recycle, journal)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_path", "destination_path"],
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "storage.delete_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Safely move a file to Hime Recycle (reversibly) with required approval".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L3Destructive,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.restore_file".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Restore a previously moved or deleted file from Hime Recycle using operation ID".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["operation_id"],
+                    "properties": {
+                        "operation_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "storage.handle_new_download".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "storage".to_string(),
+                description: "Inspect a newly downloaded file for completion (.crdownload/.part), duplicate detection, or version candidates".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["download_path"],
+                    "properties": {
+                        "download_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "devices.list".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "List all paired mobile and remote devices with status and fingerprints".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.storage_overview".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Retrieve storage summary of a paired mobile device (free/total/indexed count)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id"],
+                    "properties": {
+                        "device_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.pairing_start".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Initiate a secure mobile device pairing session with 6-digit confirmation code".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ttl_secs": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "devices.revoke".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Immediately revoke access for a paired mobile device (requires approval)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id"],
+                    "properties": {
+                        "device_id": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L3Destructive,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "devices.transfer".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "devices".to_string(),
+                description: "Schedule or inspect chunked file transfer with a paired mobile device".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["device_id", "file_name"],
+                    "properties": {
+                        "device_id": { "type": "string" },
+                        "file_name": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "productivity.tasks_create".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "Create a structured task in Kanban workspace from natural language or parameters".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "priority": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                        "due_date": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "productivity.tasks_list".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "List active tasks and backlog items from Kanban workspace".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "productivity.accountability_mode".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "productivity".to_string(),
+                description: "Inspect or configure the user's accountability strictness mode (relaxed, balanced, strict)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["relaxed", "balanced", "strict"] }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "documents.create_report".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Generate structured academic or business report documents (Akademik-ID TNR 12/1.5 or Modern)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["title", "markdown_body", "destination_path"],
+                    "properties": {
+                        "title": { "type": "string" },
+                        "markdown_body": { "type": "string" },
+                        "template_name": { "type": "string" },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "documents.merge_pdfs".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Merge multiple PDF documents into a unified output file".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["source_paths", "destination_path"],
+                    "properties": {
+                        "source_paths": { "type": "array", "items": { "type": "string" } },
+                        "destination_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "documents.artcraft_discover".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "documents".to_string(),
+                description: "Discover local ArtCraft / WordCraft / FigCraft availability and interchange integration".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "browser.open_page".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Open a web page in isolated profile, verifying SSRF policies and domain allowlist".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "browser.extract".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Extract readable text and citation metadata, wrapped in untrusted content markers".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": { "type": "string" },
+                        "mock_body": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "browser.download".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "browser".to_string(),
+                description: "Download a file into quarantined storage with SHA-256 hash and zero auto-execution".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["url", "filename"],
+                    "properties": {
+                        "url": { "type": "string" },
+                        "filename": { "type": "string" },
+                        "content": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "github.inspect_repo".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "integrations".to_string(),
+                description: "Inspect GitHub repository metadata using credentials from secure DPAPI vault".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["owner", "repo"],
+                    "properties": {
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "account_label": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "drive.list_files".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "integrations".to_string(),
+                description: "List Google Drive files within permitted drive.file application scope".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder_id": { "type": "string" },
+                        "account_label": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "dev.run_command".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "developer".to_string(),
+                description: "Execute a structured allowlisted command in a registered workspace with redacted output".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["workspace_id", "command"],
+                    "properties": {
+                        "workspace_id": { "type": "string" },
+                        "command": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "dev.git_status".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "developer".to_string(),
+                description: "Inspect git repository status and detect untracked or modified files".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["workspace_path"],
+                    "properties": {
+                        "workspace_path": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 3000,
+            },
+            ToolDefinition {
+                id: "data_ai.profile_dataset".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "data_ai".to_string(),
+                description: "Generate descriptive statistics, missing value analysis, and column type inference from CSV data".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["csv_data"],
+                    "properties": {
+                        "csv_data": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "data_ai.design_experiment".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "data_ai".to_string(),
+                description: "Design anti-leakage ML experiment with baseline models, metrics, and CPU constraints".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["target_variable"],
+                    "properties": {
+                        "target_variable": { "type": "string" },
+                        "problem_type": { "type": "string" },
+                        "num_features": { "type": "integer" }
+                    }
+                }),
+                risk_level: RiskLevel::L0ReadOnly,
+                idempotent: true,
+                timeout_ms: 5000,
+            },
+            ToolDefinition {
+                id: "specialists.delegate".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "specialists".to_string(),
+                description: "Delegate a specialized reasoning or execution task to a sandboxed domain specialist".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["specialist_id", "task_id", "input_prompt"],
+                    "properties": {
+                        "specialist_id": { "type": "string" },
+                        "task_id": { "type": "string" },
+                        "input_prompt": { "type": "string" }
+                    }
+                }),
+                risk_level: RiskLevel::L1CreateSafe,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+            ToolDefinition {
+                id: "execute_command".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "system".to_string(),
+                description: "Run PowerShell / shell commands with full superadmin privileges on the laptop".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": { "type": "string" },
+                        "working_dir": { "type": "string" },
+                        "shell": { "type": "string", "enum": ["powershell", "cmd"] }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 30000,
+            },
+            ToolDefinition {
+                id: "manage_filesystem".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "files".to_string(),
+                description: "List directory files, read file contents, write/create files, move/rename files, delete files".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["action", "path"],
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "read", "write", "move", "rename", "delete", "create_dir"] },
+                        "path": { "type": "string" },
+                        "content": { "type": "string" },
+                        "destination": { "type": "string" },
+                        "recursive": { "type": "boolean" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 15000,
+            },
+            ToolDefinition {
+                id: "launch_app".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "system".to_string(),
+                description: "Launch desktop applications (e.g. Chrome, Notepad, Explorer, etc.)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["app"],
+                    "properties": {
+                        "app": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
+        ]
+    }
+
+    pub fn set_mcp_host(&self, host: Arc<super::mcp_client::McpClientHost>) {
+        if let Ok(mut guard) = self.mcp_host.write() {
+            *guard = Some(host);
+        }
+    }
+
+    /// Dynamically registers an external MCP tool under `mcp.<server>.<tool>`.
+    /// External MCP tools default to High risk (`RiskLevel::L3Destructive`) unless explicitly configured safe.
+    pub async fn register_mcp_tool(
+        &self,
+        server_name: &str,
+        tool: &super::mcp_client::McpToolDescriptor,
+        risk_level: Option<RiskLevel>,
+    ) -> ToolDefinition {
+        let tool_id = super::mcp_client::format_mcp_tool_id(server_name, &tool.name);
+        let def = ToolDefinition {
+            id: tool_id.clone(),
+            version: "1.0.0".to_string(),
+            domain: format!("mcp.{}", server_name),
+            description: tool
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("MCP tool '{}' on server '{}'", tool.name, server_name)),
+            parameters_schema: tool.input_schema.clone(),
+            risk_level: risk_level.unwrap_or(RiskLevel::L3Destructive),
+            idempotent: false,
+            timeout_ms: 30_000,
+        };
+        self.register_tool(def.clone()).await;
+        def
+    }
+
+    /// Synchronizes all tools discovered by the attached `McpClientHost` into `ToolGateway`.
+    pub async fn sync_mcp_tools(&self) -> usize {
+        let host_opt = self.mcp_host.read().ok().and_then(|g| g.clone());
+        let Some(host) = host_opt else {
+            return 0;
+        };
+
+        // Remove stale mcp.* registrations first
+        {
+            let mut map = self.tools.write().await;
+            map.retain(|k, _| !k.starts_with("mcp."));
+        }
+
+        let discovered = host.list_all_tools().await;
+        let count = discovered.len();
+        for (server, desc, is_safe) in discovered {
+            let level = if is_safe {
+                Some(RiskLevel::L1CreateSafe)
+            } else {
+                Some(RiskLevel::L3Destructive)
+            };
+            self.register_mcp_tool(&server, &desc, level).await;
+        }
+        count
+    }
+
+    pub async fn register_tool(&self, def: ToolDefinition) {
+        let mut map = self.tools.write().await;
+        map.insert(def.id.clone(), def);
+    }
+
+    pub async fn list_tools(&self) -> Vec<ToolDefinition> {
+        let map = self.tools.read().await;
+        map.values().cloned().collect()
+    }
+
+    pub async fn get_tool(&self, tool_id: &str) -> Option<ToolDefinition> {
+        let map = self.tools.read().await;
+        map.get(tool_id).cloned()
+    }
+
+    /// Primary Tool Execution Pipeline:
+    /// 1. Tool registration & schema validation
+    /// 2. Idempotency cache check
+    /// 3. Policy evaluation (PEP)
+    /// 4. Approval check
+    /// 5. Execution in domain service
+    /// 6. Output sanitization (SEC-09)
+    /// 7. Hash-chained audit logging
+    /// 8. Idempotency recording
+    pub async fn execute_tool(
+        &self,
+        client_id: &str,
+        tool_id: &str,
+        params: serde_json::Value,
+        approval_ticket: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<ToolResult, String> {
+        // Step 1: Tool presence
+        let def = match self.get_tool(tool_id).await {
+            Some(t) => t,
+            None => {
+                return Ok(ToolResult {
+                    tool_id: tool_id.to_string(),
+                    success: false,
+                    output: serde_json::json!({}),
+                    error: Some(format!("Tool '{}' not found in registry", tool_id)),
+                    idempotency_key: idempotency_key.map(|s| s.to_string()),
+                    cached: false,
+                    requires_approval: false,
+                    approval_ticket: None,
+                });
+            }
+        };
+
+        // Step 2: Idempotency check
+        if def.idempotent {
+            if let Some(key) = idempotency_key {
+                if let Ok(Some(cached_exec)) = self.storage.get_tool_execution(key) {
+                    if let Ok(cached_json) = serde_json::from_str::<serde_json::Value>(&cached_exec.result) {
+                        return Ok(ToolResult {
+                            tool_id: tool_id.to_string(),
+                            success: cached_exec.status == "completed",
+                            output: cached_json,
+                            error: None,
+                            idempotency_key: Some(key.to_string()),
+                            cached: true,
+                            requires_approval: false,
+                            approval_ticket: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Step 3: Policy evaluation
+        let action = Action::ToolCall {
+            tool_id: tool_id.to_string(),
+            domain: def.domain.clone(),
+            level: def.risk_level,
+            payload: params.to_string(),
+        };
+
+        let decision = {
+            use hime_security::policy::PolicyEnforcer;
+            self.policy.evaluate(client_id, &action)
+        };
+
+        match decision {
+            PolicyDecision::Deny { reason } => {
+                warn!(tool_id = %tool_id, reason = %reason, "Tool execution denied by policy");
+                let _ = self.storage.record_audit_event(
+                    "tool.denied",
+                    client_id,
+                    &format!("{{\"tool\":\"{}\",\"reason\":\"{}\"}}", tool_id, reason),
+                );
+                return Ok(ToolResult {
+                    tool_id: tool_id.to_string(),
+                    success: false,
+                    output: serde_json::json!({}),
+                    error: Some(format!("Policy violation: {}", reason)),
+                    idempotency_key: idempotency_key.map(|s| s.to_string()),
+                    cached: false,
+                    requires_approval: false,
+                    approval_ticket: None,
+                });
+            }
+            PolicyDecision::RequireUserApproval { description } => {
+                // Check if ticket is presented
+                let approved = approval_ticket.map(|t| !t.trim().is_empty()).unwrap_or(false);
+                if !approved {
+                    let ticket_id = format!("ticket-{}", uuid_simple());
+                    info!(tool_id = %tool_id, ticket = %ticket_id, "Tool execution requires user approval");
+                    return Ok(ToolResult {
+                        tool_id: tool_id.to_string(),
+                        success: false,
+                        output: serde_json::json!({ "description": description }),
+                        error: Some("Operation requires user approval".to_string()),
+                        idempotency_key: idempotency_key.map(|s| s.to_string()),
+                        cached: false,
+                        requires_approval: true,
+                        approval_ticket: Some(ticket_id),
+                    });
+                }
+            }
+            PolicyDecision::Allow => {}
+        }
+
+        // Step 4: Dispatch tool execution
+        let exec_result = self.dispatch_tool_logic(client_id, tool_id, &params).await;
+
+        let (success, raw_output, err_msg) = match exec_result {
+            Ok(val) => (true, val, None),
+            Err(e) => (false, serde_json::json!({}), Some(e)),
+        };
+
+        // Step 5: Output sanitization (SEC-09: strip CoT & secrets)
+        let sanitized_output = self.sanitize_json_value(raw_output);
+
+        // Step 6: Chained audit logging
+        let audit_payload = serde_json::json!({
+            "tool": tool_id,
+            "success": success,
+            "params": params,
+        })
+        .to_string();
+        let _ = self.storage.record_audit_event("tool.executed", client_id, &audit_payload);
+
+        // Step 7: Idempotency recording
+        if def.idempotent {
+            if let Some(key) = idempotency_key {
+                let status_str = if success { "completed" } else { "failed" };
+                let _ = self.storage.record_tool_execution(
+                    key,
+                    tool_id,
+                    &format!("{:x}", sha2::Sha256::digest(params.to_string().as_bytes())),
+                    &sanitized_output.to_string(),
+                    status_str,
+                );
+            }
+        }
+
+        Ok(ToolResult {
+            tool_id: tool_id.to_string(),
+            success,
+            output: sanitized_output,
+            error: err_msg,
+            idempotency_key: idempotency_key.map(|s| s.to_string()),
+            cached: false,
+            requires_approval: false,
+            approval_ticket: None,
+        })
+    }
+
+    async fn dispatch_tool_logic(
+        &self,
+        client_id: &str,
+        tool_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match tool_id {
+            "tasks.create" => {
+                let title = params["title"]
+                    .as_str()
+                    .ok_or("Missing required field 'title'")?;
+                let description = params["description"].as_str();
+                let priority = params["priority"].as_str().unwrap_or("medium");
+                let task_id = format!("task-{}", uuid_simple());
+
+                let task = self
+                    .storage
+                    .create_task(&task_id, title, description, priority, "queued")
+                    .map_err(|e| format!("Storage error: {}", e))?;
+
+                let _ = self.event_bus.publish(SystemEvent::TaskUpdated {
+                    task_id: task_id.clone(),
+                    status: "queued".to_string(),
+                });
+
+                serde_json::to_value(&task).map_err(|e| e.to_string())
+            }
+
+            "tasks.list" => {
+                let status_filter = params["status"].as_str();
+                let tasks = self
+                    .storage
+                    .list_tasks(status_filter)
+                    .map_err(|e| format!("Storage error: {}", e))?;
+
+                serde_json::to_value(&tasks).map_err(|e| e.to_string())
+            }
+
+            "tasks.update" => {
+                let id = params["id"].as_str().ok_or("Missing required field 'id'")?;
+                let status = params["status"]
+                    .as_str()
+                    .ok_or("Missing required field 'status'")?;
+                let progress = params["progress"].as_f64().unwrap_or(0.0);
+                let is_completed = status == "succeeded" || status == "failed";
+
+                let updated = self
+                    .storage
+                    .update_task_status(id, status, progress, is_completed)
+                    .map_err(|e| format!("Storage error: {}", e))?;
+
+                if updated {
+                    let _ = self.event_bus.publish(SystemEvent::TaskUpdated {
+                        task_id: id.to_string(),
+                        status: status.to_string(),
+                    });
+                }
+
+                Ok(serde_json::json!({ "id": id, "updated": updated, "status": status }))
+            }
+
+            "system.info" => {
+                let info = serde_json::json!({
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "hime_version": env!("CARGO_PKG_VERSION"),
+                    "cores": num_cpus(),
+                });
+                Ok(info)
+            }
+
+            "files.stat" => {
+                let path_str = params["path"]
+                    .as_str()
+                    .ok_or("Missing required field 'path'")?;
+
+                self.policy
+                    .validate_path_safety(path_str)
+                    .map_err(|e| format!("Security validation rejected path: {}", e))?;
+
+                let path = std::path::Path::new(path_str);
+                let exists = path.exists();
+                let is_dir = path.is_dir();
+                let size = if exists {
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    0
+                };
+
+                Ok(serde_json::json!({
+                    "path": path_str,
+                    "exists": exists,
+                    "is_dir": is_dir,
+                    "size_bytes": size,
+                }))
+            }
+
+            "notify.send" => {
+                let title = params["title"].as_str().unwrap_or("Hime Notification");
+                let message = params["message"]
+                    .as_str()
+                    .ok_or("Missing required field 'message'")?;
+                let level = params["level"].as_str().unwrap_or("info");
+
+                info!(title = %title, message = %message, level = %level, "User notification emitted");
+                Ok(serde_json::json!({ "dispatched": true, "title": title, "level": level }))
+            }
+
+            "translate.selection" => {
+                let text = params["text"]
+                    .as_str()
+                    .ok_or("Missing required field 'text'")?;
+                let target = params["target_lang"].as_str().unwrap_or("id");
+
+                // Lightweight Indonesian translation or echo stub
+                let translated = translate_text_mock_or_rules(text, target);
+                Ok(serde_json::json!({
+                    "original": text,
+                    "target_lang": target,
+                    "translated": translated
+                }))
+            }
+
+            "storage.search_files" => {
+                let query = params["query"].as_str().ok_or("Missing required field 'query'")?;
+                let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+                let files = self.storage.search_indexed_files(query, limit).map_err(|e| e.to_string())?;
+                serde_json::to_value(&files).map_err(|e| e.to_string())
+            }
+
+            "storage.inspect_file" => {
+                let path = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                self.policy.validate_path_safety(path).map_err(|e| format!("Security validation rejected path: {}", e))?;
+                let file = self.storage.get_indexed_file(path).map_err(|e| e.to_string())?;
+                serde_json::to_value(&file).map_err(|e| e.to_string())
+            }
+
+            "storage.analyze" => {
+                let top_n = params["top_n"].as_u64().unwrap_or(10) as usize;
+                let analysis = self.storage.get_storage_analysis(top_n).map_err(|e| e.to_string())?;
+                serde_json::to_value(&analysis).map_err(|e| e.to_string())
+            }
+
+            "storage.find_duplicates" => {
+                let duplicates = self.storage.find_duplicate_candidates().map_err(|e| e.to_string())?;
+                serde_json::to_value(&duplicates).map_err(|e| e.to_string())
+            }
+
+            "storage.propose_move" => {
+                let source_path = params["source_path"].as_str().ok_or("Missing required field 'source_path'")?;
+                let target_dir = params["target_dir"].as_str().ok_or("Missing required field 'target_dir'")?;
+                let template = params["naming_template"].as_str();
+
+                self.policy.validate_path_safety(source_path).map_err(|e| format!("Security validation rejected path: {}", e))?;
+                self.policy.validate_path_safety(target_dir).map_err(|e| format!("Security validation rejected path: {}", e))?;
+
+                let src_p = std::path::Path::new(source_path);
+                let fname = src_p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dest_name = if let Some(tmpl) = template {
+                    let stem = src_p.file_stem().unwrap_or_default().to_string_lossy();
+                    let ext = src_p.extension().unwrap_or_default().to_string_lossy();
+                    tmpl.replace("{name}", &stem).replace("{ext}", &ext)
+                } else {
+                    fname
+                };
+                let dest_p = std::path::Path::new(target_dir).join(dest_name);
+
+                Ok(serde_json::json!({
+                    "proposal_id": format!("prop-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()),
+                    "source_path": source_path,
+                    "suggested_destination": dest_p.to_string_lossy(),
+                    "reason": "Rule-based organization proposal"
+                }))
+            }
+
+            "storage.execute_move" => {
+                let source_path = params["source_path"].as_str().ok_or("Missing required field 'source_path'")?;
+                let dest_path = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let op_id = format!("op-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.safe_move(
+                    &op_id,
+                    std::path::Path::new(source_path),
+                    std::path::Path::new(dest_path),
+                    client_id,
+                    None,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.delete_file" => {
+                let path = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                let op_id = format!("del-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.safe_delete(
+                    &op_id,
+                    std::path::Path::new(path),
+                    client_id,
+                    None,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.restore_file" => {
+                let original_op_id = params["operation_id"].as_str().ok_or("Missing required field 'operation_id'")?;
+                let restore_op_id = format!("res-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let result = self.ops_engine.restore_file(
+                    &restore_op_id,
+                    original_op_id,
+                    client_id,
+                ).map_err(|e| e.to_string())?;
+
+                serde_json::to_value(&result).map_err(|e| e.to_string())
+            }
+
+            "storage.handle_new_download" => {
+                let download_path = params["download_path"].as_str().ok_or("Missing required field 'download_path'")?;
+                let download_intel = crate::storage::download::DownloadIntelligence::new(self.storage.clone(), self.ops_engine.clone());
+                let report = download_intel.inspect_download(std::path::Path::new(download_path)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&report).map_err(|e| e.to_string())
+            }
+
+            "devices.list" => {
+                let devices = self.storage.list_paired_devices().map_err(|e| e.to_string())?;
+                serde_json::to_value(&devices).map_err(|e| e.to_string())
+            }
+
+            "devices.storage_overview" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let summary = self.storage.get_device_storage_summary(device_id).map_err(|e| e.to_string())?;
+                match summary {
+                    Some(s) => serde_json::to_value(&s).map_err(|e| e.to_string()),
+                    None => Ok(serde_json::json!({
+                        "device_id": device_id,
+                        "status": "no_data_reported",
+                        "message": "Device has not reported storage status yet"
+                    })),
+                }
+            }
+
+            "devices.pairing_start" => {
+                let ttl_secs = params.get("ttl_secs").and_then(|v| v.as_u64()).unwrap_or(300);
+                let token = format!("pair-{}", uuid_simple());
+                let now_nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+                let confirmation_code = format!("{:06}", (now_nanos % 900_000) + 100_000);
+
+                let record = self.storage.create_pairing_token(&token, &confirmation_code, ttl_secs).map_err(|e| e.to_string())?;
+
+                let qr_payload = serde_json::json!({
+                    "version": "1.0",
+                    "server_address": "127.0.0.1",
+                    "server_port": 20130,
+                    "pairing_token": token,
+                    "ca_fingerprint": "SHA256:HIME-ROOT-CA",
+                    "expires_at": record.expires_at,
+                });
+
+                Ok(serde_json::json!({
+                    "token": token,
+                    "confirmation_code": confirmation_code,
+                    "expires_at": record.expires_at,
+                    "ttl_seconds": ttl_secs,
+                    "qr_payload": qr_payload,
+                }))
+            }
+
+            "devices.revoke" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let revoked = self.storage.revoke_device(device_id).map_err(|e| e.to_string())?;
+                if revoked {
+                    self.event_bus.publish(SystemEvent::DeviceRevoked {
+                        device_id: device_id.to_string(),
+                    });
+                }
+                Ok(serde_json::json!({
+                    "device_id": device_id,
+                    "revoked": revoked,
+                    "status": if revoked { "revoked" } else { "not_found" }
+                }))
+            }
+
+            "devices.transfer" => {
+                let device_id = params["device_id"].as_str().ok_or("Missing required field 'device_id'")?;
+                let file_name = params["file_name"].as_str().ok_or("Missing required field 'file_name'")?;
+                let transfers = self.storage.list_file_transfers(Some(device_id)).map_err(|e| e.to_string())?;
+                let matched = transfers.into_iter().find(|t| t.file_name == file_name);
+                Ok(serde_json::json!({
+                    "device_id": device_id,
+                    "file_name": file_name,
+                    "existing_transfer": matched,
+                }))
+            }
+
+            "productivity.tasks_create" => {
+                let title = params["title"].as_str().ok_or("Missing required field 'title'")?;
+                let desc = params.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let priority = params.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+                let due_date = params.get("due_date").and_then(|v| v.as_i64());
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                let task_id = format!("ptask-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+
+                let task = hime_storage::ProductivityTaskRecord {
+                    id: task_id,
+                    board_id: "board-default".to_string(),
+                    column_id: "col-todo".to_string(),
+                    title: title.to_string(),
+                    description: desc,
+                    priority: priority.to_string(),
+                    status: "todo".to_string(),
+                    due_date,
+                    estimated_minutes: None,
+                    actual_minutes: None,
+                    labels: None,
+                    parent_task_id: None,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                };
+                self.storage.create_productivity_task(&task).map_err(|e| e.to_string())?;
+                serde_json::to_value(&task).map_err(|e| e.to_string())
+            }
+
+            "productivity.tasks_list" => {
+                let tasks = self.storage.list_productivity_tasks("board-default").map_err(|e| e.to_string())?;
+                serde_json::to_value(&tasks).map_err(|e| e.to_string())
+            }
+
+            "productivity.accountability_mode" => {
+                if let Some(mode) = params.get("mode").and_then(|v| v.as_str()) {
+                    let mut settings = self.storage.get_accountability_settings().map_err(|e| e.to_string())?;
+                    settings.mode = mode.to_string();
+                    self.storage.set_accountability_settings(&settings).map_err(|e| e.to_string())?;
+                    serde_json::to_value(&settings).map_err(|e| e.to_string())
+                } else {
+                    let settings = self.storage.get_accountability_settings().map_err(|e| e.to_string())?;
+                    serde_json::to_value(&settings).map_err(|e| e.to_string())
+                }
+            }
+
+            "documents.create_report" => {
+                let title = params["title"].as_str().ok_or("Missing required field 'title'")?;
+                let body = params["markdown_body"].as_str().ok_or("Missing required field 'markdown_body'")?;
+                let dest = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let res = crate::documents::DocumentOperations::create_report(std::path::Path::new(dest), title, body, None).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "documents.merge_pdfs" => {
+                let dest = params["destination_path"].as_str().ok_or("Missing required field 'destination_path'")?;
+                let sources = params["source_paths"]
+                    .as_array()
+                    .ok_or("Missing required array 'source_paths'")?
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>();
+                let res = crate::documents::DocumentOperations::merge_documents(&sources, std::path::Path::new(dest)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "documents.artcraft_discover" => {
+                let disc = crate::documents::ArtcraftAdapter::discover();
+                serde_json::to_value(&disc).map_err(|e| e.to_string())
+            }
+
+            "browser.open_page" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let sess = svc.open_page(url).map_err(|e| e.to_string())?;
+                serde_json::to_value(&sess).map_err(|e| e.to_string())
+            }
+
+            "browser.extract" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let mock_body = params["mock_body"].as_str();
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let ext = svc.extract_content(url, mock_body).map_err(|e| e.to_string())?;
+                serde_json::to_value(&ext).map_err(|e| e.to_string())
+            }
+
+            "browser.download" => {
+                let url = params["url"].as_str().ok_or("Missing required field 'url'")?;
+                let filename = params["filename"].as_str().ok_or("Missing required field 'filename'")?;
+                let content = params["content"].as_str().unwrap_or("Hime quarantined download sample content");
+                let svc = crate::browser::BrowserService::new(self.storage.clone(), None);
+                let dl = svc.download_to_quarantine(url, content.as_bytes(), filename).map_err(|e| e.to_string())?;
+                serde_json::to_value(&dl).map_err(|e| e.to_string())
+            }
+
+            "github.inspect_repo" => {
+                let owner = params["owner"].as_str().ok_or("Missing required field 'owner'")?;
+                let repo = params["repo"].as_str().ok_or("Missing required field 'repo'")?;
+                let acc = params["account_label"].as_str().unwrap_or("test-account");
+                let adapter = crate::integrations::GitHubAdapter::new(self.storage.clone());
+                let info = adapter.inspect_repository(owner, repo, acc).map_err(|e| e.to_string())?;
+                serde_json::to_value(&info).map_err(|e| e.to_string())
+            }
+
+            "drive.list_files" => {
+                let folder = params["folder_id"].as_str();
+                let acc = params["account_label"].as_str().unwrap_or("test-account");
+                let adapter = crate::integrations::GoogleDriveAdapter::new(self.storage.clone());
+                let files = adapter.list_files(folder, acc).map_err(|e| e.to_string())?;
+                serde_json::to_value(&files).map_err(|e| e.to_string())
+            }
+
+            "dev.run_command" => {
+                let ws_id = params["workspace_id"].as_str().ok_or("Missing required field 'workspace_id'")?;
+                let cmd = params["command"].as_str().ok_or("Missing required field 'command'")?;
+                let args: Vec<String> = params["args"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+                let runner = crate::developer::DeveloperCommandRunner::new(self.storage.clone());
+                let ws_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let res = runner.run_command(ws_id, &ws_path, cmd, &args, false).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "dev.git_status" => {
+                let path_str = params["workspace_path"].as_str().unwrap_or(".");
+                let res = crate::developer::GitOperations::status(std::path::Path::new(path_str)).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "data_ai.profile_dataset" => {
+                let csv_data = params["csv_data"].as_str().ok_or("Missing required field 'csv_data'")?;
+                let engine = crate::ai::specialists::DataAiEngine::new();
+                let profile = engine.profile_csv(csv_data).map_err(|e| e.to_string())?;
+                serde_json::to_value(&profile).map_err(|e| e.to_string())
+            }
+
+            "data_ai.design_experiment" => {
+                let target = params["target_variable"].as_str().unwrap_or("target");
+                let prob_type = params["problem_type"].as_str().unwrap_or("classification");
+                let num_feat = params["num_features"].as_u64().unwrap_or(10) as usize;
+                let engine = crate::ai::specialists::DataAiEngine::new();
+                let exp = engine.design_experiment(target, prob_type, num_feat);
+                serde_json::to_value(&exp).map_err(|e| e.to_string())
+            }
+
+            "specialists.delegate" => {
+                let spec_id = params["specialist_id"].as_str().ok_or("Missing required field 'specialist_id'")?;
+                let task_id = params["task_id"].as_str().ok_or("Missing required field 'task_id'")?;
+                let prompt = params["input_prompt"].as_str().ok_or("Missing required field 'input_prompt'")?;
+                let registry = std::sync::Arc::new(crate::ai::specialists::SpecialistRegistry::new(self.storage.clone()));
+                let delegation = crate::ai::specialists::DelegationEngine::new(self.storage.clone(), registry);
+                let res = delegation.delegate_task(spec_id, task_id, prompt).map_err(|e| e.to_string())?;
+                serde_json::to_value(&res).map_err(|e| e.to_string())
+            }
+
+            "execute_command" => {
+                let command = params["command"].as_str().ok_or("Missing required field 'command'")?;
+                let working_dir = params.get("working_dir").and_then(|v| v.as_str());
+                let shell = params.get("shell").and_then(|v| v.as_str()).unwrap_or("powershell");
+
+                let mut cmd = if shell == "cmd" {
+                    let mut c = std::process::Command::new("cmd.exe");
+                    c.args(["/c", command]);
+                    c
+                } else {
+                    let mut c = std::process::Command::new("powershell.exe");
+                    c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+                    c
+                };
+
+                if let Some(wd) = working_dir {
+                    cmd.current_dir(wd);
+                }
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+
+                let output = cmd.output().map_err(|e| format!("Failed to execute command: {}", e))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let exit_code = output.status.code().unwrap_or(-1);
+
+                Ok(serde_json::json!({
+                    "command": command,
+                    "success": output.status.success(),
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }))
+            }
+
+            "manage_filesystem" => {
+                let action = params["action"].as_str().ok_or("Missing required field 'action'")?;
+                let path_str = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                let p = std::path::Path::new(path_str);
+
+                match action {
+                    "list" => {
+                        if !p.exists() {
+                            return Err(format!("Path does not exist: {}", path_str));
+                        }
+                        let mut entries = Vec::new();
+                        if p.is_dir() {
+                            let rd = std::fs::read_dir(p).map_err(|e| format!("Failed to read directory: {}", e))?;
+                            for entry in rd.flatten() {
+                                let meta = entry.metadata().ok();
+                                let file_type = entry.file_type().ok();
+                                let is_dir = file_type.map(|ft| ft.is_dir()).unwrap_or(false);
+                                let size = meta.map(|m| m.len()).unwrap_or(0);
+                                entries.push(serde_json::json!({
+                                    "name": entry.file_name().to_string_lossy().to_string(),
+                                    "path": entry.path().to_string_lossy().to_string(),
+                                    "is_dir": is_dir,
+                                    "size": size,
+                                }));
+                            }
+                        } else {
+                            entries.push(serde_json::json!({
+                                "name": p.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                                "path": p.to_string_lossy().to_string(),
+                                "is_dir": false,
+                                "size": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                            }));
+                        }
+                        Ok(serde_json::json!({
+                            "action": "list",
+                            "path": path_str,
+                            "count": entries.len(),
+                            "entries": entries,
+                        }))
+                    }
+                    "read" => {
+                        let content = std::fs::read_to_string(p)
+                            .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "read",
+                            "path": path_str,
+                            "size_bytes": content.len(),
+                            "content": content,
+                        }))
+                    }
+                    "write" => {
+                        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(parent) = p.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        std::fs::write(p, content)
+                            .map_err(|e| format!("Failed to write file '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "write",
+                            "path": path_str,
+                            "bytes_written": content.len(),
+                            "success": true,
+                        }))
+                    }
+                    "move" | "rename" => {
+                        let dest_str = params["destination"].as_str().ok_or("Missing required field 'destination'")?;
+                        let dest = std::path::Path::new(dest_str);
+                        if let Some(parent) = dest.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        if let Err(_) = std::fs::rename(p, dest) {
+                            if p.is_dir() {
+                                return Err(format!("Cannot move directory across volumes: {} to {}", path_str, dest_str));
+                            }
+                            std::fs::copy(p, dest).map_err(|e| format!("Failed to copy file: {}", e))?;
+                            let _ = std::fs::remove_file(p);
+                        }
+                        Ok(serde_json::json!({
+                            "action": "move",
+                            "source": path_str,
+                            "destination": dest_str,
+                            "success": true,
+                        }))
+                    }
+                    "delete" => {
+                        let recursive = params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+                        if p.is_dir() {
+                            if recursive {
+                                std::fs::remove_dir_all(p)
+                                    .map_err(|e| format!("Failed to delete directory '{}': {}", path_str, e))?;
+                            } else {
+                                std::fs::remove_dir(p)
+                                    .map_err(|e| format!("Failed to delete empty directory '{}': {}", path_str, e))?;
+                            }
+                        } else if p.exists() {
+                            std::fs::remove_file(p)
+                                .map_err(|e| format!("Failed to delete file '{}': {}", path_str, e))?;
+                        } else {
+                            return Err(format!("File or directory does not exist: {}", path_str));
+                        }
+                        Ok(serde_json::json!({
+                            "action": "delete",
+                            "path": path_str,
+                            "success": true,
+                        }))
+                    }
+                    "create_dir" => {
+                        std::fs::create_dir_all(p)
+                            .map_err(|e| format!("Failed to create directory '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "create_dir",
+                            "path": path_str,
+                            "success": true,
+                        }))
+                    }
+                    other => Err(format!("Unsupported filesystem action '{}'. Supported: list, read, write, move, delete, create_dir", other)),
+                }
+            }
+
+            "launch_app" => {
+                let app = params["app"].as_str().ok_or("Missing required field 'app'")?;
+                let args: Vec<String> = params.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+
+                let app_lower = app.to_lowercase();
+                let target = match app_lower.as_str() {
+                    "chrome" | "google chrome" => "chrome",
+                    "notepad" | "catatan" => "notepad",
+                    "explorer" | "file explorer" | "penjelajah berkas" => "explorer",
+                    "calc" | "calculator" | "kalkulator" => "calc",
+                    "cmd" | "terminal" => "cmd",
+                    "powershell" => "powershell",
+                    "edge" | "msedge" => "msedge",
+                    "code" | "vscode" => "code",
+                    _ => app,
+                };
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+                    let mut cmd = std::process::Command::new("cmd.exe");
+                    cmd.args(["/c", "start", "", target]);
+                    for a in &args {
+                        cmd.arg(a);
+                    }
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+
+                    match cmd.spawn() {
+                        Ok(_) => Ok(serde_json::json!({
+                            "app": app,
+                            "target": target,
+                            "launched": true,
+                            "status": "success",
+                        })),
+                        Err(e) => Err(format!("Failed to launch app '{}': {}", app, e)),
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = std::process::Command::new(target);
+                    for a in &args {
+                        cmd.arg(a);
+                    }
+                    match cmd.spawn() {
+                        Ok(_) => Ok(serde_json::json!({
+                            "app": app,
+                            "target": target,
+                            "launched": true,
+                            "status": "success",
+                        })),
+                        Err(e) => Err(format!("Failed to launch app '{}': {}", app, e)),
+                    }
+                }
+            }
+
+            _ => {
+                if let Some((server, tool)) = super::mcp_client::parse_mcp_tool_id(tool_id) {
+                    let host_opt = self.mcp_host.read().ok().and_then(|g| g.clone());
+                    let host = host_opt.ok_or_else(|| {
+                        format!("MCP host not attached for tool '{}'", tool_id)
+                    })?;
+                    host.call_tool(server, tool, params.clone()).await
+                } else {
+                    Err(format!("Unknown tool handler '{}'", tool_id))
+                }
+            }
+        }
+    }
+
+    fn sanitize_json_value(&self, val: serde_json::Value) -> serde_json::Value {
+        match val {
+            serde_json::Value::String(s) => {
+                let no_cot = redact_chain_of_thought(&s);
+                let redacted = redact_api_keys(&no_cot);
+                serde_json::Value::String(redacted)
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.into_iter().map(|v| self.sanitize_json_value(v)).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let mut sanitized_map = serde_json::Map::new();
+                for (k, v) in map {
+                    sanitized_map.insert(k, self.sanitize_json_value(v));
+                }
+                serde_json::Value::Object(sanitized_map)
+            }
+            other => other,
+        }
+    }
+}
+
+fn uuid_simple() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:x}", now)
+}
+
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
+fn translate_text_mock_or_rules(text: &str, target_lang: &str) -> String {
+    if target_lang == "id" {
+        // Simple demonstrative dictionary transformations for smoke tests
+        match text.trim().to_lowercase().as_str() {
+            "hello" => "Halo".to_string(),
+            "world" => "Dunia".to_string(),
+            "good morning" => "Selamat pagi".to_string(),
+            "thank you" => "Terima kasih".to_string(),
+            _ => format!("[ID: {}]", text),
+        }
+    } else {
+        format!("[{}: {}]", target_lang, text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tool_gateway_registration_and_execution() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+
+        // Allow background registration task to finish
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let tools = gateway.list_tools().await;
+        assert!(tools.len() >= 6);
+
+        // Execute system.info (L0 ReadOnly)
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "system.info",
+                serde_json::json!({}),
+                None,
+                Some("idemp-sysinfo-1"),
+            )
+            .await
+            .expect("tool execution ok");
+
+        assert!(res.success);
+        assert_eq!(res.tool_id, "system.info");
+        assert!(res.output.get("os").is_some());
+
+        // Idempotency: execute with same key should return cached: true
+        let cached_res = gateway
+            .execute_tool(
+                "test_client",
+                "system.info",
+                serde_json::json!({}),
+                None,
+                Some("idemp-sysinfo-1"),
+            )
+            .await
+            .unwrap();
+
+        assert!(cached_res.cached);
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_tasks_lifecycle() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Create task
+        let create_res = gateway
+            .execute_tool(
+                "test_client",
+                "tasks.create",
+                serde_json::json!({
+                    "title": "Write Unit Tests",
+                    "description": "Ensure high code coverage",
+                    "priority": "high"
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(create_res.success);
+        let task_id = create_res.output["id"].as_str().unwrap().to_string();
+
+        // Update task
+        let update_res = gateway
+            .execute_tool(
+                "test_client",
+                "tasks.update",
+                serde_json::json!({
+                    "id": task_id,
+                    "status": "succeeded",
+                    "progress": 1.0
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(update_res.success);
+
+        // List tasks
+        let list_res = gateway
+            .execute_tool(
+                "test_client",
+                "tasks.list",
+                serde_json::json!({ "status": "succeeded" }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(list_res.success);
+        let arr = list_res.output.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["title"], "Write Unit Tests");
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_files_stat_security_traversal_blocked() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Directory traversal attempt
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "files.stat",
+                serde_json::json!({ "path": "docs/../../Windows/System32" }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!res.success);
+        assert!(res.error.unwrap().contains("Security validation rejected"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_superadmin_execute_command() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "execute_command",
+                serde_json::json!({
+                    "command": "Write-Output 'HIME_SUPERADMIN_OK'"
+                }),
+                None,
+                None,
+            )
+            .await
+            .expect("execute_command should succeed");
+
+        assert!(res.success);
+        let stdout = res.output["stdout"].as_str().unwrap();
+        assert!(stdout.contains("HIME_SUPERADMIN_OK"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_manage_filesystem_lifecycle() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let temp_dir = std::env::temp_dir().join(format!("hime_fs_test_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let test_file = temp_dir.join("test_file.txt");
+        let moved_file = temp_dir.join("moved_file.txt");
+
+        // 1. Create dir
+        let res_mkdir = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "create_dir",
+                    "path": temp_dir.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_mkdir.success);
+
+        // 2. Write file
+        let res_write = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "write",
+                    "path": test_file.to_str().unwrap(),
+                    "content": "Hello Hime Filesystem"
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_write.success);
+
+        // 3. Read file
+        let res_read = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "read",
+                    "path": test_file.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_read.success);
+        assert_eq!(res_read.output["content"], "Hello Hime Filesystem");
+
+        // 4. List directory
+        let res_list = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "list",
+                    "path": temp_dir.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_list.success);
+        assert!(res_list.output["count"].as_u64().unwrap() >= 1);
+
+        // 5. Move file
+        let res_move = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "move",
+                    "path": test_file.to_str().unwrap(),
+                    "destination": moved_file.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_move.success);
+        assert!(moved_file.exists());
+        assert!(!test_file.exists());
+
+        // 6. Delete directory
+        let res_del = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "delete",
+                    "path": temp_dir.to_str().unwrap(),
+                    "recursive": true
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_del.success);
+        assert!(!temp_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_launch_app() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "launch_app",
+                serde_json::json!({
+                    "app": "calc"
+                }),
+                None,
+                None,
+            )
+            .await
+            .expect("launch_app should execute");
+
+        assert!(res.success);
+        assert_eq!(res.output["status"], "success");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_registration_default_high_risk_and_redaction() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::with_superadmin(false));
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+
+        let desc = super::super::mcp_client::McpToolDescriptor {
+            name: "create_issue".to_string(),
+            description: Some("Create a GitHub issue".to_string()),
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+
+        let def = gateway.register_mcp_tool("github", &desc, None).await;
+        assert_eq!(def.id, "mcp.github.create_issue");
+        assert_eq!(def.risk_level, RiskLevel::L3Destructive);
+
+        // Executing without approval ticket must trigger PolicyEngine approval workflow
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "mcp.github.create_issue",
+                serde_json::json!({ "title": "test" }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.requires_approval);
+        assert!(res.approval_ticket.is_some());
+
+        // Safe override registers as L1CreateSafe
+        let safe_def = gateway
+            .register_mcp_tool("github", &desc, Some(RiskLevel::L1CreateSafe))
+            .await;
+        assert_eq!(safe_def.risk_level, RiskLevel::L1CreateSafe);
+
+        // Output sanitization redacts API keys
+        let sanitized = gateway.sanitize_json_value(serde_json::json!({
+            "token": "sk-1234567890abcdefghijklmnop"
+        }));
+        let s = sanitized["token"].as_str().unwrap();
+        assert!(!s.contains("sk-1234567890abcdefghijklmnop"));
+    }
+}

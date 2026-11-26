@@ -1,0 +1,817 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+* {
+	margin: 0;
+	padding: 0;
+	box-sizing: border-box;
+	scrollbar-width: none !important;
+	-ms-overflow-style: none !important;
+}
+
+*::-webkit-scrollbar {
+	display: none !important;
+	width: 0 !important;
+	height: 0 !important;
+	background: transparent !important;
+}
+
+html,
+body,
+#root {
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background: transparent;
+}
+
+/* ─── Container ─────────────────────────────────────────────────────────── */
+
+.overlay-container {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	pointer-events: auto;
+	position: relative;
+}
+
+/* ─── Splash Screen ─────────────────────────────────────────────────────── */
+
+.splash-screen {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	z-index: 9999;
+}
+
+.splash-logo {
+	width: 120px;
+	height: 120px;
+	object-fit: contain;
+}
+
+/* ─── Auto-Update Splash ─────────────────────────────────────────────────── */
+
+.update-splash {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	z-index: 9999;
+}
+
+.update-splash-logo {
+	width: 100px;
+	height: 100px;
+	object-fit: contain;
+	margin-bottom: 20px;
+}
+
+.update-splash-text {
+	color: var(--bloom-text, rgba(255, 255, 255, 0.9));
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	font-size: 14px;
+	font-weight: 500;
+	margin-bottom: 16px;
+	text-align: center;
+}
+
+.update-progress-bar {
+	width: 200px;
+	height: 4px;
+	background: var(--bloom-border, rgba(255, 255, 255, 0.1));
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.update-progress-fill {
+	height: 100%;
+	background: var(--bloom-text, rgba(255, 255, 255, 0.9));
+	border-radius: 2px;
+	transition: width 0.3s ease;
+}
+
+/* ─── Volume Notch (Left Edge) ──────────────────────────────────────────── */
+
+.volume-notch-wrapper {
+	position: fixed;
+	left: 0;
+	top: 50%;
+	overflow: visible;
+	transform-origin: left center;
+	--surface-bg: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	isolation: isolate;
+}
+
+.volume-notch {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	padding: 16px 0 14px;
+	border-radius: 0 18px 18px 0;
+	width: 42px;
+	height: 196px;
+	position: relative;
+	pointer-events: auto;
+	overflow: hidden;
+}
+
+/* The card and its flares are painted by the EdgeSurface in the wrapper
+   (see components/EdgeSurface.css), outside the card so its
+   `overflow: hidden` can clip the mixer while the card grows. */
+.volume-notch-wrapper > .edge-surface {
+	border-radius: 0 18px 18px 0;
+}
+
+.volume-notch-content-group {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	height: 100%;
+	width: 42px;
+	align-self: flex-start;
+	flex-shrink: 0;
+}
+
+.volume-notch-bar {
+	width: 10px;
+	flex: 1;
+	min-height: 0;
+	background: rgba(255, 255, 255, 0.15);
+	border: 1px solid rgba(56, 214, 245, 0.25);
+	border-radius: 20px;
+	position: relative;
+	overflow: hidden;
+	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.volume-notch-bar:hover {
+	border-color: rgba(56, 214, 245, 0.5);
+	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 8px rgba(56, 214, 245, 0.3);
+}
+
+.volume-notch-fill {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	width: 100%;
+	background: linear-gradient(180deg, #38D6F5 0%, #4361EE 100%);
+	box-shadow: 0 0 12px rgba(56, 214, 245, 0.65), 0 0 4px rgba(67, 97, 238, 0.4);
+	border-radius: 20px;
+}
+
+.volume-notch-action {
+	position: relative;
+	width: 100%;
+	height: 20px;
+	margin-top: 2px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--bloom-text, white);
+	cursor: pointer;
+}
+
+.volume-notch-action-icon,
+.volume-notch-action-mixer,
+.volume-notch-action-percent {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition:
+		opacity 0.16s ease,
+		transform 0.16s ease;
+}
+
+.volume-notch-action-icon {
+	opacity: 0.8;
+}
+
+.volume-notch-action-mixer {
+	transform: scale(0.82);
+}
+
+.volume-notch-action-percent {
+	font-size: 10px;
+	font-weight: 700;
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	letter-spacing: -0.02em;
+}
+
+.volume-notch-action:hover .volume-notch-action-icon,
+.volume-notch-action.active .volume-notch-action-icon {
+	opacity: 0 !important;
+	transform: scale(0.82);
+	pointer-events: none;
+}
+
+.volume-notch-action:hover .volume-notch-action-mixer,
+.volume-notch-action.active .volume-notch-action-mixer {
+	opacity: 1;
+	transform: scale(1);
+	color: #38D6F5;
+	filter: drop-shadow(0 0 6px rgba(56, 214, 245, 0.6));
+}
+
+.volume-notch-action:hover .volume-notch-action-icon {
+	color: #38D6F5;
+}
+
+.volume-notch-action.showing-percent .volume-notch-action-icon,
+.volume-notch-action.showing-percent .volume-notch-action-mixer {
+	opacity: 0 !important;
+	transform: scale(0.82) !important;
+	pointer-events: none;
+}
+
+.volume-notch-action.showing-percent .volume-notch-action-percent {
+	opacity: 1 !important;
+	transform: scale(1) !important;
+	color: #38D6F5;
+	text-shadow: 0 0 8px rgba(56, 214, 245, 0.5);
+}
+
+/* ─── App Volume Mixer ──────────────────────────────────────────────────── */
+
+.volume-mixer-panel {
+	position: absolute;
+	left: 42px;
+	top: 0;
+	bottom: 0;
+	/* Overridden inline with the dynamic width (grows with the app count). */
+	width: 204px;
+	display: flex;
+	flex-direction: column;
+	pointer-events: auto;
+	overflow: hidden;
+	z-index: 2;
+}
+
+.volume-mixer-list {
+	display: grid;
+	/* Columns are set inline from the app count. */
+	grid-template-columns: repeat(4, 1fr);
+	/* Rows share the height until they hit the tile minimum, then the list scrolls. */
+	grid-auto-rows: minmax(70px, 1fr);
+	gap: 4px;
+	width: 100%;
+	flex: 1;
+	min-height: 0;
+	/* Aligns the tile sliders with the main bar (17px from the card top) and
+	   the tile logos with the main action button. */
+	padding: 16px 8px 14px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	scrollbar-width: thin;
+	scrollbar-color: var(--bloom-border, rgba(255, 255, 255, 0.2)) transparent;
+}
+
+.volume-mixer-empty {
+	color: var(--bloom-text-muted, rgba(255, 255, 255, 0.6));
+	font-size: 11px;
+	font-weight: 500;
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	text-align: center;
+	grid-column: 1 / -1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.volume-mixer-tile {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-end;
+	width: 100%;
+	min-width: 0;
+	height: 100%;
+}
+
+/* Mirrors the main volume bar: thin rounded track with a fill from the bottom. */
+.volume-mixer-bar {
+	position: relative;
+	width: 10px;
+	flex: 1;
+	min-height: 48px;
+	background: rgba(255, 255, 255, 0.15);
+	border: 1px solid rgba(56, 214, 245, 0.2);
+	border-radius: 20px;
+	overflow: hidden;
+	box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.volume-mixer-bar:hover {
+	border-color: rgba(56, 214, 245, 0.45);
+	box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 6px rgba(56, 214, 245, 0.3);
+}
+
+.volume-mixer-fill {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	width: 100%;
+	background: linear-gradient(180deg, #38D6F5 0%, #4361EE 100%);
+	box-shadow: 0 0 8px rgba(56, 214, 245, 0.5);
+	border-radius: 20px;
+	pointer-events: none;
+}
+
+/* The app logo sits at the bottom, like the main notch action, and swaps to
+   the percentage while the volume is being changed. */
+.volume-mixer-action {
+	position: relative;
+	width: 100%;
+	height: 20px;
+	margin-top: 2px;
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--bloom-text, white);
+	cursor: pointer;
+}
+
+.volume-mixer-action img {
+	width: 18px;
+	height: 18px;
+	object-fit: contain;
+	transition: opacity 0.16s ease;
+}
+
+.volume-mixer-action-fallback {
+	width: 18px;
+	height: 18px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 5px;
+	background: var(--bloom-border, rgba(255, 255, 255, 0.15));
+	color: var(--bloom-text, white);
+	font-size: 9px;
+	font-weight: 700;
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	transition: opacity 0.16s ease;
+}
+
+.volume-mixer-action.muted img,
+.volume-mixer-action.muted .volume-mixer-action-fallback {
+	opacity: 0.35;
+}
+
+.volume-mixer-action:active {
+	transform: scale(0.94);
+}
+
+.volume-mixer-action-pct {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 9px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+	letter-spacing: -0.02em;
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	opacity: 0;
+	transition: opacity 0.16s ease;
+}
+
+.volume-mixer-action.showing-percent img,
+.volume-mixer-action.showing-percent .volume-mixer-action-fallback {
+	opacity: 0;
+}
+
+.volume-mixer-action.showing-percent .volume-mixer-action-pct {
+	opacity: 1;
+}
+
+/* ─── Brightness Notch (Right Edge) ─────────────────────────────────────── */
+
+.brightness-notch-wrapper {
+	position: fixed;
+	right: 0;
+	top: 50%;
+	overflow: visible;
+	transform-origin: right center;
+	--surface-bg: var(--bloom-bg, rgba(0, 0, 0, 0.8));
+	isolation: isolate;
+}
+
+.brightness-notch {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	padding: 16px 0 14px;
+	border-radius: 18px 0 0 18px;
+	width: 42px;
+	height: 196px;
+	position: relative;
+	pointer-events: auto;
+	overflow: hidden;
+}
+
+.brightness-notch-wrapper > .edge-surface {
+	border-radius: 18px 0 0 18px;
+}
+
+.brightness-notch-content-group {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	height: 100%;
+	width: 100%;
+}
+
+.brightness-notch-bar {
+	width: 10px;
+	flex: 1;
+	min-height: 0;
+	background: rgba(255, 255, 255, 0.15);
+	border: 1px solid rgba(251, 133, 0, 0.25);
+	border-radius: 20px;
+	position: relative;
+	overflow: hidden;
+	margin-top: 0;
+	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.brightness-notch-bar:hover {
+	border-color: rgba(251, 133, 0, 0.55);
+	box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 8px rgba(251, 133, 0, 0.35);
+}
+
+.brightness-notch-fill {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	width: 100%;
+	background: linear-gradient(180deg, #FFB703 0%, #FB8500 50%, #E50914 100%);
+	box-shadow: 0 0 12px rgba(251, 133, 0, 0.65), 0 0 4px rgba(229, 9, 20, 0.4);
+	border-radius: 20px;
+}
+
+.brightness-notch-action {
+	position: relative;
+	width: 100%;
+	height: 20px;
+	margin-top: 2px;
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: #FFB703;
+}
+
+.brightness-notch-action-icon,
+.brightness-notch-action-percent {
+	position: absolute;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	opacity: 0;
+	transition:
+		opacity 0.16s ease,
+		transform 0.16s ease;
+}
+
+.brightness-notch-action-icon {
+	opacity: 1;
+	color: #FFB703;
+	filter: drop-shadow(0 0 8px rgba(255, 183, 3, 0.6));
+}
+
+.brightness-notch-action-percent {
+	font-size: 10px;
+	font-weight: 700;
+	font-family:
+		"Inter",
+		-apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		sans-serif;
+	letter-spacing: -0.02em;
+	color: #FFB703;
+	text-shadow: 0 0 8px rgba(255, 183, 3, 0.6);
+	transform: scale(0.82);
+	pointer-events: none;
+}
+
+.brightness-notch-action.showing-percent .brightness-notch-action-icon {
+	opacity: 0 !important;
+	transform: scale(0.82) !important;
+	pointer-events: none;
+}
+
+.brightness-notch-action.showing-percent .brightness-notch-action-percent {
+	opacity: 1 !important;
+	transform: scale(1) !important;
+}
+
+.brightness-icon-container {
+	width: 20px;
+	height: 20px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+/* ─── Light Mode ────────────────────────────────────────────────────────── */
+
+.light-mode .volume-notch-bar,
+.light-mode .brightness-notch-bar {
+	background: rgba(0, 0, 0, 0.12);
+}
+
+/* ─── Edge-Docked & Draggable Overlays ──────────────────────────────────── */
+
+.volume-notch.free-drag-enabled,
+.brightness-notch.free-drag-enabled {
+	cursor: grab;
+	touch-action: none;
+}
+
+.volume-notch-wrapper.is-edge-left,
+.brightness-notch-wrapper.is-edge-left {
+	left: 0;
+	right: auto;
+	transform-origin: left center;
+	border-radius: 0 18px 18px 0;
+}
+
+.volume-notch-wrapper.is-edge-left > .edge-surface,
+.brightness-notch-wrapper.is-edge-left > .edge-surface,
+.volume-notch-wrapper.is-edge-left .volume-notch,
+.brightness-notch-wrapper.is-edge-left .brightness-notch {
+	border-radius: 0 18px 18px 0;
+}
+
+.volume-notch-wrapper.is-edge-left .volume-notch-content-group {
+	align-self: flex-start;
+}
+
+.volume-notch-wrapper.is-edge-left .volume-mixer-panel {
+	left: 42px;
+	right: auto;
+}
+
+.volume-notch-wrapper.is-edge-right,
+.brightness-notch-wrapper.is-edge-right {
+	right: 0;
+	left: auto;
+	transform-origin: right center;
+	border-radius: 18px 0 0 18px;
+}
+
+.volume-notch-wrapper.is-edge-right > .edge-surface,
+.brightness-notch-wrapper.is-edge-right > .edge-surface,
+.volume-notch-wrapper.is-edge-right .volume-notch,
+.brightness-notch-wrapper.is-edge-right .brightness-notch {
+	border-radius: 18px 0 0 18px;
+}
+
+.volume-notch-wrapper.is-edge-right .volume-notch-content-group {
+	align-self: flex-end;
+}
+
+.volume-notch-wrapper.is-edge-right .volume-mixer-panel {
+	left: auto;
+	right: 42px;
+}
+
+.volume-notch-wrapper.is-edge-top,
+.brightness-notch-wrapper.is-edge-top {
+	top: 0;
+	right: auto;
+	transform-origin: top center;
+	border-radius: 0 0 18px 18px;
+}
+
+.volume-notch-wrapper.is-edge-top > .edge-surface,
+.brightness-notch-wrapper.is-edge-top > .edge-surface,
+.volume-notch-wrapper.is-edge-top .volume-notch,
+.brightness-notch-wrapper.is-edge-top .brightness-notch {
+	border-radius: 0 0 18px 18px;
+}
+
+.volume-notch-wrapper.is-dragging,
+.brightness-notch-wrapper.is-dragging {
+	position: absolute;
+	border-radius: 18px !important;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.75), 0 0 20px rgba(0, 210, 255, 0.2);
+	cursor: grabbing !important;
+	user-select: none;
+}
+
+.volume-notch-wrapper.is-dragging > .edge-surface,
+.brightness-notch-wrapper.is-dragging > .edge-surface,
+.volume-notch-wrapper.is-dragging .volume-notch,
+.brightness-notch-wrapper.is-dragging .brightness-notch {
+	border-radius: 18px !important;
+}
+
+.volume-notch-wrapper.is-dragging .volume-notch,
+.brightness-notch-wrapper.is-dragging .brightness-notch {
+	cursor: grabbing !important;
+}
+
+.overlay-drag-handle {
+	position: absolute;
+	top: 4px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 24px;
+	height: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: grab;
+	opacity: 0.45;
+	transition: opacity 0.15s ease;
+	z-index: 4;
+}
+
+.overlay-drag-handle:hover,
+.overlay-drag-handle:active {
+	opacity: 0.95;
+}
+
+.overlay-drag-handle:active {
+	cursor: grabbing;
+}
+
+.overlay-drag-handle::after {
+	content: "";
+	width: 16px;
+	height: 3px;
+	border-radius: 2px;
+	background: rgba(255, 255, 255, 0.55);
+}
+
+/* ─── Horizontal Volume & Brightness Notch (Top Edge) ──────────────────── */
+
+.volume-notch-wrapper.is-horizontal,
+.brightness-notch-wrapper.is-horizontal {
+	top: 0;
+	transform-origin: top center;
+}
+
+.volume-notch.is-horizontal {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	justify-content: flex-start;
+	padding: 0;
+	border-radius: 0 0 18px 18px;
+}
+
+.brightness-notch.is-horizontal {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0 16px;
+	border-radius: 0 0 18px 18px;
+	width: 196px;
+	height: 42px;
+}
+
+.volume-notch-wrapper.is-horizontal > .edge-surface,
+.brightness-notch-wrapper.is-horizontal > .edge-surface {
+	border-radius: 0 0 18px 18px;
+}
+
+.volume-notch-content-group.is-horizontal {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	height: 42px;
+	flex-shrink: 0;
+	padding: 0 16px;
+	gap: 12px;
+}
+
+.brightness-notch-content-group.is-horizontal {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	height: 100%;
+	gap: 12px;
+}
+
+.volume-notch.is-horizontal .overlay-drag-handle,
+.brightness-notch.is-horizontal .overlay-drag-handle {
+	top: 12px;
+	right: 4px;
+	left: auto;
+	transform: none;
+	width: 8px;
+	height: 18px;
+}
+
+.volume-notch.is-horizontal .overlay-drag-handle::after,
+.brightness-notch.is-horizontal .overlay-drag-handle::after {
+	width: 3px;
+	height: 14px;
+}
+
+.volume-notch-wrapper.is-horizontal .volume-notch-bar,
+.brightness-notch-wrapper.is-horizontal .brightness-notch-bar {
+	width: auto;
+	flex: 1;
+	height: 10px;
+	min-height: 10px;
+	max-height: 10px;
+	margin-top: 0;
+}
+
+.volume-notch-wrapper.is-horizontal .volume-notch-fill {
+	bottom: 0;
+	left: 0;
+	height: 100%;
+	background: linear-gradient(90deg, #4361EE 0%, #38D6F5 100%);
+}
+
+.brightness-notch-wrapper.is-horizontal .brightness-notch-fill {
+	bottom: 0;
+	left: 0;
+	height: 100%;
+	background: linear-gradient(90deg, #E50914 0%, #FB8500 50%, #FFB703 100%);
+}
+
+.volume-notch-wrapper.is-horizontal .volume-notch-action,
+.brightness-notch-wrapper.is-horizontal .brightness-notch-action {
+	width: 24px;
+	height: 24px;
+	margin-top: 0;
+	flex-shrink: 0;
+}
+
+.volume-notch.is-horizontal .volume-mixer-panel {
+	top: 42px;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	width: 100%;
+	border-radius: 0 0 18px 18px;
+}
+
+.volume-notch.is-horizontal .volume-mixer-list {
+	padding: 8px 8px 14px;
+}
+
+
