@@ -1,10 +1,13 @@
 # hime-supervisor.ps1 - Background Supervisor for Hime Pure-Rust Native Ecosystem
+param([switch]$WithAi, [switch]$NoAi)
 
 $ErrorActionPreference = "SilentlyContinue"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$stateFile = "$env:APPDATA\ai.hime.desktop\hime.active"
-$logFile = "$env:APPDATA\ai.hime.desktop\supervisor.log"
+$stateDir = "$env:APPDATA\ai.hime.desktop"
+$stateFile = "$stateDir\hime.active"
+$settingsFile = "$stateDir\settings.json"
+$logFile = "$stateDir\supervisor.log"
 
 # Named mutex to guarantee single supervisor instance
 $mutexName = "Local\HimeSupervisorMutex"
@@ -36,6 +39,22 @@ function Log-Msg($msg) {
     Add-Content -Path $logFile -Value $line -ErrorAction SilentlyContinue
 }
 
+function Test-HimeAiEnabled {
+    if ($WithAi) { return $true }
+    if ($NoAi) { return $false }
+    if (-not (Test-Path $settingsFile)) { return $false }
+    try {
+        $json = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json
+        $raw = $json."hime-ai-enabled"
+        if ($null -eq $raw) { return $false }
+        if ($raw -is [bool]) { return $raw }
+        $s = "$raw".Trim().ToLowerInvariant()
+        return ($s -eq "true" -or $s -eq "1" -or $s -eq "yes")
+    } catch {
+        return $false
+    }
+}
+
 function Find-Bin($subpath, $name) {
     $rel = Join-Path $repoRoot "$subpath\target\release\$name"
     $dbg = Join-Path $repoRoot "$subpath\target\debug\$name"
@@ -56,7 +75,7 @@ function Spawn-Detached($exePath, $argList = "", $workDir = "", $showMode = 0) {
     }
 }
 
-Log-Msg "Hime Native Supervisor started (root: $repoRoot)."
+Log-Msg "Hime Native Supervisor started (root: $repoRoot, aiEnabled: $(Test-HimeAiEnabled))."
 
 try {
     while ($true) {
@@ -66,27 +85,28 @@ try {
             break
         }
 
-        # 1. Ensure optional 9Router Gateway is listening on 20128 if installed
-        $listening = Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue
-        if (-not $listening) {
-            $routerCmd = "$env:APPDATA\npm\9router.cmd"
-            if (Test-Path $routerCmd) {
-                Log-Msg "9Router not running. Starting..."
-                Spawn-Detached "cmd.exe" "/c `"$routerCmd`" -H 127.0.0.1 -p 20128 --skip-update" "$env:APPDATA\npm" 0
+        # 1. Manage optional AI runtime (9Router + hime-core) ONLY when AI is enabled
+        if (Test-HimeAiEnabled) {
+            $listening = Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue
+            if (-not $listening) {
+                $routerCmd = "$env:APPDATA\npm\9router.cmd"
+                if (Test-Path $routerCmd) {
+                    Log-Msg "9Router not running. Starting..."
+                    Spawn-Detached "cmd.exe" "/c `"$routerCmd`" -H 127.0.0.1 -p 20128 --skip-update" "$env:APPDATA\npm" 0
+                }
+            }
+
+            $core = Get-Process -Name "hime-core" -ErrorAction SilentlyContinue
+            if (-not $core) {
+                $coreExe = Find-Bin "core" "hime-core.exe"
+                if ($coreExe) {
+                    Log-Msg "Hime Core not running. Starting from $coreExe..."
+                    Spawn-Detached $coreExe "" $repoRoot 0
+                }
             }
         }
 
-        # 2. Ensure Hime Core is running
-        $core = Get-Process -Name "hime-core" -ErrorAction SilentlyContinue
-        if (-not $core) {
-            $coreExe = Find-Bin "core" "hime-core.exe"
-            if ($coreExe) {
-                Log-Msg "Hime Core not running. Starting from $coreExe..."
-                Spawn-Detached $coreExe "" $repoRoot 0
-            }
-        }
-
-        # 3. Ensure Pure-Rust Direct2D Native Shell is running (includes embedded hotkeys)
+        # 2. Ensure Pure-Rust Direct2D Native Shell is running (includes embedded hotkeys)
         $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
         if (-not $nativeShell) {
             $nativeExe = Find-Bin "island\native" "hime-island-native.exe"

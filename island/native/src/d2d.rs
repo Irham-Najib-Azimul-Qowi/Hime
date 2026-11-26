@@ -1,6 +1,7 @@
 //! Direct2D + DirectWrite + DirectComposition window & rendering surface.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -16,12 +17,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1PathGeometry,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_PARAMETERS, D2D1_PRESENT_OPTIONS_NONE,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1Layer,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+    D2D1_LAYER_PARAMETERS, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -37,6 +38,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DrawIconEx, GetClassLongPtrW,
@@ -79,6 +81,40 @@ pub struct SurfaceEvent {
 
 thread_local! {
     static SURFACE_EVENTS: RefCell<Vec<SurfaceEvent>> = const { RefCell::new(Vec::new()) };
+    static SHARED_D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = const { RefCell::new(None) };
+    static SHARED_DWRITE_FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
+}
+
+fn shared_d2d_factory() -> Result<ID2D1Factory1> {
+    SHARED_D2D_FACTORY.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(factory) = slot.as_ref() {
+            return Ok(factory.clone());
+        }
+        let factory: ID2D1Factory1 =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        *slot = Some(factory.clone());
+        Ok(factory)
+    })
+}
+
+fn shared_dwrite_factory() -> Result<IDWriteFactory> {
+    SHARED_DWRITE_FACTORY.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if let Some(factory) = slot.as_ref() {
+            return Ok(factory.clone());
+        }
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        *slot = Some(factory.clone());
+        Ok(factory)
+    })
+}
+
+/// Trims unused working-set pages from the current process back to the OS.
+pub fn trim_working_set() {
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
 }
 
 /// Registers the controller window that should be woken via [`WM_SURFACE_EVENT`].
@@ -450,8 +486,53 @@ impl Default for HimeExpression {
     }
 }
 
-/// Hardware-accelerated borderless topmost window backed by
-/// Direct2D `ID2D1HwndRenderTarget` + DirectWrite + `SetWindowRgn` rounded clipping.
+const MAX_BITMAP_CACHE_ENTRIES: usize = 64;
+const MAX_BRUSH_CACHE_ENTRIES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionKey {
+    Rounded {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        diam: i32,
+    },
+    Edge(u64),
+}
+
+#[derive(Default)]
+struct BitmapCache {
+    entries: HashMap<(u32, u32, u64), ID2D1Bitmap>,
+    order: VecDeque<(u32, u32, u64)>,
+}
+
+impl BitmapCache {
+    fn get(&self, key: &(u32, u32, u64)) -> Option<ID2D1Bitmap> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: (u32, u32, u64), bitmap: ID2D1Bitmap) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        while self.order.len() >= MAX_BITMAP_CACHE_ENTRIES {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.order.push_back(key);
+        self.entries.insert(key, bitmap);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
+/// Borderless topmost window backed by Direct2D `ID2D1HwndRenderTarget` (software rasterizer)
+/// + DirectWrite + `SetWindowRgn` clipping.
 pub struct NativeSurface {
     hwnd: HWND,
     width: u32,
@@ -460,6 +541,12 @@ pub struct NativeSurface {
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
     d2d_target: ID2D1HwndRenderTarget,
+    brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
+    text_format_cache: RefCell<HashMap<(u32, u8, bool), IDWriteTextFormat>>,
+    bitmap_cache: RefCell<BitmapCache>,
+    cached_layer: RefCell<Option<ID2D1Layer>>,
+    round_cap_stroke: RefCell<Option<ID2D1StrokeStyle>>,
+    last_region_key: RefCell<Option<RegionKey>>,
 }
 
 impl NativeSurface {
@@ -492,12 +579,11 @@ impl NativeSurface {
 
             let dpi = get_window_dpi(hwnd);
 
-            let d2d_factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let d2d_factory = shared_d2d_factory()?;
+            let dwrite_factory = shared_dwrite_factory()?;
 
             let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                 pixelFormat: D2D1_PIXEL_FORMAT {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
                     alphaMode: D2D1_ALPHA_MODE_IGNORE,
@@ -521,6 +607,12 @@ impl NativeSurface {
                 d2d_factory,
                 dwrite_factory,
                 d2d_target,
+                brush_cache: RefCell::new(HashMap::new()),
+                text_format_cache: RefCell::new(HashMap::new()),
+                bitmap_cache: RefCell::new(BitmapCache::default()),
+                cached_layer: RefCell::new(None),
+                round_cap_stroke: RefCell::new(None),
+                last_region_key: RefCell::new(None),
             })
         }
     }
@@ -638,11 +730,25 @@ impl NativeSurface {
         let right = ((rect.x + rect.width) * scale).round() as i32 + 1;
         let bottom = ((rect.y + rect.height) * scale).round() as i32 + 1;
         let diam = ((radius * 2.0) * scale).round().max(0.0) as i32;
+        let key = RegionKey::Rounded {
+            left,
+            top,
+            right,
+            bottom,
+            diam,
+        };
+        if *self.last_region_key.borrow() == Some(key) {
+            return;
+        }
         unsafe {
             let rgn = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
             if !rgn.is_invalid() {
                 // On success, the system owns `rgn` and deletes it automatically.
-                let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+                if SetWindowRgn(self.hwnd, Some(rgn), true) != 0 {
+                    *self.last_region_key.borrow_mut() = Some(key);
+                } else {
+                    let _ = DeleteObject(rgn.into());
+                }
             }
         }
     }
@@ -874,13 +980,7 @@ impl NativeSurface {
         unsafe {
             let brush = self.create_brush(eye_color)?;
             let glow_brush = self.create_brush(glow_color)?;
-            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
-                startCap: D2D1_CAP_STYLE_ROUND,
-                endCap: D2D1_CAP_STYLE_ROUND,
-                ..Default::default()
-            };
-            let round_cap: ID2D1StrokeStyle =
-                self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
+            let round_cap = self.create_round_cap_stroke()?;
 
             // Closed-eye fast path for full blink or Offline expression
             if blink > 0.9 || expression == HimeExpression::Offline {
@@ -1025,6 +1125,10 @@ impl NativeSurface {
         flares: bool,
     ) {
         let scale = (self.dpi / 96.0).max(0.5);
+        let key = RegionKey::Edge(edge_region_hash(scale, rect, ear_w, radius, edge, flares));
+        if *self.last_region_key.borrow() == Some(key) {
+            return;
+        }
         let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
         let to_px = |x: f32, y: f32| POINT {
             x: (x * scale).round() as i32,
@@ -1060,7 +1164,11 @@ impl NativeSurface {
                 if EndPath(hdc).as_bool() {
                     let rgn = PathToRegion(hdc);
                     if !rgn.is_invalid() {
-                        let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+                        if SetWindowRgn(self.hwnd, Some(rgn), true) != 0 {
+                            *self.last_region_key.borrow_mut() = Some(key);
+                        } else {
+                            let _ = DeleteObject(rgn.into());
+                        }
                     }
                 }
             }
@@ -1077,24 +1185,36 @@ impl NativeSurface {
         bgra_premul: &[u8],
         corner_radius: f32,
     ) -> Result<()> {
-        if width == 0 || height == 0 || bgra_premul.len() < (width * height * 4) as usize {
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))
+            .unwrap_or(0);
+        if width == 0 || height == 0 || byte_len == 0 || bgra_premul.len() < byte_len {
             return Ok(());
         }
         unsafe {
-            let props = D2D1_BITMAP_PROPERTIES {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
+            let key = (width, height, fast_hash_bgra(&bgra_premul[..byte_len]));
+            let cached_bitmap = self.bitmap_cache.borrow().get(&key);
+            let bitmap = if let Some(cached) = cached_bitmap {
+                cached
+            } else {
+                let props = D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                };
+                let created = self.d2d_target.CreateBitmap(
+                    D2D_SIZE_U { width, height },
+                    Some(bgra_premul.as_ptr() as *const _),
+                    width * 4,
+                    &props,
+                )?;
+                self.bitmap_cache.borrow_mut().insert(key, created.clone());
+                created
             };
-            let bitmap = self.d2d_target.CreateBitmap(
-                D2D_SIZE_U { width, height },
-                Some(bgra_premul.as_ptr() as *const _),
-                width * 4,
-                &props,
-            )?;
             let dest = rect.to_d2d();
             if corner_radius > 0.0 {
                 let rr = D2D1_ROUNDED_RECT {
@@ -1103,8 +1223,17 @@ impl NativeSurface {
                     radiusY: corner_radius,
                 };
                 let clip_geo = self.d2d_factory.CreateRoundedRectangleGeometry(&rr)?;
-                let layer = self.d2d_target.CreateLayer(None)?;
-                let layer_params = D2D1_LAYER_PARAMETERS {
+                let layer = {
+                    let existing = self.cached_layer.borrow().clone();
+                    if let Some(layer) = existing {
+                        layer
+                    } else {
+                        let created = self.d2d_target.CreateLayer(None)?;
+                        *self.cached_layer.borrow_mut() = Some(created.clone());
+                        created
+                    }
+                };
+                let mut layer_params = D2D1_LAYER_PARAMETERS {
                     contentBounds: dest,
                     geometricMask: std::mem::ManuallyDrop::new(Some(clip_geo.into())),
                     maskAntialiasMode: Default::default(),
@@ -1122,6 +1251,8 @@ impl NativeSurface {
                     None,
                 );
                 self.d2d_target.PopLayer();
+                std::mem::ManuallyDrop::drop(&mut layer_params.geometricMask);
+                std::mem::ManuallyDrop::drop(&mut layer_params.opacityBrush);
             } else {
                 self.d2d_target.DrawBitmap(
                     &bitmap,
@@ -1151,13 +1282,7 @@ impl NativeSurface {
         unsafe {
             let brush = self.create_brush(color)?;
             let dim_brush = self.create_brush(color.with_alpha(color.a * 0.3))?;
-            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
-                startCap: D2D1_CAP_STYLE_ROUND,
-                endCap: D2D1_CAP_STYLE_ROUND,
-                ..Default::default()
-            };
-            let round_cap: ID2D1StrokeStyle =
-                self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
+            let round_cap = self.create_round_cap_stroke()?;
 
             let active_brush = if connected && !off { &brush } else { &dim_brush };
 
@@ -1565,12 +1690,17 @@ impl NativeSurface {
     }
 
     unsafe fn create_round_cap_stroke(&self) -> Result<ID2D1StrokeStyle> {
+        if let Some(cached) = self.round_cap_stroke.borrow().as_ref() {
+            return Ok(cached.clone());
+        }
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_ROUND,
             endCap: D2D1_CAP_STYLE_ROUND,
             ..Default::default()
         };
-        Ok(self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into())
+        let style: ID2D1StrokeStyle = self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
+        *self.round_cap_stroke.borrow_mut() = Some(style.clone());
+        Ok(style)
     }
 
     unsafe fn build_contour_geometry(&self, ops: &[ContourOp]) -> Result<ID2D1PathGeometry> {
@@ -1609,8 +1739,18 @@ impl NativeSurface {
     }
 
     unsafe fn create_brush(&self, color: Color) -> Result<ID2D1SolidColorBrush> {
+        let key = pack_color_rgba(color);
+        if let Some(cached) = self.brush_cache.borrow().get(&key) {
+            return Ok(cached.clone());
+        }
         let d2d_color: D2D1_COLOR_F = color.to_d2d();
-        self.d2d_target.CreateSolidColorBrush(&d2d_color, None)
+        let brush = self.d2d_target.CreateSolidColorBrush(&d2d_color, None)?;
+        let mut cache = self.brush_cache.borrow_mut();
+        if cache.len() >= MAX_BRUSH_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, brush.clone());
+        Ok(brush)
     }
 
     unsafe fn create_text_format_weighted(
@@ -1619,6 +1759,18 @@ impl NativeSurface {
         align: TextAlign,
         bold: bool,
     ) -> Result<IDWriteTextFormat> {
+        let clamped_size = font_size.max(1.0);
+        let font_size_tenths = (clamped_size * 10.0).round() as u32;
+        let align_key = match align {
+            TextAlign::Leading => 0,
+            TextAlign::Center => 1,
+            TextAlign::Trailing => 2,
+        };
+        let key = (font_size_tenths, align_key, bold);
+        if let Some(cached) = self.text_format_cache.borrow().get(&key) {
+            return Ok(cached.clone());
+        }
+
         let family = to_wide_null(FONT_FAMILY);
         let locale = to_wide_null("en-US");
         let weight = if bold {
@@ -1632,7 +1784,7 @@ impl NativeSurface {
             weight,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            font_size.max(1.0),
+            clamped_size,
             PCWSTR(locale.as_ptr()),
         )?;
         let dwrite_align = match align {
@@ -1642,6 +1794,9 @@ impl NativeSurface {
         };
         format.SetTextAlignment(dwrite_align)?;
         format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        self.text_format_cache
+            .borrow_mut()
+            .insert(key, format.clone());
         Ok(format)
     }
 
@@ -1696,6 +1851,10 @@ impl NativeSurface {
 
     fn resize_swap_chain(&mut self, width: u32, height: u32) -> Result<()> {
         unsafe {
+            self.brush_cache.borrow_mut().clear();
+            self.bitmap_cache.borrow_mut().clear();
+            self.cached_layer.borrow_mut().take();
+            self.last_region_key.borrow_mut().take();
             self.d2d_target.Resize(&D2D_SIZE_U { width, height })?;
             self.width = width;
             self.height = height;
@@ -1708,6 +1867,9 @@ impl NativeSurface {
 
 impl Drop for NativeSurface {
     fn drop(&mut self) {
+        self.brush_cache.borrow_mut().clear();
+        self.bitmap_cache.borrow_mut().clear();
+        self.cached_layer.borrow_mut().take();
         unsafe {
             if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
@@ -1786,6 +1948,67 @@ unsafe extern "system" fn surface_wnd_proc(
 #[inline]
 const fn pt(x: f32, y: f32) -> D2D_POINT_2F {
     D2D_POINT_2F { X: x, Y: y }
+}
+
+#[inline]
+fn pack_color_rgba(color: Color) -> u32 {
+    let r = (color.r.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let g = (color.g.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let b = (color.b.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let a = (color.a.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (r << 24) | (g << 16) | (b << 8) | a
+}
+
+#[inline]
+fn fast_hash_bgra(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        hash ^= word;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    for &b in chunks.remainder() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+#[inline]
+fn edge_region_hash(
+    scale: f32,
+    rect: Rect,
+    ear_w: f32,
+    radius: f32,
+    edge: EdgeSide,
+    flares: bool,
+) -> u64 {
+    let norm = |v: f32| if v == 0.0 { 0.0_f32 } else { v };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let vals = [
+        norm(scale).to_bits(),
+        norm(rect.x).to_bits(),
+        norm(rect.y).to_bits(),
+        norm(rect.width).to_bits(),
+        norm(rect.height).to_bits(),
+        norm(ear_w).to_bits(),
+        norm(radius).to_bits(),
+        match edge {
+            EdgeSide::Top => 0,
+            EdgeSide::Bottom => 1,
+            EdgeSide::Left => 2,
+            EdgeSide::Right => 3,
+        },
+        u32::from(flares),
+    ];
+    for v in vals {
+        hash ^= v as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
 }
 
 fn get_window_dpi(hwnd: HWND) -> f32 {
@@ -1919,5 +2142,75 @@ mod tests {
             assert_eq!(ic.bgra_premul.len(), 32 * 32 * 4);
             assert!(ic.bgra_premul.chunks_exact(4).any(|px| px[3] > 0));
         }
+    }
+
+    #[test]
+    fn caches_factories_brushes_formats_bitmaps_layers_and_regions() {
+        let mut s1 = match NativeSurface::new("HimeCacheTest1", -2000, -2000, 120, 48) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let s2 = match NativeSurface::new("HimeCacheTest2", -2000, -2000, 120, 48) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        assert_eq!(s1.d2d_factory(), s2.d2d_factory());
+        assert_eq!(s1.dwrite_factory(), s2.dwrite_factory());
+
+        let px = vec![0x80_u8; 16 * 16 * 4];
+        s1.begin_draw();
+        s1.draw_edge_surface(
+            Rect::new(0.0, 0.0, 120.0, 48.0),
+            13.0,
+            18.0,
+            EdgeSide::Top,
+            true,
+            theme::NOTCH_BG_SOLID,
+            Some(theme::GLASS_BORDER),
+        )
+        .unwrap();
+        s1.draw_text("Hello", Rect::new(8.0, 8.0, 80.0, 20.0), 13.0, theme::TEXT_PRIMARY, TextAlign::Leading)
+            .unwrap();
+        s1.draw_text("World", Rect::new(8.0, 24.0, 80.0, 20.0), 13.0, theme::TEXT_PRIMARY, TextAlign::Leading)
+            .unwrap();
+        s1.draw_bgra_bitmap(Rect::new(90.0, 8.0, 16.0, 16.0), 16, 16, &px, 4.0)
+            .unwrap();
+        s1.draw_bgra_bitmap(Rect::new(90.0, 26.0, 16.0, 16.0), 16, 16, &px, 4.0)
+            .unwrap();
+        s1.end_draw_and_present().unwrap();
+
+        assert_eq!(s1.brush_cache.borrow().len(), 3);
+        assert_eq!(s1.text_format_cache.borrow().len(), 1);
+        assert_eq!(s1.bitmap_cache.borrow().entries.len(), 1);
+        assert!(s1.cached_layer.borrow().is_some());
+
+        s1.set_rounded_region(Rect::new(0.0, 0.0, 120.0, 48.0), 18.0);
+        let first_rgn = *s1.last_region_key.borrow();
+        assert!(matches!(first_rgn, Some(RegionKey::Rounded { .. })));
+        s1.set_rounded_region(Rect::new(0.0, 0.0, 120.0, 48.0), 18.0);
+        assert_eq!(*s1.last_region_key.borrow(), first_rgn);
+
+        s1.set_edge_surface_region(Rect::new(0.0, 0.0, 120.0, 48.0), 13.0, 18.0, EdgeSide::Top, true);
+        assert!(matches!(*s1.last_region_key.borrow(), Some(RegionKey::Edge(_))));
+
+        // Resize clears device-dependent caches and region key.
+        s1.set_bounds(-2000, -2000, 180, 60).unwrap();
+        assert_eq!(s1.brush_cache.borrow().len(), 0);
+        assert_eq!(s1.bitmap_cache.borrow().entries.len(), 0);
+        assert!(s1.cached_layer.borrow().is_none());
+        assert!(s1.last_region_key.borrow().is_none());
+
+        // Bitmap cache stays bounded at 64 entries.
+        s1.begin_draw();
+        for i in 0..70_u32 {
+            let mut img = vec![0x40_u8; 4 * 4 * 4];
+            img[0] = (i & 0xFF) as u8;
+            s1.draw_bgra_bitmap(Rect::new(0.0, 0.0, 4.0, 4.0), 4, 4, &img, 0.0)
+                .unwrap();
+        }
+        s1.end_draw_and_present().unwrap();
+        assert_eq!(s1.bitmap_cache.borrow().entries.len(), MAX_BITMAP_CACHE_ENTRIES);
+
+        trim_working_set();
     }
 }

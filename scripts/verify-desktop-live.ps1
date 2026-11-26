@@ -3,27 +3,53 @@
     Live Desktop Application Validation for Pure-Rust Hime Desktop (ADR-017 Phase 4)
 .DESCRIPTION
     Validates the running pure-Rust Hime ecosystem on Windows (no WebView2 / no hime_hotkey):
-    1. Verifies binary presence (hime-core.exe, hime-island-native.exe).
-    2. Starts the ecosystem via scripts/start-hime.ps1.
-    3. Verifies process tree (hime-core, hime-island-native, hime-supervisor) & hime.active marker.
-    4. Validates visible top-center Notch HWND via Win32 EnumWindows.
-    5. Tests synchronized clean shutdown via HimeQuit Named Event (< 2000ms latency).
-    6. Verifies marker cleanup (%APPDATA%\ai.hime.desktop\hime.active deleted) and taskbar restoration.
+    1. Reads hime-ai-enabled from %APPDATA%\ai.hime.desktop\settings.json (defaulting to shell-only non-AI mode).
+    2. Verifies binary presence (hime-island-native.exe; plus hime-core.exe when AI is enabled).
+    3. Starts the ecosystem via scripts/start-hime.ps1.
+    4. Verifies process tree (hime-island-native, hime-supervisor, hime.active; hime-core only when AI enabled;
+       and hime-island-native Working Set RAM < 100 MB in non-AI mode).
+    5. Validates visible top-center Notch HWND via Win32 EnumWindows.
+    6. Tests synchronized clean shutdown via HimeQuit Named Event (< 2000ms latency).
+    7. Verifies marker cleanup (%APPDATA%\ai.hime.desktop\hime.active deleted) and taskbar restoration.
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$Detailed
+    [switch]$Detailed,
+    [switch]$WithAi,
+    [switch]$NoAi
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+$settingsFile = "$env:APPDATA\ai.hime.desktop\settings.json"
+$aiEnabled = $false
+if ($WithAi) {
+    $aiEnabled = $true
+} elseif ($NoAi) {
+    $aiEnabled = $false
+} elseif (Test-Path $settingsFile) {
+    try {
+        $json = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json
+        $raw = $json."hime-ai-enabled"
+        if ($raw -is [bool]) {
+            $aiEnabled = $raw
+        } elseif ($null -ne $raw) {
+            $s = "$raw".Trim().ToLowerInvariant()
+            $aiEnabled = ($s -eq "true" -or $s -eq "1" -or $s -eq "yes")
+        }
+    } catch {
+        $aiEnabled = $false
+    }
+}
+
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "           HIME PURE-RUST DESKTOP LIVE VALIDATION SUITE                         " -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "Repository Root: $repoRoot" -ForegroundColor Gray
+Write-Host "Mode           : $(if ($aiEnabled) { 'AI Enabled (Shell + Core)' } else { 'Pure Shell-Only (Non-AI)' })" -ForegroundColor Gray
 Write-Host "Timestamp      : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC'))" -ForegroundColor Gray
 Write-Host ""
 
@@ -61,11 +87,15 @@ function Find-Bin($subpath, $name) {
     return $null
 }
 
-$coreBin = Find-Bin "core" "hime-core.exe"
 $nativeBin = Find-Bin "island\native" "hime-island-native.exe"
+$coreBin = if ($aiEnabled) { Find-Bin "core" "hime-core.exe" } else { $null }
 
-$binsOk = ($coreBin -ne $null) -and ($nativeBin -ne $null)
-$binDetails = "Core: $(if ($coreBin) { Split-Path $coreBin -Leaf } else { 'MISSING' }), NativeIsland: $(if ($nativeBin) { Split-Path $nativeBin -Leaf } else { 'MISSING' })"
+$binsOk = ($nativeBin -ne $null) -and ((-not $aiEnabled) -or ($coreBin -ne $null))
+$binDetails = if ($aiEnabled) {
+    "Core: $(if ($coreBin) { Split-Path $coreBin -Leaf } else { 'MISSING' }), NativeIsland: $(if ($nativeBin) { Split-Path $nativeBin -Leaf } else { 'MISSING' })"
+} else {
+    "NativeIsland: $(if ($nativeBin) { Split-Path $nativeBin -Leaf } else { 'MISSING' }) (Shell-only mode)"
+}
 Record-Check "Binary Availability" $binsOk $binDetails
 
 if (-not $binsOk) {
@@ -76,7 +106,7 @@ if (-not $binsOk) {
 # --- Step 2: Clean Slate ---
 Write-Host ">>> Checkpoint 2: Clean Slate Preparation..." -ForegroundColor Yellow
 & (Join-Path $repoRoot "scripts\stop-hime.ps1") | Out-Null
-Start-Sleep -Milliseconds 800
+Start-Sleep -Milliseconds 500
 
 $preActive = Test-Path "$env:APPDATA\ai.hime.desktop\hime.active"
 Record-Check "Clean Slate State" (-not $preActive) "No lingering active marker file"
@@ -84,10 +114,13 @@ Record-Check "Clean Slate State" (-not $preActive) "No lingering active marker f
 # --- Step 3: Ecosystem Launch ---
 Write-Host ">>> Checkpoint 3: Starting Hime Native Ecosystem..." -ForegroundColor Yellow
 $startScript = Join-Path $repoRoot "scripts\start-hime.ps1"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startScript
+$startArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript)
+if ($WithAi) { $startArgs += "-WithAi" }
+elseif ($NoAi) { $startArgs += "-NoAi" }
+& powershell.exe @startArgs
 Start-Sleep -Seconds 3
 
-# --- Step 4: Process Verification ---
+# --- Step 4: Process & RAM Verification ---
 Write-Host ">>> Checkpoint 4: Verifying Running Processes..." -ForegroundColor Yellow
 $pCore = @(Get-Process -Name "hime-core" -ErrorAction SilentlyContinue)
 $pNative = @(Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue)
@@ -101,9 +134,21 @@ $nativeRunning = ($pNative.Count -gt 0)
 $supervisorRunning = ($pSupervisor.Count -gt 0)
 
 $supervisorPid = if ($supervisorRunning) { ($pSupervisor | ForEach-Object { $_.ProcessId }) -join ', ' } else { "None" }
+$nativeWsMb = if ($nativeRunning) {
+    [math]::Round((($pNative | Measure-Object -Property WorkingSet64 -Sum).Sum) / 1MB, 2)
+} else {
+    0.0
+}
 
-Record-Check "Process: hime-core" $coreRunning "PID(s): $(($pCore | ForEach-Object { $_.Id }) -join ', ')"
-Record-Check "Process: hime-island-native" $nativeRunning "PID(s): $(($pNative | ForEach-Object { $_.Id }) -join ', ')"
+if ($aiEnabled) {
+    Record-Check "Process: hime-core" $coreRunning "PID(s): $(($pCore | ForEach-Object { $_.Id }) -join ', ')"
+} else {
+    Record-Check "Shell-Only (No hime-core)" (-not $coreRunning) "hime-core processes running: $($pCore.Count)"
+}
+Record-Check "Process: hime-island-native" $nativeRunning "PID(s): $(($pNative | ForEach-Object { $_.Id }) -join ', '), WorkingSet: ${nativeWsMb} MB"
+if (-not $aiEnabled) {
+    Record-Check "Non-AI RAM (< 100 MB)" ($nativeRunning -and ($nativeWsMb -lt 100.0)) "hime-island-native WorkingSet: ${nativeWsMb} MB (Limit: 100 MB)"
+}
 Record-Check "Process: hime-supervisor" $supervisorRunning "Watchdog running in background (PID: $supervisorPid)"
 
 $activeMarkerExists = Test-Path "$env:APPDATA\ai.hime.desktop\hime.active"
