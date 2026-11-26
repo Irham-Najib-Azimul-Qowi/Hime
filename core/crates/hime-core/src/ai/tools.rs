@@ -46,6 +46,7 @@ pub struct ToolGateway {
     policy: Arc<PolicyEngine>,
     event_bus: EventBus,
     ops_engine: Arc<crate::storage::operations::SafeFileOperationsEngine>,
+    mcp_host: Arc<std::sync::RwLock<Option<Arc<super::mcp_client::McpClientHost>>>>,
 }
 
 impl ToolGateway {
@@ -68,6 +69,7 @@ impl ToolGateway {
             policy,
             event_bus,
             ops_engine,
+            mcp_host: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -88,6 +90,7 @@ impl ToolGateway {
             policy,
             event_bus,
             ops_engine,
+            mcp_host: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -696,7 +699,120 @@ impl ToolGateway {
                 idempotent: false,
                 timeout_ms: 10000,
             },
+            ToolDefinition {
+                id: "execute_command".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "system".to_string(),
+                description: "Run PowerShell / shell commands with full superadmin privileges on the laptop".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": { "type": "string" },
+                        "working_dir": { "type": "string" },
+                        "shell": { "type": "string", "enum": ["powershell", "cmd"] }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 30000,
+            },
+            ToolDefinition {
+                id: "manage_filesystem".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "files".to_string(),
+                description: "List directory files, read file contents, write/create files, move/rename files, delete files".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["action", "path"],
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "read", "write", "move", "rename", "delete", "create_dir"] },
+                        "path": { "type": "string" },
+                        "content": { "type": "string" },
+                        "destination": { "type": "string" },
+                        "recursive": { "type": "boolean" }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 15000,
+            },
+            ToolDefinition {
+                id: "launch_app".to_string(),
+                version: "1.0.0".to_string(),
+                domain: "system".to_string(),
+                description: "Launch desktop applications (e.g. Chrome, Notepad, Explorer, etc.)".to_string(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["app"],
+                    "properties": {
+                        "app": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk_level: RiskLevel::L2Modify,
+                idempotent: false,
+                timeout_ms: 10000,
+            },
         ]
+    }
+
+    pub fn set_mcp_host(&self, host: Arc<super::mcp_client::McpClientHost>) {
+        if let Ok(mut guard) = self.mcp_host.write() {
+            *guard = Some(host);
+        }
+    }
+
+    /// Dynamically registers an external MCP tool under `mcp.<server>.<tool>`.
+    /// External MCP tools default to High risk (`RiskLevel::L3Destructive`) unless explicitly configured safe.
+    pub async fn register_mcp_tool(
+        &self,
+        server_name: &str,
+        tool: &super::mcp_client::McpToolDescriptor,
+        risk_level: Option<RiskLevel>,
+    ) -> ToolDefinition {
+        let tool_id = super::mcp_client::format_mcp_tool_id(server_name, &tool.name);
+        let def = ToolDefinition {
+            id: tool_id.clone(),
+            version: "1.0.0".to_string(),
+            domain: format!("mcp.{}", server_name),
+            description: tool
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("MCP tool '{}' on server '{}'", tool.name, server_name)),
+            parameters_schema: tool.input_schema.clone(),
+            risk_level: risk_level.unwrap_or(RiskLevel::L3Destructive),
+            idempotent: false,
+            timeout_ms: 30_000,
+        };
+        self.register_tool(def.clone()).await;
+        def
+    }
+
+    /// Synchronizes all tools discovered by the attached `McpClientHost` into `ToolGateway`.
+    pub async fn sync_mcp_tools(&self) -> usize {
+        let host_opt = self.mcp_host.read().ok().and_then(|g| g.clone());
+        let Some(host) = host_opt else {
+            return 0;
+        };
+
+        // Remove stale mcp.* registrations first
+        {
+            let mut map = self.tools.write().await;
+            map.retain(|k, _| !k.starts_with("mcp."));
+        }
+
+        let discovered = host.list_all_tools().await;
+        let count = discovered.len();
+        for (server, desc, is_safe) in discovered {
+            let level = if is_safe {
+                Some(RiskLevel::L1CreateSafe)
+            } else {
+                Some(RiskLevel::L3Destructive)
+            };
+            self.register_mcp_tool(&server, &desc, level).await;
+        }
+        count
     }
 
     pub async fn register_tool(&self, def: ToolDefinition) {
@@ -1321,7 +1437,240 @@ impl ToolGateway {
                 serde_json::to_value(&res).map_err(|e| e.to_string())
             }
 
-            _ => Err(format!("Unknown tool handler '{}'", tool_id)),
+            "execute_command" => {
+                let command = params["command"].as_str().ok_or("Missing required field 'command'")?;
+                let working_dir = params.get("working_dir").and_then(|v| v.as_str());
+                let shell = params.get("shell").and_then(|v| v.as_str()).unwrap_or("powershell");
+
+                let mut cmd = if shell == "cmd" {
+                    let mut c = std::process::Command::new("cmd.exe");
+                    c.args(["/c", command]);
+                    c
+                } else {
+                    let mut c = std::process::Command::new("powershell.exe");
+                    c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+                    c
+                };
+
+                if let Some(wd) = working_dir {
+                    cmd.current_dir(wd);
+                }
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                }
+
+                let output = cmd.output().map_err(|e| format!("Failed to execute command: {}", e))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let exit_code = output.status.code().unwrap_or(-1);
+
+                Ok(serde_json::json!({
+                    "command": command,
+                    "success": output.status.success(),
+                    "exit_code": exit_code,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }))
+            }
+
+            "manage_filesystem" => {
+                let action = params["action"].as_str().ok_or("Missing required field 'action'")?;
+                let path_str = params["path"].as_str().ok_or("Missing required field 'path'")?;
+                let p = std::path::Path::new(path_str);
+
+                match action {
+                    "list" => {
+                        if !p.exists() {
+                            return Err(format!("Path does not exist: {}", path_str));
+                        }
+                        let mut entries = Vec::new();
+                        if p.is_dir() {
+                            let rd = std::fs::read_dir(p).map_err(|e| format!("Failed to read directory: {}", e))?;
+                            for entry in rd.flatten() {
+                                let meta = entry.metadata().ok();
+                                let file_type = entry.file_type().ok();
+                                let is_dir = file_type.map(|ft| ft.is_dir()).unwrap_or(false);
+                                let size = meta.map(|m| m.len()).unwrap_or(0);
+                                entries.push(serde_json::json!({
+                                    "name": entry.file_name().to_string_lossy().to_string(),
+                                    "path": entry.path().to_string_lossy().to_string(),
+                                    "is_dir": is_dir,
+                                    "size": size,
+                                }));
+                            }
+                        } else {
+                            entries.push(serde_json::json!({
+                                "name": p.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                                "path": p.to_string_lossy().to_string(),
+                                "is_dir": false,
+                                "size": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+                            }));
+                        }
+                        Ok(serde_json::json!({
+                            "action": "list",
+                            "path": path_str,
+                            "count": entries.len(),
+                            "entries": entries,
+                        }))
+                    }
+                    "read" => {
+                        let content = std::fs::read_to_string(p)
+                            .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "read",
+                            "path": path_str,
+                            "size_bytes": content.len(),
+                            "content": content,
+                        }))
+                    }
+                    "write" => {
+                        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(parent) = p.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        std::fs::write(p, content)
+                            .map_err(|e| format!("Failed to write file '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "write",
+                            "path": path_str,
+                            "bytes_written": content.len(),
+                            "success": true,
+                        }))
+                    }
+                    "move" | "rename" => {
+                        let dest_str = params["destination"].as_str().ok_or("Missing required field 'destination'")?;
+                        let dest = std::path::Path::new(dest_str);
+                        if let Some(parent) = dest.parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                        }
+                        if let Err(_) = std::fs::rename(p, dest) {
+                            if p.is_dir() {
+                                return Err(format!("Cannot move directory across volumes: {} to {}", path_str, dest_str));
+                            }
+                            std::fs::copy(p, dest).map_err(|e| format!("Failed to copy file: {}", e))?;
+                            let _ = std::fs::remove_file(p);
+                        }
+                        Ok(serde_json::json!({
+                            "action": "move",
+                            "source": path_str,
+                            "destination": dest_str,
+                            "success": true,
+                        }))
+                    }
+                    "delete" => {
+                        let recursive = params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+                        if p.is_dir() {
+                            if recursive {
+                                std::fs::remove_dir_all(p)
+                                    .map_err(|e| format!("Failed to delete directory '{}': {}", path_str, e))?;
+                            } else {
+                                std::fs::remove_dir(p)
+                                    .map_err(|e| format!("Failed to delete empty directory '{}': {}", path_str, e))?;
+                            }
+                        } else if p.exists() {
+                            std::fs::remove_file(p)
+                                .map_err(|e| format!("Failed to delete file '{}': {}", path_str, e))?;
+                        } else {
+                            return Err(format!("File or directory does not exist: {}", path_str));
+                        }
+                        Ok(serde_json::json!({
+                            "action": "delete",
+                            "path": path_str,
+                            "success": true,
+                        }))
+                    }
+                    "create_dir" => {
+                        std::fs::create_dir_all(p)
+                            .map_err(|e| format!("Failed to create directory '{}': {}", path_str, e))?;
+                        Ok(serde_json::json!({
+                            "action": "create_dir",
+                            "path": path_str,
+                            "success": true,
+                        }))
+                    }
+                    other => Err(format!("Unsupported filesystem action '{}'. Supported: list, read, write, move, delete, create_dir", other)),
+                }
+            }
+
+            "launch_app" => {
+                let app = params["app"].as_str().ok_or("Missing required field 'app'")?;
+                let args: Vec<String> = params.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str()).map(String::from).collect())
+                    .unwrap_or_default();
+
+                let app_lower = app.to_lowercase();
+                let target = match app_lower.as_str() {
+                    "chrome" | "google chrome" => "chrome",
+                    "notepad" | "catatan" => "notepad",
+                    "explorer" | "file explorer" | "penjelajah berkas" => "explorer",
+                    "calc" | "calculator" | "kalkulator" => "calc",
+                    "cmd" | "terminal" => "cmd",
+                    "powershell" => "powershell",
+                    "edge" | "msedge" => "msedge",
+                    "code" | "vscode" => "code",
+                    _ => app,
+                };
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+                    let mut cmd = std::process::Command::new("cmd.exe");
+                    cmd.args(["/c", "start", "", target]);
+                    for a in &args {
+                        cmd.arg(a);
+                    }
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+
+                    match cmd.spawn() {
+                        Ok(_) => Ok(serde_json::json!({
+                            "app": app,
+                            "target": target,
+                            "launched": true,
+                            "status": "success",
+                        })),
+                        Err(e) => Err(format!("Failed to launch app '{}': {}", app, e)),
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = std::process::Command::new(target);
+                    for a in &args {
+                        cmd.arg(a);
+                    }
+                    match cmd.spawn() {
+                        Ok(_) => Ok(serde_json::json!({
+                            "app": app,
+                            "target": target,
+                            "launched": true,
+                            "status": "success",
+                        })),
+                        Err(e) => Err(format!("Failed to launch app '{}': {}", app, e)),
+                    }
+                }
+            }
+
+            _ => {
+                if let Some((server, tool)) = super::mcp_client::parse_mcp_tool_id(tool_id) {
+                    let host_opt = self.mcp_host.read().ok().and_then(|g| g.clone());
+                    let host = host_opt.ok_or_else(|| {
+                        format!("MCP host not attached for tool '{}'", tool_id)
+                    })?;
+                    host.call_tool(server, tool, params.clone()).await
+                } else {
+                    Err(format!("Unknown tool handler '{}'", tool_id))
+                }
+            }
         }
     }
 
@@ -1510,5 +1859,219 @@ mod tests {
 
         assert!(!res.success);
         assert!(res.error.unwrap().contains("Security validation rejected"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_superadmin_execute_command() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "execute_command",
+                serde_json::json!({
+                    "command": "Write-Output 'HIME_SUPERADMIN_OK'"
+                }),
+                None,
+                None,
+            )
+            .await
+            .expect("execute_command should succeed");
+
+        assert!(res.success);
+        let stdout = res.output["stdout"].as_str().unwrap();
+        assert!(stdout.contains("HIME_SUPERADMIN_OK"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_manage_filesystem_lifecycle() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let temp_dir = std::env::temp_dir().join(format!("hime_fs_test_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let test_file = temp_dir.join("test_file.txt");
+        let moved_file = temp_dir.join("moved_file.txt");
+
+        // 1. Create dir
+        let res_mkdir = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "create_dir",
+                    "path": temp_dir.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_mkdir.success);
+
+        // 2. Write file
+        let res_write = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "write",
+                    "path": test_file.to_str().unwrap(),
+                    "content": "Hello Hime Filesystem"
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_write.success);
+
+        // 3. Read file
+        let res_read = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "read",
+                    "path": test_file.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_read.success);
+        assert_eq!(res_read.output["content"], "Hello Hime Filesystem");
+
+        // 4. List directory
+        let res_list = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "list",
+                    "path": temp_dir.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_list.success);
+        assert!(res_list.output["count"].as_u64().unwrap() >= 1);
+
+        // 5. Move file
+        let res_move = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "move",
+                    "path": test_file.to_str().unwrap(),
+                    "destination": moved_file.to_str().unwrap()
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_move.success);
+        assert!(moved_file.exists());
+        assert!(!test_file.exists());
+
+        // 6. Delete directory
+        let res_del = gateway
+            .execute_tool(
+                "test_client",
+                "manage_filesystem",
+                serde_json::json!({
+                    "action": "delete",
+                    "path": temp_dir.to_str().unwrap(),
+                    "recursive": true
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(res_del.success);
+        assert!(!temp_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_tool_gateway_launch_app() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "launch_app",
+                serde_json::json!({
+                    "app": "calc"
+                }),
+                None,
+                None,
+            )
+            .await
+            .expect("launch_app should execute");
+
+        assert!(res.success);
+        assert_eq!(res.output["status"], "success");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_registration_default_high_risk_and_redaction() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::with_superadmin(false));
+        let event_bus = EventBus::new(128);
+        let gateway = ToolGateway::new(storage, policy, event_bus);
+
+        let desc = super::super::mcp_client::McpToolDescriptor {
+            name: "create_issue".to_string(),
+            description: Some("Create a GitHub issue".to_string()),
+            input_schema: serde_json::json!({ "type": "object" }),
+        };
+
+        let def = gateway.register_mcp_tool("github", &desc, None).await;
+        assert_eq!(def.id, "mcp.github.create_issue");
+        assert_eq!(def.risk_level, RiskLevel::L3Destructive);
+
+        // Executing without approval ticket must trigger PolicyEngine approval workflow
+        let res = gateway
+            .execute_tool(
+                "test_client",
+                "mcp.github.create_issue",
+                serde_json::json!({ "title": "test" }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.requires_approval);
+        assert!(res.approval_ticket.is_some());
+
+        // Safe override registers as L1CreateSafe
+        let safe_def = gateway
+            .register_mcp_tool("github", &desc, Some(RiskLevel::L1CreateSafe))
+            .await;
+        assert_eq!(safe_def.risk_level, RiskLevel::L1CreateSafe);
+
+        // Output sanitization redacts API keys
+        let sanitized = gateway.sanitize_json_value(serde_json::json!({
+            "token": "sk-1234567890abcdefghijklmnop"
+        }));
+        let s = sanitized["token"].as_str().unwrap();
+        assert!(!s.contains("sk-1234567890abcdefghijklmnop"));
     }
 }

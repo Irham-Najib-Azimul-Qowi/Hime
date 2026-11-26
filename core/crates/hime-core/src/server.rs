@@ -42,6 +42,10 @@ pub struct CoreServer {
     pub data_ai_engine: Arc<crate::ai::specialists::DataAiEngine>,
     pub evaluation_harness: Arc<crate::ai::evaluation::EvaluationHarness>,
     pub lyrics_service: Arc<crate::lyrics::LyricsService>,
+    pub module_installer: Arc<crate::module_installer::ModuleInstaller>,
+    pub ai_profiles: Arc<tokio::sync::RwLock<Vec<crate::ai::PriorityProfile>>>,
+    pub skills_registry: Arc<crate::ai::SkillsRegistry>,
+    pub mcp_host: Arc<crate::ai::McpClientHost>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -78,6 +82,8 @@ impl CoreServer {
 
         let event_bus = EventBus::new(128);
         let policy_engine = Arc::new(PolicyEngine::new());
+        // Enable Superadmin mode for personal desktop environment per user authorization
+        policy_engine.set_superadmin(true);
         let policy: Arc<dyn PolicyEnforcer> = Arc::clone(&policy_engine) as Arc<dyn PolicyEnforcer>;
         let ai = Arc::new(AiOrchestrator::new(
             Arc::clone(&storage),
@@ -130,9 +136,14 @@ impl CoreServer {
         let specialist_registry = Arc::new(crate::ai::specialists::SpecialistRegistry::new(storage.clone()));
         let delegation_engine = Arc::new(crate::ai::specialists::DelegationEngine::new(storage.clone(), specialist_registry.clone()));
         let proactive_engine = Arc::new(crate::ai::proactive::ProactiveEngine::new(storage.clone()));
+        proactive_engine.set_event_bus(event_bus.clone());
         let data_ai_engine = Arc::new(crate::ai::specialists::DataAiEngine::new());
         let evaluation_harness = Arc::new(crate::ai::evaluation::EvaluationHarness::new(specialist_registry.clone(), delegation_engine.clone()));
         let lyrics_service = Arc::new(crate::lyrics::LyricsService::new(storage.clone()));
+        let module_installer = Arc::new(crate::module_installer::ModuleInstaller::new(&base_dir, "0.1.0"));
+        let ai_profiles = Arc::new(tokio::sync::RwLock::new(crate::ai::default_priority_chain()));
+        let skills_registry = Arc::new(crate::ai::SkillsRegistry::new());
+        let mcp_host = Arc::new(crate::ai::McpClientHost::new());
 
         Self {
             version: "0.1.0".to_string(),
@@ -159,6 +170,10 @@ impl CoreServer {
             data_ai_engine,
             evaluation_harness,
             lyrics_service,
+            module_installer,
+            ai_profiles,
+            skills_registry,
+            mcp_host,
         }
     }
 
@@ -408,6 +423,28 @@ impl CoreServer {
                 info!("Shutdown request received via IPC");
                 self.event_bus.publish(SystemEvent::ShutdownInitiated);
                 JsonRpcResponse::success(req_id, serde_json::json!({"status": "shutting_down"}))
+            }
+
+            "policy.get_superadmin" => {
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "superadmin": self.policy.is_superadmin()
+                    }),
+                )
+            }
+
+            "policy.set_superadmin" => {
+                let params = req.params.unwrap_or_default();
+                let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                self.policy.set_superadmin(enabled);
+                info!(enabled = enabled, "Superadmin mode updated via IPC");
+                JsonRpcResponse::success(
+                    req_id,
+                    serde_json::json!({
+                        "superadmin": self.policy.is_superadmin()
+                    }),
+                )
             }
 
             "tool.execute" => {
@@ -697,7 +734,7 @@ impl CoreServer {
                 let model = params
                     .get("model")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("hermes-3-llama-3.1-8b");
+                    .unwrap_or("openrouter/deepseek/deepseek-chat");
 
                 match self.ai.conversation_service.create_conversation(title, model) {
                     Ok(conv) => JsonRpcResponse::success(
@@ -771,7 +808,7 @@ impl CoreServer {
                 }
 
                 // Ensure global conversation thread exists in SQLite WAL
-                let default_model = model.unwrap_or("hermes-3-llama-3.1-8b");
+                let default_model = model.unwrap_or("openrouter/deepseek/deepseek-chat");
                 let _ = self.storage.create_conversation(conv_id, "Hime Global Thread", default_model);
 
                 match self.ai.execute_chat_prompt_with_model(conv_id, prompt, model).await {
@@ -2719,6 +2756,46 @@ impl CoreServer {
                 }))
             }
 
+            "proactive.reminders.register" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("Pengingat");
+                let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let interval_secs = params.get("interval_secs").and_then(|v| v.as_u64()).unwrap_or(3600);
+                let is_active = params.get("is_active").and_then(|v| v.as_bool()).unwrap_or(true);
+                let rem = self.proactive_engine.register_periodic_reminder(id, title, message, interval_secs, is_active);
+                JsonRpcResponse::success(req_id, serde_json::to_value(&rem).unwrap_or_default())
+            }
+
+            "proactive.reminders.list" => {
+                let list = self.proactive_engine.list_periodic_reminders();
+                JsonRpcResponse::success(req_id, serde_json::to_value(&list).unwrap_or_default())
+            }
+
+            "proactive.reminders.toggle" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let active = params.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+                let updated = self.proactive_engine.toggle_periodic_reminder(id, active);
+                JsonRpcResponse::success(req_id, serde_json::json!({ "id": id, "updated": updated }))
+            }
+
+            "proactive.reminders.cancel" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let removed = self.proactive_engine.remove_periodic_reminder(id);
+                JsonRpcResponse::success(req_id, serde_json::json!({ "id": id, "removed": removed }))
+            }
+
+            "proactive.reminders.check" => {
+                let params = req.params.unwrap_or_default();
+                let threshold = params.get("threshold_minutes").and_then(|v| v.as_i64()).unwrap_or(60);
+                let mut triggered = self.proactive_engine.check_and_trigger_periodic_reminders();
+                let dl = self.proactive_engine.check_and_trigger_deadline_reminders(threshold);
+                triggered.extend(dl);
+                JsonRpcResponse::success(req_id, serde_json::to_value(&triggered).unwrap_or_default())
+            }
+
             "data_ai.profile_dataset" => {
                 let params = req.params.unwrap_or_default();
                 let csv_data = params.get("csv_data").and_then(|v| v.as_str()).unwrap_or("");
@@ -2769,6 +2846,574 @@ impl CoreServer {
                 }
             }
 
+            // =========================================================================
+            // ADR-017: AI Profiles, Memory, Skills & MCP Endpoints
+            // =========================================================================
+            "ai.profiles.list" => {
+                let profiles = self.ai_profiles.read().await;
+                let list = profiles
+                    .iter()
+                    .map(|p| {
+                        let has_key = self
+                            .ai
+                            .provider_adapter
+                            .retrieve_provider_secret(p.effective_secret_key_id())
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        hime_ipc::protocol::AiProfileSummary {
+                            id: p.profile_id.clone(),
+                            name: crate::ai::find_provider_preset(&p.provider_id)
+                                .map(|pr| pr.display_name)
+                                .unwrap_or_else(|| p.provider_id.clone()),
+                            adapter_kind: p.protocol.as_str().to_string(),
+                            base_url: p.base_url.clone(),
+                            default_model: p.model.clone(),
+                            priority: p.priority as i32,
+                            enabled: p.enabled,
+                            has_api_key: has_key,
+                        }
+                    })
+                    .collect();
+                let resp = hime_ipc::protocol::AiProfilesListResponse {
+                    contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                    profiles: list,
+                };
+                JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+            }
+
+            "ai.profiles.upsert" => {
+                let params = req.params.unwrap_or_default();
+                match serde_json::from_value::<hime_ipc::protocol::AiProfileUpsertParams>(params) {
+                    Ok(p) => {
+                        let protocol = match p.adapter_kind.trim().to_ascii_lowercase().as_str() {
+                            "gemini-native" | "gemini" => crate::ai::ProtocolKind::GeminiNative,
+                            "anthropic-compat" | "anthropic" => {
+                                crate::ai::ProtocolKind::AnthropicCompat
+                            }
+                            _ => crate::ai::ProtocolKind::OpenAiCompat,
+                        };
+                        let mut has_api_key = false;
+                        if let Some(ref key) = p.api_key {
+                            if !key.trim().is_empty() {
+                                if let Err(e) = self
+                                    .ai
+                                    .provider_adapter
+                                    .store_provider_secret(&p.id, key.as_bytes().to_vec())
+                                {
+                                    return JsonRpcResponse::error(
+                                        req_id,
+                                        hime_ipc::protocol::INTERNAL_ERROR,
+                                        format!("Failed to store API key: {}", e),
+                                        None,
+                                    );
+                                }
+                                has_api_key = true;
+                            }
+                        } else {
+                            has_api_key = self
+                                .ai
+                                .provider_adapter
+                                .retrieve_provider_secret(&p.id)
+                                .ok()
+                                .flatten()
+                                .is_some();
+                        }
+
+                        let mut profile = crate::ai::PriorityProfile::new(
+                            &p.id,
+                            &p.id,
+                            protocol,
+                            &p.base_url,
+                            &p.default_model,
+                            p.priority.max(0) as u32,
+                        );
+                        profile.enabled = p.enabled;
+                        profile.secret_key_id = Some(p.id.clone());
+
+                        let mut profiles = self.ai_profiles.write().await;
+                        if let Some(existing) =
+                            profiles.iter_mut().find(|item| item.profile_id == p.id)
+                        {
+                            *existing = profile.clone();
+                        } else {
+                            profiles.push(profile.clone());
+                        }
+                        profiles.sort_by_key(|item| item.priority);
+
+                        let summary = hime_ipc::protocol::AiProfileSummary {
+                            id: p.id,
+                            name: p.name,
+                            adapter_kind: protocol.as_str().to_string(),
+                            base_url: p.base_url,
+                            default_model: p.default_model,
+                            priority: p.priority,
+                            enabled: p.enabled,
+                            has_api_key,
+                        };
+                        JsonRpcResponse::success(
+                            req_id,
+                            serde_json::to_value(summary).unwrap_or_default(),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        format!("Invalid ai.profiles.upsert params: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "ai.profiles.test" => {
+                let params = req.params.unwrap_or_default();
+                let profile_id = params
+                    .get("profile_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let profile_opt = {
+                    let profiles = self.ai_profiles.read().await;
+                    profiles
+                        .iter()
+                        .find(|p| p.profile_id == profile_id)
+                        .cloned()
+                };
+                let Some(profile) = profile_opt else {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        format!("Profile '{}' not found", profile_id),
+                        None,
+                    );
+                };
+
+                let started = std::time::Instant::now();
+                let secret = self
+                    .ai
+                    .provider_adapter
+                    .retrieve_provider_secret_string(profile.effective_secret_key_id())
+                    .ok()
+                    .flatten();
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build();
+                let (ok, message) = match client {
+                    Ok(c) => {
+                        let url = match profile.protocol {
+                            crate::ai::ProtocolKind::OpenAiCompat => {
+                                crate::ai::provider_adapter::OpenAiCompatAdapter::build_models_url(
+                                    &profile.base_url,
+                                )
+                            }
+                            _ => profile.base_url.clone(),
+                        };
+                        let mut req_builder = c.get(&url);
+                        if let Some(ref key) = secret {
+                            req_builder = req_builder.bearer_auth(key.as_str());
+                        }
+                        match req_builder.send().await {
+                            Ok(r) if r.status().is_success() => {
+                                (true, format!("Connected ({})", r.status()))
+                            }
+                            Ok(r) => (false, format!("HTTP {}", r.status())),
+                            Err(e) => (false, format!("Connection failed: {}", e)),
+                        }
+                    }
+                    Err(e) => (false, format!("HTTP client error: {}", e)),
+                };
+                let resp = hime_ipc::protocol::AiProfileTestResponse {
+                    contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                    profile_id: profile.profile_id,
+                    ok,
+                    latency_ms: Some(started.elapsed().as_millis() as u64),
+                    message,
+                };
+                JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+            }
+
+            "ai.memory.list" => {
+                let params = req.params.unwrap_or_default();
+                let parsed =
+                    serde_json::from_value::<hime_ipc::protocol::AiMemoryListParams>(params)
+                        .unwrap_or_default();
+                let limit = parsed.limit.unwrap_or(50);
+                let records_res = if let Some(ref q) = parsed.query {
+                    if !q.trim().is_empty() {
+                        self.ai.memory_engine.search_memories(q, limit)
+                    } else {
+                        let layer = parsed
+                            .layer
+                            .as_deref()
+                            .map(crate::ai::memory::MemoryLayer::from_str_lossy);
+                        self.ai.memory_engine.list_memories_by_layer(layer, None)
+                    }
+                } else {
+                    let layer = parsed
+                        .layer
+                        .as_deref()
+                        .map(crate::ai::memory::MemoryLayer::from_str_lossy);
+                    self.ai.memory_engine.list_memories_by_layer(layer, None)
+                };
+                match records_res {
+                    Ok(records) => {
+                        let entries = records
+                            .into_iter()
+                            .take(limit)
+                            .map(|r| hime_ipc::protocol::AiMemoryEntryDto {
+                                id: r.id,
+                                layer: r.memory_layer,
+                                content: r.content,
+                                source_provenance: r.source,
+                                pinned: r.retention_policy == "pinned",
+                                score: Some((r.relevance_score * 100.0) as i64),
+                                created_at: r.created_at,
+                                updated_at: r.updated_at,
+                            })
+                            .collect();
+                        let resp = hime_ipc::protocol::AiMemoryListResponse {
+                            contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                            entries,
+                        };
+                        JsonRpcResponse::success(
+                            req_id,
+                            serde_json::to_value(resp).unwrap_or_default(),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        e,
+                        None,
+                    ),
+                }
+            }
+
+            "ai.memory.delete" => {
+                let params = req.params.unwrap_or_default();
+                let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if id.is_empty() {
+                    return JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        "id parameter is required",
+                        None,
+                    );
+                }
+                match self.ai.memory_engine.delete_memory(id) {
+                    Ok(deleted) => {
+                        let resp = hime_ipc::protocol::AiMemoryDeleteResponse {
+                            contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                            id: id.to_string(),
+                            deleted,
+                        };
+                        JsonRpcResponse::success(
+                            req_id,
+                            serde_json::to_value(resp).unwrap_or_default(),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        e,
+                        None,
+                    ),
+                }
+            }
+
+            "ai.skills.list" => {
+                let skills = self
+                    .skills_registry
+                    .list_skills()
+                    .into_iter()
+                    .map(|s| hime_ipc::protocol::AiSkillDescriptorDto {
+                        id: s.id,
+                        name: s.name,
+                        description: s.description,
+                        risk_level: format!("{:?}", s.risk_level),
+                        triggers: s.keywords,
+                        builtin: s.is_builtin,
+                        enabled: s.enabled,
+                    })
+                    .collect();
+                let resp = hime_ipc::protocol::AiSkillsListResponse {
+                    contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                    skills,
+                };
+                JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+            }
+
+            "ai.skills.reload" => match self.skills_registry.reload_skills() {
+                Ok(reloaded_count) => {
+                    let skills = self
+                        .skills_registry
+                        .list_skills()
+                        .into_iter()
+                        .map(|s| hime_ipc::protocol::AiSkillDescriptorDto {
+                            id: s.id,
+                            name: s.name,
+                            description: s.description,
+                            risk_level: format!("{:?}", s.risk_level),
+                            triggers: s.keywords,
+                            builtin: s.is_builtin,
+                            enabled: s.enabled,
+                        })
+                        .collect();
+                    let resp = hime_ipc::protocol::AiSkillsReloadResponse {
+                        contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                        reloaded_count,
+                        skills,
+                    };
+                    JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(resp).unwrap_or_default(),
+                    )
+                }
+                Err(e) => {
+                    JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None)
+                }
+            },
+
+            "ai.mcp.list" => {
+                let statuses = self.mcp_host.list_servers().await;
+                let all_tools = self.mcp_host.list_all_tools().await;
+                let servers = statuses
+                    .into_iter()
+                    .map(|st| {
+                        let tools = all_tools
+                            .iter()
+                            .filter(|(srv, _, _)| srv == &st.name)
+                            .map(|(_, desc, _)| desc.name.clone())
+                            .collect();
+                        hime_ipc::protocol::AiMcpServerDto {
+                            name: st.name,
+                            transport: st.transport,
+                            connected: st.connected,
+                            tool_count: st.tool_count,
+                            tools,
+                        }
+                    })
+                    .collect();
+                let resp = hime_ipc::protocol::AiMcpListResponse {
+                    contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                    servers,
+                };
+                JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+            }
+
+            "ai.mcp.reload" => match self.mcp_host.reload_servers().await {
+                Ok(statuses) => {
+                    let total_tools = statuses.iter().map(|s| s.tool_count).sum();
+                    let resp = hime_ipc::protocol::AiMcpReloadResponse {
+                        contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                        reloaded_servers: statuses.len(),
+                        total_tools,
+                    };
+                    JsonRpcResponse::success(
+                        req_id,
+                        serde_json::to_value(resp).unwrap_or_default(),
+                    )
+                }
+                Err(e) => {
+                    JsonRpcResponse::error(req_id, hime_ipc::protocol::INTERNAL_ERROR, e, None)
+                }
+            },
+
+            "ai.mcp.call_tool" => {
+                let params = req.params.unwrap_or_default();
+                match serde_json::from_value::<hime_ipc::protocol::AiMcpCallToolParams>(params) {
+                    Ok(p) => {
+                        let tool_id =
+                            crate::ai::mcp_client::format_mcp_tool_id(&p.server, &p.tool);
+                        let decision = self.policy.evaluate(
+                            "default_client",
+                            &Action::FileWrite {
+                                path: tool_id.clone(),
+                            },
+                        );
+                        match decision {
+                            PolicyDecision::Deny { reason } => JsonRpcResponse::error(
+                                req_id,
+                                POLICY_VIOLATION,
+                                format!("MCP tool blocked by policy: {}", reason),
+                                None,
+                            ),
+                            PolicyDecision::RequireUserApproval { description } if !p.approved => {
+                                JsonRpcResponse::error(
+                                    req_id,
+                                    POLICY_VIOLATION,
+                                    format!("User approval required: {}", description),
+                                    None,
+                                )
+                            }
+                            _ => match self
+                                .mcp_host
+                                .call_tool(&p.server, &p.tool, p.arguments)
+                                .await
+                            {
+                                Ok(output) => {
+                                    let resp = hime_ipc::protocol::AiMcpCallToolResponse {
+                                        contract_version:
+                                            hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                                        server: p.server,
+                                        tool: p.tool,
+                                        ok: true,
+                                        output,
+                                        error: None,
+                                    };
+                                    JsonRpcResponse::success(
+                                        req_id,
+                                        serde_json::to_value(resp).unwrap_or_default(),
+                                    )
+                                }
+                                Err(e) => {
+                                    let resp = hime_ipc::protocol::AiMcpCallToolResponse {
+                                        contract_version:
+                                            hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                                        server: p.server,
+                                        tool: p.tool,
+                                        ok: false,
+                                        output: serde_json::Value::Null,
+                                        error: Some(e),
+                                    };
+                                    JsonRpcResponse::success(
+                                        req_id,
+                                        serde_json::to_value(resp).unwrap_or_default(),
+                                    )
+                                }
+                            },
+                        }
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        format!("Invalid ai.mcp.call_tool params: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            // =========================================================================
+            // ADR-017: Modular Installer Endpoints
+            // =========================================================================
+            "module.status" => {
+                let params = req.params.unwrap_or_default();
+                let module_id = params
+                    .get("module_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("hime-ai");
+                match self.module_installer.status(module_id) {
+                    Ok(st) => {
+                        let active_path = st.active_version.as_ref().and_then(|v| {
+                            self.module_installer
+                                .version_dir(module_id, v)
+                                .ok()
+                                .map(|p| p.to_string_lossy().to_string())
+                        });
+                        let resp = hime_ipc::protocol::ModuleStatusResponse {
+                            contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                            module_id: st.module_id,
+                            installed: st.active_version.is_some(),
+                            active_version: st.active_version,
+                            previous_version: st.previous_version,
+                            active_path,
+                            state: st.state,
+                        };
+                        JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        e.to_string(),
+                        None,
+                    ),
+                }
+            }
+
+            "module.install" => {
+                let params = req.params.unwrap_or_default();
+                match serde_json::from_value::<hime_ipc::protocol::ModuleInstallParams>(params) {
+                    Ok(parsed) => {
+                        let manifest = crate::module_installer::ModulePackageManifest {
+                            version: parsed.manifest.version,
+                            download_url: parsed.manifest.download_url,
+                            sha256: parsed.manifest.sha256,
+                            min_shell_version: parsed.manifest.min_shell_version,
+                        };
+                        let installer = Arc::clone(&self.module_installer);
+                        let shell_ver = parsed.shell_version;
+                        let res = installer
+                            .install_with_handshake(
+                                &parsed.module_id,
+                                &manifest,
+                                shell_ver.as_deref(),
+                                |staged_path| async move {
+                                    if staged_path.exists() {
+                                        Ok(())
+                                    } else {
+                                        Err("Staged module directory missing".to_string())
+                                    }
+                                },
+                            )
+                            .await;
+                        match res {
+                            Ok(outcome) => {
+                                let resp = hime_ipc::protocol::ModuleInstallResponse {
+                                    contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION
+                                        .to_string(),
+                                    module_id: outcome.module_id,
+                                    installed_version: outcome.installed_version,
+                                    active_path: outcome.active_path.to_string_lossy().to_string(),
+                                    rolled_back: outcome.rolled_back,
+                                    status: outcome.status,
+                                };
+                                JsonRpcResponse::success(
+                                    req_id,
+                                    serde_json::to_value(resp).unwrap_or_default(),
+                                )
+                            }
+                            Err(e) => JsonRpcResponse::error(
+                                req_id,
+                                hime_ipc::protocol::INTERNAL_ERROR,
+                                e.to_string(),
+                                None,
+                            ),
+                        }
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INVALID_PARAMS,
+                        format!("Invalid module.install params: {}", e),
+                        None,
+                    ),
+                }
+            }
+
+            "module.rollback" => {
+                let params = req.params.unwrap_or_default();
+                let module_id = params
+                    .get("module_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("hime-ai");
+                let reason = params.get("reason").and_then(|v| v.as_str());
+                match self.module_installer.rollback(module_id, reason) {
+                    Ok(rb) => {
+                        let resp = hime_ipc::protocol::ModuleRollbackResponse {
+                            contract_version: hime_ipc::protocol::IPC_CONTRACT_VERSION.to_string(),
+                            module_id: rb.module_id,
+                            restored_version: rb.restored_version,
+                            status: rb.status,
+                        };
+                        JsonRpcResponse::success(req_id, serde_json::to_value(resp).unwrap_or_default())
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req_id,
+                        hime_ipc::protocol::INTERNAL_ERROR,
+                        e.to_string(),
+                        None,
+                    ),
+                }
+            }
+
             other => JsonRpcResponse::error(
                 req_id,
                 METHOD_NOT_FOUND,
@@ -2776,5 +3421,101 @@ impl CoreServer {
                 None,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hime_ipc::protocol::methods;
+
+    #[tokio::test]
+    async fn test_adr017_ipc_profiles_memory_skills_mcp_dispatch() {
+        let server = CoreServer::new_in_memory("test-token".to_string()).unwrap();
+
+        // 1. ai.profiles.list
+        let list_resp = server
+            .dispatch_rpc(JsonRpcRequest::new("1", methods::AI_PROFILES_LIST, None))
+            .await;
+        assert!(list_resp.error.is_none());
+        let list_dto: hime_ipc::protocol::AiProfilesListResponse =
+            serde_json::from_value(list_resp.result.unwrap()).unwrap();
+        assert!(!list_dto.profiles.is_empty());
+
+        // 2. ai.profiles.upsert
+        let upsert_params = hime_ipc::protocol::AiProfileUpsertParams {
+            contract_version: "v1".to_string(),
+            id: "test-gemini".to_string(),
+            name: "Test Gemini".to_string(),
+            adapter_kind: "gemini-native".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            default_model: "gemini-2.5-flash".to_string(),
+            priority: 1,
+            enabled: true,
+            api_key: Some("AIza-unit-test".to_string()),
+        };
+        let upsert_resp = server
+            .dispatch_rpc(JsonRpcRequest::new(
+                "2",
+                methods::AI_PROFILES_UPSERT,
+                Some(serde_json::to_value(upsert_params).unwrap()),
+            ))
+            .await;
+        assert!(upsert_resp.error.is_none());
+        let summary: hime_ipc::protocol::AiProfileSummary =
+            serde_json::from_value(upsert_resp.result.unwrap()).unwrap();
+        assert_eq!(summary.id, "test-gemini");
+        assert!(summary.has_api_key);
+
+        // 3. ai.memory.list & ai.memory.delete
+        server
+            .ai
+            .memory_engine
+            .insert_memory("mem-test-1", "chat", "preference", "Use dark mode", 0.9, "persistent")
+            .unwrap();
+        let mem_list = server
+            .dispatch_rpc(JsonRpcRequest::new("3", methods::AI_MEMORY_LIST, None))
+            .await;
+        assert!(mem_list.error.is_none());
+        let mem_dto: hime_ipc::protocol::AiMemoryListResponse =
+            serde_json::from_value(mem_list.result.unwrap()).unwrap();
+        assert!(mem_dto.entries.iter().any(|e| e.id == "mem-test-1"));
+
+        let mem_del = server
+            .dispatch_rpc(JsonRpcRequest::new(
+                "4",
+                methods::AI_MEMORY_DELETE,
+                Some(serde_json::json!({ "id": "mem-test-1" })),
+            ))
+            .await;
+        assert!(mem_del.error.is_none());
+        let del_dto: hime_ipc::protocol::AiMemoryDeleteResponse =
+            serde_json::from_value(mem_del.result.unwrap()).unwrap();
+        assert!(del_dto.deleted);
+
+        // 4. ai.skills.list & ai.skills.reload
+        let skills_resp = server
+            .dispatch_rpc(JsonRpcRequest::new("5", methods::AI_SKILLS_LIST, None))
+            .await;
+        assert!(skills_resp.error.is_none());
+        let skills_dto: hime_ipc::protocol::AiSkillsListResponse =
+            serde_json::from_value(skills_resp.result.unwrap()).unwrap();
+        assert!(skills_dto.skills.len() >= 4);
+
+        // 5. ai.mcp.list
+        let mcp_resp = server
+            .dispatch_rpc(JsonRpcRequest::new("6", methods::AI_MCP_LIST, None))
+            .await;
+        assert!(mcp_resp.error.is_none());
+
+        // 6. module.status
+        let mod_resp = server
+            .dispatch_rpc(JsonRpcRequest::new(
+                "7",
+                methods::MODULE_STATUS,
+                Some(serde_json::json!({ "module_id": "hime-ai" })),
+            ))
+            .await;
+        assert!(mod_resp.error.is_none());
     }
 }

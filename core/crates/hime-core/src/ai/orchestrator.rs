@@ -9,10 +9,12 @@ use hime_storage::Database;
 use super::conversation::ConversationService;
 use super::event_engine::EventEngine;
 use super::hermes_adapter::{AgentActivityEvent, HermesRuntimeAdapter, HermesRuntimeStatus};
+use super::mcp_client::McpClientHost;
 use super::memory::MemoryEngine;
 use super::provider_adapter::{ModelInfo, ProviderCredentialAdapter};
 use super::resource::ResourceManager;
 use super::router_gateway::{RouterGatewayAdapter, RouterHealthStatus};
+use super::skills_registry::SkillsRegistry;
 use super::task_engine::TaskEngine;
 use super::tools::{ToolGateway, ToolResult};
 use super::translation::TranslationService;
@@ -62,6 +64,8 @@ pub struct AiOrchestrator {
     pub task_engine: Arc<TaskEngine>,
     pub event_engine: Arc<EventEngine>,
     pub memory_engine: Arc<MemoryEngine>,
+    pub skills_registry: Arc<SkillsRegistry>,
+    pub mcp_host: Arc<McpClientHost>,
     pub resource_manager: Arc<ResourceManager>,
     pub translation_service: Arc<TranslationService>,
     pub event_bus: EventBus,
@@ -82,7 +86,7 @@ impl AiOrchestrator {
         ));
         let router_gateway = Arc::new(RouterGatewayAdapter::new(20128));
         let hermes_adapter = Arc::new(HermesRuntimeAdapter::new(
-            format!("http://127.0.0.1:{}/v1", loopback_adapter_port),
+            "http://127.0.0.1:20128/v1".to_string(),
             Arc::clone(&storage),
         ));
         let conversation_service = Arc::new(ConversationService::new(Arc::clone(&storage)));
@@ -92,6 +96,7 @@ impl AiOrchestrator {
             Arc::clone(&policy),
             event_bus.clone(),
         ));
+        hermes_adapter.set_tool_gateway(Arc::clone(&tool_gateway));
         let task_engine = Arc::new(TaskEngine::new(
             Arc::clone(&storage),
             Arc::clone(&resource_manager),
@@ -99,6 +104,9 @@ impl AiOrchestrator {
         ));
         let event_engine = Arc::new(EventEngine::new(event_bus.clone(), 200));
         let memory_engine = Arc::new(MemoryEngine::new(Arc::clone(&storage)));
+        let skills_registry = Arc::new(SkillsRegistry::new());
+        let mcp_host = Arc::new(McpClientHost::new());
+        tool_gateway.set_mcp_host(Arc::clone(&mcp_host));
         let translation_service = Arc::new(TranslationService::new(event_bus.clone(), true));
 
         Self {
@@ -110,6 +118,8 @@ impl AiOrchestrator {
             task_engine,
             event_engine,
             memory_engine,
+            skills_registry,
+            mcp_host,
             resource_manager,
             translation_service,
             event_bus,
@@ -164,6 +174,40 @@ impl AiOrchestrator {
             .await
     }
 
+    /// Builds a combined system context block from relevant long-term memories
+    /// and matched dynamic/built-in skills for the given user prompt.
+    pub fn build_system_context_injection(&self, user_prompt: &str) -> String {
+        let mut sections = Vec::new();
+
+        let memories = self.memory_engine.build_prompt_context(user_prompt, 512);
+        if !memories.is_empty() {
+            let mut mem_block = String::from("## Relevant User Memory\n");
+            for m in memories {
+                mem_block.push_str(&format!("- [{} / {}] {}\n", m.memory_layer, m.category, m.content));
+            }
+            sections.push(mem_block);
+        }
+
+        let skills_block = self
+            .skills_registry
+            .build_skills_prompt_injection(user_prompt, 3);
+        if !skills_block.trim().is_empty() {
+            sections.push(skills_block);
+        }
+
+        sections.join("\n")
+    }
+
+    /// Prepends relevant memory and skill instructions before the user prompt when available.
+    pub fn build_enriched_prompt(&self, user_prompt: &str) -> String {
+        let ctx = self.build_system_context_injection(user_prompt);
+        if ctx.is_empty() {
+            user_prompt.to_string()
+        } else {
+            format!("<hime_context>\n{}\n</hime_context>\n\n{}", ctx.trim(), user_prompt)
+        }
+    }
+
     /// Dispatches a prompt through the end-to-end AI orchestration pipeline with optional model override.
     pub async fn execute_chat_prompt_with_model(
         &self,
@@ -176,6 +220,9 @@ impl AiOrchestrator {
             .conversation_service
             .add_user_message(conversation_id, user_prompt)
             .map_err(|e| format!("Failed to record user message: {}", e))?;
+
+        // Step 1b: Inject relevant memory & matched skill instructions
+        let enriched_prompt = self.build_enriched_prompt(user_prompt);
 
         // Step 2: Channel for capturing real-time agent activity events
         let (event_tx, mut event_rx) = mpsc::channel::<AgentActivityEvent>(64);
@@ -193,7 +240,7 @@ impl AiOrchestrator {
         // Step 3: Execute turn through Hermes adapter
         let response_text = self
             .hermes_adapter
-            .execute_turn_with_model(conversation_id, user_prompt, model_override, event_tx)
+            .execute_turn_with_model(conversation_id, &enriched_prompt, model_override, event_tx)
             .await?;
 
         // Step 4: Persist assistant message in SQLite WAL
@@ -201,6 +248,14 @@ impl AiOrchestrator {
             .conversation_service
             .add_assistant_message(conversation_id, &response_text, Some(response_text.len() as i64 / 4))
             .map_err(|e| format!("Failed to record assistant message: {}", e))?;
+
+        // Step 5: Auto-learn preferences/tasks/habits from completed turn
+        if let Err(err) = self
+            .memory_engine
+            .extract_and_learn_from_turn(user_prompt, &response_text)
+        {
+            warn!(error = %err, "Auto-learning memory extraction failed");
+        }
 
         info!(
             conversation_id = %conversation_id,
@@ -397,5 +452,82 @@ mod tests {
         assert!(!summary.success);
         assert!(summary.loop_detected);
         assert!(summary.synthesized_output.contains("infinite loop"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_chat_tool_calling_launch_app() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let orchestrator = AiOrchestrator::new(storage, policy, event_bus, 20129);
+
+        let conv = orchestrator.conversation_service.create_conversation("test", "test-model").unwrap();
+        let resp = orchestrator.execute_chat_prompt(&conv.id, "bukakan aplikasi calc").await.unwrap();
+        assert!(resp.contains("calc") || resp.contains("berhasil dibuka"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_chat_tool_calling_execute_command() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let orchestrator = AiOrchestrator::new(storage, policy, event_bus, 20129);
+
+        let conv = orchestrator.conversation_service.create_conversation("test", "test-model").unwrap();
+        let resp = orchestrator.execute_chat_prompt(&conv.id, "jalankan command Write-Output 'TEST_ORCH_OK'").await.unwrap();
+        assert!(resp.contains("TEST_ORCH_OK") || resp.contains("Eksekusi Perintah"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_chat_tool_calling_manage_filesystem() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let orchestrator = AiOrchestrator::new(storage, policy, event_bus, 20129);
+
+        let conv = orchestrator.conversation_service.create_conversation("test", "test-model").unwrap();
+        let resp = orchestrator.execute_chat_prompt(&conv.id, "bantu saya mengatur file di folder src").await.unwrap();
+        assert!(resp.contains("Manajemen Berkas") || resp.contains("Daftar berkas"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_memory_and_skills_injection_and_autolearn() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let policy = Arc::new(PolicyEngine::new());
+        let event_bus = EventBus::new(128);
+        let orchestrator = AiOrchestrator::new(storage, policy, event_bus, 20129);
+
+        orchestrator
+            .memory_engine
+            .insert_memory(
+                "mem-pref-1",
+                "user",
+                "preference",
+                "User prefers dark mode and concise Indonesian replies for reminder tasks",
+                1.0,
+                "permanent",
+            )
+            .unwrap();
+
+        let injected = orchestrator.build_system_context_injection("tolong buatkan reminder tugas");
+        assert!(injected.contains("Relevant User Memory"));
+        assert!(injected.contains("dark mode"));
+        assert!(injected.contains("Active Relevant Skills"));
+
+        let enriched = orchestrator.build_enriched_prompt("tolong buatkan reminder tugas");
+        assert!(enriched.starts_with("<hime_context>"));
+        assert!(enriched.ends_with("tolong buatkan reminder tugas"));
+
+        // Auto-learn from a turn
+        let conv = orchestrator.conversation_service.create_conversation("test", "test-model").unwrap();
+        let _ = orchestrator
+            .execute_chat_prompt(&conv.id, "tolong bukakan aplikasi calc")
+            .await
+            .unwrap();
+        let learned = orchestrator
+            .memory_engine
+            .extract_and_learn_from_turn("Saya lebih suka jawaban ringkas dalam Bahasa Indonesia", "Baik!")
+            .unwrap();
+        assert!(!learned.is_empty());
     }
 }

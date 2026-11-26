@@ -43,6 +43,10 @@ pub enum PolicyDecision {
 
 pub trait PolicyEnforcer: Send + Sync {
     fn evaluate(&self, client_id: &str, action: &Action) -> PolicyDecision;
+    fn is_superadmin(&self) -> bool {
+        false
+    }
+    fn set_superadmin(&self, _enabled: bool) {}
 }
 
 /// Comprehensive Declarative Security Policy Engine for Hime Core.
@@ -54,10 +58,18 @@ pub struct PolicyEngine {
     sensitive_path_keywords: Vec<String>,
     forbidden_command_patterns: Vec<String>,
     reserved_device_names: Vec<String>,
+    superadmin_mode: std::sync::atomic::AtomicBool,
 }
 
 impl PolicyEngine {
     pub fn new() -> Self {
+        let superadmin = std::env::var("HIME_SUPERADMIN")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        Self::with_superadmin(superadmin)
+    }
+
+    pub fn with_superadmin(superadmin: bool) -> Self {
         Self {
             restricted_prefixes: vec![
                 r"c:\windows".to_string(),
@@ -117,7 +129,16 @@ impl PolicyEngine {
                 "lpt8".to_string(),
                 "lpt9".to_string(),
             ],
+            superadmin_mode: std::sync::atomic::AtomicBool::new(superadmin),
         }
+    }
+
+    pub fn is_superadmin(&self) -> bool {
+        self.superadmin_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_superadmin(&self, enabled: bool) {
+        self.superadmin_mode.store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Verifies whether a path string contains path traversal tokens or dangerous constructs.
@@ -149,6 +170,11 @@ impl PolicyEngine {
                 "Path refers to reserved Windows device name '{}'",
                 file_stem
             ));
+        }
+
+        // If in Superadmin mode, allow accessing system directories and custom paths without restriction
+        if self.is_superadmin() {
+            return Ok(());
         }
 
         // 4. Detect System Directory Access
@@ -187,7 +213,37 @@ impl Default for PolicyEngine {
 }
 
 impl PolicyEnforcer for PolicyEngine {
+    fn is_superadmin(&self) -> bool {
+        self.superadmin_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_superadmin(&self, enabled: bool) {
+        self.superadmin_mode.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn evaluate(&self, _client_id: &str, action: &Action) -> PolicyDecision {
+        // In Superadmin mode, grant unrestricted execution for system operations and tools
+        if self.is_superadmin() {
+            match action {
+                Action::ExecuteProcess { binary, args } => {
+                    // Prevent catastrophic self-destruction patterns like rm -rf / or format
+                    if self.is_forbidden_command(binary, args) {
+                        return PolicyDecision::Deny {
+                            reason: "Command contains forbidden destructive patterns".to_string(),
+                        };
+                    }
+                    return PolicyDecision::Allow;
+                }
+                Action::FileRead { path } | Action::FileWrite { path } | Action::FileDelete { path } => {
+                    if let Err(reason) = self.validate_path_safety(path) {
+                        return PolicyDecision::Deny { reason };
+                    }
+                    return PolicyDecision::Allow;
+                }
+                _ => return PolicyDecision::Allow,
+            }
+        }
+
         match action {
             Action::SystemPing | Action::SystemInfo => PolicyDecision::Allow,
 
@@ -418,6 +474,53 @@ mod tests {
                 }
             ),
             PolicyDecision::RequireUserApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn test_superadmin_mode() {
+        let policy = PolicyEngine::with_superadmin(true);
+        assert!(policy.is_superadmin());
+
+        // FileWrite allowed without approval
+        assert_eq!(
+            policy.evaluate(
+                "client",
+                &Action::FileWrite {
+                    path: r"C:\Windows\System32\drivers\etc\hosts".to_string()
+                }
+            ),
+            PolicyDecision::Allow
+        );
+
+        // System directories accessible in superadmin mode
+        assert!(policy.validate_path_safety(r"C:\Windows\System32\notepad.exe").is_ok());
+        assert!(policy.validate_path_safety(r"C:\Program Files\App\config.json").is_ok());
+
+        // ToolCall L4 allowed directly without blocking approval hurdles
+        assert_eq!(
+            policy.evaluate(
+                "client",
+                &Action::ToolCall {
+                    tool_id: "system.execute_task".to_string(),
+                    domain: "system".to_string(),
+                    level: RiskLevel::L4System,
+                    payload: "{}".to_string()
+                }
+            ),
+            PolicyDecision::Allow
+        );
+
+        // Destructive catastrophic patterns still rejected for safety
+        assert!(matches!(
+            policy.evaluate(
+                "client",
+                &Action::ExecuteProcess {
+                    binary: "cmd.exe".to_string(),
+                    args: vec!["/c".to_string(), "format c:".to_string()]
+                }
+            ),
+            PolicyDecision::Deny { .. }
         ));
     }
 }

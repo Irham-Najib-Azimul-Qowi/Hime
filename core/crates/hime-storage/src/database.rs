@@ -143,9 +143,13 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 source TEXT NOT NULL,
                 category TEXT NOT NULL,
+                memory_layer TEXT NOT NULL DEFAULT 'semantic',
                 content TEXT NOT NULL,
                 relevance_score REAL DEFAULT 1.0,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at INTEGER NOT NULL DEFAULT 0,
                 retention_policy TEXT NOT NULL,
+                content_hash TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -564,6 +568,48 @@ impl Database {
             let _ = conn.execute("ALTER TABLE screen_time_sessions ADD COLUMN date_str TEXT NOT NULL DEFAULT ''", []);
         }
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_screen_time_date ON screen_time_sessions(date_str)", []);
+
+        // Ensure backward compatibility if memory_items already existed without layer/decay/hash columns
+        let mut pragma_mem_stmt = conn.prepare("PRAGMA table_info(memory_items)")?;
+        let mem_rows = pragma_mem_stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let existing_mem_cols: Vec<String> = mem_rows.filter_map(Result::ok).collect();
+        if !existing_mem_cols.iter().any(|c| c == "memory_layer") {
+            let _ = conn.execute("ALTER TABLE memory_items ADD COLUMN memory_layer TEXT NOT NULL DEFAULT 'semantic'", []);
+        }
+        if !existing_mem_cols.iter().any(|c| c == "access_count") {
+            let _ = conn.execute("ALTER TABLE memory_items ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0", []);
+        }
+        if !existing_mem_cols.iter().any(|c| c == "last_accessed_at") {
+            let _ = conn.execute("ALTER TABLE memory_items ADD COLUMN last_accessed_at INTEGER NOT NULL DEFAULT 0", []);
+        }
+        if !existing_mem_cols.iter().any(|c| c == "content_hash") {
+            let _ = conn.execute("ALTER TABLE memory_items ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''", []);
+        }
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_layer ON memory_items(memory_layer)", []);
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_items(category)", []);
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_hash ON memory_items(content_hash)", []);
+        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_score ON memory_items(relevance_score DESC, updated_at DESC)", []);
+
+        // Probe and initialize FTS5 virtual table for fast memory search (fallback to indexed LIKE if unavailable)
+        if conn
+            .execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
+                    id UNINDEXED,
+                    category,
+                    memory_layer,
+                    content,
+                    tokenize='unicode61'
+                );",
+            )
+            .is_ok()
+        {
+            let _ = conn.execute(
+                "INSERT INTO memory_items_fts (id, category, memory_layer, content)
+                 SELECT id, category, memory_layer, content FROM memory_items
+                 WHERE id NOT IN (SELECT id FROM memory_items_fts)",
+                [],
+            );
+        }
 
         Ok(())
     }
@@ -1080,50 +1126,155 @@ impl Database {
         relevance_score: f64,
         retention_policy: &str,
     ) -> Result<MemoryRecord, StorageError> {
+        self.insert_memory_item_layered(
+            id,
+            source,
+            category,
+            "semantic",
+            content,
+            relevance_score,
+            retention_policy,
+        )
+    }
+
+    pub fn insert_memory_item_layered(
+        &self,
+        id: &str,
+        source: &str,
+        category: &str,
+        memory_layer: &str,
+        content: &str,
+        relevance_score: f64,
+        retention_policy: &str,
+    ) -> Result<MemoryRecord, StorageError> {
         let conn = self.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        conn.execute(
-            "INSERT INTO memory_items (id, source, category, content, relevance_score, retention_policy, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT(id) DO UPDATE SET content = ?4, relevance_score = ?5, retention_policy = ?6, updated_at = ?7",
-            rusqlite::params![id, source, category, content, relevance_score, retention_policy, now],
-        )?;
+        let layer = normalize_memory_layer(memory_layer);
+        let content_hash = memory_content_hash(content);
 
-        Ok(MemoryRecord {
-            id: id.to_string(),
-            source: source.to_string(),
-            category: category.to_string(),
-            content: content.to_string(),
-            relevance_score,
-            retention_policy: retention_policy.to_string(),
-            created_at: now,
-            updated_at: now,
-        })
+        // 1. Deduplicate exact hash match or high token-overlap near-duplicate
+        let dup_candidate: Option<MemoryRecord> = {
+            let mut hash_stmt = conn.prepare(
+                "SELECT id, source, category, memory_layer, content, relevance_score,
+                        access_count, last_accessed_at, retention_policy, created_at, updated_at
+                 FROM memory_items
+                 WHERE content_hash = ?1 AND id != ?2
+                 LIMIT 1",
+            )?;
+            let mut hash_rows = hash_stmt.query(rusqlite::params![content_hash, id])?;
+            if let Some(row) = hash_rows.next()? {
+                Some(map_memory_record(row)?)
+            } else {
+                let mut layer_stmt = conn.prepare(
+                    "SELECT id, source, category, memory_layer, content, relevance_score,
+                            access_count, last_accessed_at, retention_policy, created_at, updated_at
+                     FROM memory_items
+                     WHERE memory_layer = ?1 AND id != ?2
+                     ORDER BY updated_at DESC
+                     LIMIT 50",
+                )?;
+                let rows = layer_stmt.query_map(rusqlite::params![layer, id], map_memory_record)?;
+                let mut found = None;
+                for r in rows.flatten() {
+                    if token_jaccard_similarity(&r.content, content) >= 0.82 {
+                        found = Some(r);
+                        break;
+                    }
+                }
+                found
+            }
+        };
+
+        if let Some(mut existing) = dup_candidate {
+            let new_access = existing.access_count + 1;
+            let new_score = existing.relevance_score.max(relevance_score);
+            let (final_content, final_hash) = if content.len() > existing.content.len() {
+                (content.to_string(), content_hash)
+            } else {
+                (
+                    existing.content.clone(),
+                    memory_content_hash(&existing.content),
+                )
+            };
+
+            conn.execute(
+                "UPDATE memory_items
+                 SET content = ?2, content_hash = ?3, relevance_score = ?4,
+                     access_count = ?5, last_accessed_at = ?6, updated_at = ?6
+                 WHERE id = ?1",
+                rusqlite::params![
+                    existing.id,
+                    final_content,
+                    final_hash,
+                    new_score,
+                    new_access,
+                    now
+                ],
+            )?;
+            sync_memory_fts_row(&conn, &existing.id, &existing.category, &existing.memory_layer, &final_content);
+
+            existing.content = final_content;
+            existing.relevance_score = new_score;
+            existing.access_count = new_access;
+            existing.last_accessed_at = now;
+            existing.updated_at = now;
+            return Ok(existing);
+        }
+
+        // 2. Insert new or update by explicit ID
+        conn.execute(
+            "INSERT INTO memory_items (
+                id, source, category, memory_layer, content, relevance_score,
+                access_count, last_accessed_at, retention_policy, content_hash,
+                created_at, updated_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?8, ?7, ?9, ?8, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                category = ?3,
+                memory_layer = ?4,
+                content = ?5,
+                relevance_score = ?6,
+                retention_policy = ?7,
+                content_hash = ?9,
+                updated_at = ?8",
+            rusqlite::params![
+                id,
+                source,
+                category,
+                layer,
+                content,
+                relevance_score,
+                retention_policy,
+                now,
+                content_hash
+            ],
+        )?;
+        sync_memory_fts_row(&conn, id, category, layer, content);
+
+        let mut stmt = conn.prepare(
+            "SELECT id, source, category, memory_layer, content, relevance_score,
+                    access_count, last_accessed_at, retention_policy, created_at, updated_at
+             FROM memory_items WHERE id = ?1",
+        )?;
+        let record = stmt.query_row(rusqlite::params![id], map_memory_record)?;
+        Ok(record)
     }
 
     pub fn get_memory_item(&self, id: &str) -> Result<Option<MemoryRecord>, StorageError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, source, category, content, relevance_score, retention_policy, created_at, updated_at
+            "SELECT id, source, category, memory_layer, content, relevance_score,
+                    access_count, last_accessed_at, retention_policy, created_at, updated_at
              FROM memory_items WHERE id = ?1",
         )?;
         let mut rows = stmt.query(rusqlite::params![id])?;
 
         if let Some(row) = rows.next()? {
-            Ok(Some(MemoryRecord {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                category: row.get(2)?,
-                content: row.get(3)?,
-                relevance_score: row.get(4)?,
-                retention_policy: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            }))
+            Ok(Some(map_memory_record(row)?))
         } else {
             Ok(None)
         }
@@ -1133,29 +1284,97 @@ impl Database {
         &self,
         category_filter: Option<&str>,
     ) -> Result<Vec<MemoryRecord>, StorageError> {
-        let conn = self.conn.lock().unwrap();
-        let query = if category_filter.is_some() {
-            "SELECT id, source, category, content, relevance_score, retention_policy, created_at, updated_at
-             FROM memory_items WHERE category = ?1 ORDER BY created_at DESC"
-        } else {
-            "SELECT id, source, category, content, relevance_score, retention_policy, created_at, updated_at
-             FROM memory_items ORDER BY created_at DESC"
-        };
+        self.list_memory_items_by_layer(None, category_filter)
+    }
 
-        let mut stmt = conn.prepare(query)?;
+    pub fn list_memory_items_by_layer(
+        &self,
+        layer_filter: Option<&str>,
+        category_filter: Option<&str>,
+    ) -> Result<Vec<MemoryRecord>, StorageError> {
+        let conn = self.conn.lock().unwrap();
         let mut items = Vec::new();
-        if let Some(cat) = category_filter {
-            let rows = stmt.query_map(rusqlite::params![cat], map_memory_record)?;
-            for item in rows {
-                items.push(item?);
+
+        match (layer_filter, category_filter) {
+            (Some(layer), Some(cat)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, source, category, memory_layer, content, relevance_score,
+                            access_count, last_accessed_at, retention_policy, created_at, updated_at
+                     FROM memory_items
+                     WHERE memory_layer = ?1 AND category = ?2
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![normalize_memory_layer(layer), cat], map_memory_record)?;
+                for item in rows {
+                    items.push(item?);
+                }
             }
-        } else {
-            let rows = stmt.query_map([], map_memory_record)?;
-            for item in rows {
-                items.push(item?);
+            (Some(layer), None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, source, category, memory_layer, content, relevance_score,
+                            access_count, last_accessed_at, retention_policy, created_at, updated_at
+                     FROM memory_items
+                     WHERE memory_layer = ?1
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![normalize_memory_layer(layer)], map_memory_record)?;
+                for item in rows {
+                    items.push(item?);
+                }
+            }
+            (None, Some(cat)) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, source, category, memory_layer, content, relevance_score,
+                            access_count, last_accessed_at, retention_policy, created_at, updated_at
+                     FROM memory_items
+                     WHERE category = ?1
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![cat], map_memory_record)?;
+                for item in rows {
+                    items.push(item?);
+                }
+            }
+            (None, None) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, source, category, memory_layer, content, relevance_score,
+                            access_count, last_accessed_at, retention_policy, created_at, updated_at
+                     FROM memory_items
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map([], map_memory_record)?;
+                for item in rows {
+                    items.push(item?);
+                }
             }
         }
         Ok(items)
+    }
+
+    pub fn record_memory_access(&self, id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "UPDATE memory_items
+             SET access_count = access_count + 1, last_accessed_at = ?2
+             WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_memory_fts5(&self) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'memory_items_fts'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     pub fn search_memory_items(
@@ -1164,28 +1383,58 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<MemoryRecord>, StorageError> {
         let conn = self.conn.lock().unwrap();
-        let pattern = format!("%{}%", query);
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            let mut stmt = conn.prepare(
+                "SELECT id, source, category, memory_layer, content, relevance_score,
+                        access_count, last_accessed_at, retention_policy, created_at, updated_at
+                 FROM memory_items
+                 ORDER BY relevance_score DESC, access_count DESC, updated_at DESC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![limit as i64], map_memory_record)?;
+            let mut items = Vec::new();
+            for item in rows {
+                items.push(item?);
+            }
+            return Ok(items);
+        }
+
+        // Try FTS5 first if available
+        if let Some(fts_query) = build_fts5_query(trimmed) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT m.id, m.source, m.category, m.memory_layer, m.content, m.relevance_score,
+                        m.access_count, m.last_accessed_at, m.retention_policy, m.created_at, m.updated_at
+                 FROM memory_items m
+                 JOIN memory_items_fts f ON m.id = f.id
+                 WHERE memory_items_fts MATCH ?1
+                 ORDER BY bm25(memory_items_fts), m.relevance_score DESC, m.access_count DESC
+                 LIMIT ?2",
+            ) {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![fts_query, limit as i64], map_memory_record) {
+                    let mut items = Vec::new();
+                    for item in rows.flatten() {
+                        items.push(item);
+                    }
+                    if !items.is_empty() {
+                        return Ok(items);
+                    }
+                }
+            }
+        }
+
+        // Indexed LIKE fallback (supports substring matches & non-FTS5 builds)
+        let pattern = format!("%{}%", trimmed);
         let mut stmt = conn.prepare(
-            "SELECT id, source, category, content, relevance_score, retention_policy, created_at, updated_at
+            "SELECT id, source, category, memory_layer, content, relevance_score,
+                    access_count, last_accessed_at, retention_policy, created_at, updated_at
              FROM memory_items
-             WHERE content LIKE ?1 OR category LIKE ?1
-             ORDER BY relevance_score DESC, updated_at DESC
+             WHERE content LIKE ?1 OR category LIKE ?1 OR memory_layer LIKE ?1
+             ORDER BY relevance_score DESC, access_count DESC, updated_at DESC
              LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
-            Ok(MemoryRecord {
-                id: row.get(0)?,
-                source: row.get(1)?,
-                category: row.get(2)?,
-                content: row.get(3)?,
-                relevance_score: row.get(4)?,
-                retention_policy: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
-
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_memory_record)?;
         let mut items = Vec::new();
         for item in rows {
             items.push(item?);
@@ -1199,6 +1448,10 @@ impl Database {
             "DELETE FROM memory_items WHERE id = ?1",
             rusqlite::params![id],
         )?;
+        let _ = conn.execute(
+            "DELETE FROM memory_items_fts WHERE id = ?1",
+            rusqlite::params![id],
+        );
         Ok(rows > 0)
     }
 
@@ -3356,11 +3609,81 @@ pub struct MemoryRecord {
     pub id: String,
     pub source: String,
     pub category: String,
+    #[serde(default = "default_memory_layer")]
+    pub memory_layer: String,
     pub content: String,
     pub relevance_score: f64,
+    #[serde(default)]
+    pub access_count: i64,
+    #[serde(default)]
+    pub last_accessed_at: i64,
     pub retention_policy: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_memory_layer() -> String {
+    "semantic".to_string()
+}
+
+fn normalize_memory_layer(layer: &str) -> &'static str {
+    match layer.trim().to_ascii_lowercase().as_str() {
+        "episodic" => "episodic",
+        "procedural" => "procedural",
+        _ => "semantic",
+    }
+}
+
+fn memory_content_hash(content: &str) -> String {
+    let normalized = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn token_jaccard_similarity(a: &str, b: &str) -> f64 {
+    let tokenize = |s: &str| -> std::collections::HashSet<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_ascii_lowercase())
+            .collect()
+    };
+    let set_a = tokenize(a);
+    let set_b = tokenize(b);
+    if set_a.is_empty() && set_b.is_empty() {
+        return 1.0;
+    }
+    if set_a.is_empty() || set_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = set_a.intersection(&set_b).count() as f64;
+    let union = set_a.union(&set_b).count() as f64;
+    intersection / union
+}
+
+fn build_fts5_query(query: &str) -> Option<String> {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 2)
+        .map(|t| format!("\"{}\"*", t.replace('"', "")))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
+}
+
+fn sync_memory_fts_row(conn: &Connection, id: &str, category: &str, memory_layer: &str, content: &str) {
+    let _ = conn.execute("DELETE FROM memory_items_fts WHERE id = ?1", rusqlite::params![id]);
+    let _ = conn.execute(
+        "INSERT INTO memory_items_fts (id, category, memory_layer, content) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![id, category, memory_layer, content],
+    );
 }
 
 fn map_task_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
@@ -3384,11 +3707,14 @@ fn map_memory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> 
         id: row.get(0)?,
         source: row.get(1)?,
         category: row.get(2)?,
-        content: row.get(3)?,
-        relevance_score: row.get(4)?,
-        retention_policy: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        memory_layer: row.get(3)?,
+        content: row.get(4)?,
+        relevance_score: row.get(5)?,
+        access_count: row.get(6)?,
+        last_accessed_at: row.get(7)?,
+        retention_policy: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -4492,6 +4818,65 @@ mod tests {
         // Delete
         assert!(db.delete_memory_item("mem-1").unwrap());
         assert!(db.get_memory_item("mem-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_storage_memory_layers_dedup_access_and_fts5() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.has_memory_fts5());
+
+        let m1 = db
+            .insert_memory_item_layered(
+                "mem-sem-1",
+                "chat",
+                "user_preference",
+                "semantic",
+                "User prefers dark mode and concise Indonesian responses",
+                0.9,
+                "permanent",
+            )
+            .unwrap();
+        assert_eq!(m1.memory_layer, "semantic");
+        assert_eq!(m1.access_count, 0);
+
+        // Near-duplicate content in same layer should reinforce existing row instead of duplicating
+        let m1_dup = db
+            .insert_memory_item_layered(
+                "mem-sem-2",
+                "chat",
+                "user_preference",
+                "semantic",
+                "User prefers dark mode and concise Indonesian responses!",
+                0.95,
+                "permanent",
+            )
+            .unwrap();
+        assert_eq!(m1_dup.id, "mem-sem-1");
+        assert_eq!(m1_dup.access_count, 1);
+        assert_eq!(db.list_memory_items_by_layer(Some("semantic"), None).unwrap().len(), 1);
+
+        // Procedural & episodic layers
+        db.insert_memory_item_layered(
+            "mem-proc-1",
+            "chat",
+            "folder_rule",
+            "procedural",
+            "Save exported PDFs to D:\\Reports",
+            0.9,
+            "permanent",
+        )
+        .unwrap();
+        assert_eq!(db.list_memory_items_by_layer(Some("procedural"), None).unwrap().len(), 1);
+
+        // Record access
+        db.record_memory_access("mem-proc-1").unwrap();
+        let proc_item = db.get_memory_item("mem-proc-1").unwrap().unwrap();
+        assert_eq!(proc_item.access_count, 1);
+
+        // FTS5 search
+        let fts_hits = db.search_memory_items("Indonesian dark mode", 10).unwrap();
+        assert_eq!(fts_hits.len(), 1);
+        assert_eq!(fts_hits[0].id, "mem-sem-1");
     }
 
     #[test]

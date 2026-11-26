@@ -97,7 +97,8 @@ async fn test_ai_conversation_lifecycle_and_persistence() {
     let res = resp.result.unwrap();
     assert_eq!(res["status"], "completed");
     let answer = res["response"].as_str().unwrap();
-    assert!(answer.contains("Hermes Agent"));
+    println!("DEBUG: ACTUAL RESPONSE:\n{}", answer);
+    assert!(!answer.trim().is_empty());
 
     // 3. Verify Messages in SQLite WAL
     let req = JsonRpcRequest::new(
@@ -179,4 +180,55 @@ async fn test_ai_provider_adapter_loopback_http_server() {
     assert!(stream_str.contains("[DONE]"));
 
     adapter.stop();
+}
+
+#[tokio::test]
+async fn test_chat_send_abort_aliases_and_persona_identity() {
+    let auth_token = generate_token_256().unwrap();
+    let server = CoreServer::new_in_memory(auth_token).unwrap();
+
+    // 1. Verify runtime.status alias for ai.status
+    let req = JsonRpcRequest::new(1, "runtime.status", None);
+    let resp = server.dispatch_rpc(req).await;
+    assert!(resp.error.is_none());
+    let res = resp.result.unwrap();
+    assert_eq!(res["core_orchestration_active"], true);
+
+    // 2. Verify chat.send alias without conversation_id (defaults to conv-global)
+    let req = JsonRpcRequest::new(
+        2,
+        "chat.send",
+        Some(serde_json::json!({
+            "prompt": "Kamu siapa?"
+        })),
+    );
+    let resp = server.dispatch_rpc(req).await;
+    assert!(resp.error.is_none());
+    let res = resp.result.unwrap();
+    assert_eq!(res["status"], "completed");
+    assert_eq!(res["conversation_id"], "conv-global");
+    let answer = res["response"].as_str().unwrap();
+    println!("DEBUG: ACTUAL RESPONSE:\n{}", answer);
+    assert!(!answer.trim().is_empty());
+    assert!(!answer.contains("Hermes Agent"));
+
+    // 3. Golden Identity Test: Verify Bloom denial & Hime identity
+    let req = JsonRpcRequest::new(
+        3,
+        "chat.send",
+        Some(serde_json::json!({
+            "conversation_id": "conv-global",
+            "prompt": "Apakah kamu Bloom?"
+        })),
+    );
+    let resp = server.dispatch_rpc(req).await;
+    assert!(resp.error.is_none());
+    let answer2 = resp.result.unwrap()["response"].as_str().unwrap().to_string();
+    assert!(answer2.contains("Hime"));
+
+    // 4. Verify chat.abort alias for conversation.cancel
+    let req = JsonRpcRequest::new(4, "chat.abort", None);
+    let resp = server.dispatch_rpc(req).await;
+    assert!(resp.error.is_none());
+    assert_eq!(resp.result.unwrap()["cancelled"], false);
 }

@@ -7,10 +7,54 @@
 //! Architecture: single-exit-point design — all proactive interactions are
 //! decided and emitted here; no other module talks directly to the user.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use hime_storage::{Database, InteractionPrefRecord, ProactiveSettingsRecord, ProactiveSuggestionRecord};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+// ---------------------------------------------------------------------------
+// Win32 Inter-Process Wake Signaling
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+pub fn signal_named_event(name: &str) -> bool {
+    unsafe {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenEventW, SetEvent, SYNCHRONIZATION_ACCESS_RIGHTS};
+        let event_name: Vec<u16> = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // EVENT_MODIFY_STATE | SYNCHRONIZE = 0x00100002
+        if let Ok(h_event) = OpenEventW(
+            SYNCHRONIZATION_ACCESS_RIGHTS(0x00100002),
+            false,
+            windows::core::PCWSTR(event_name.as_ptr()),
+        ) {
+            let _ = SetEvent(h_event);
+            let _ = CloseHandle(h_event);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn signal_named_event(_name: &str) -> bool {
+    false
+}
+
+/// Signals the Win32 Named Event `HimeShowIsland` to wake/unminimize the Island.
+pub fn signal_hime_show_island() -> bool {
+    signal_named_event("HimeShowIsland")
+}
+
+/// Signals `HimeToggleAssistant` to immediately open Hime Chat panel.
+pub fn signal_hime_toggle_assistant() -> bool {
+    signal_named_event("HimeToggleAssistant")
+}
 
 // ---------------------------------------------------------------------------
 // Attention budget
@@ -229,17 +273,227 @@ pub struct InteractionPref {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeriodicReminderConfig {
+    pub id: String,
+    pub title: String,
+    pub message: String,
+    pub interval_secs: u64, // e.g. 1800 (30m), 3600 (1h)
+    pub last_triggered_at: u64,
+    pub is_active: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
 
 pub struct ProactiveEngine {
     db: Arc<Database>,
+    reminders: Arc<std::sync::RwLock<HashMap<String, PeriodicReminderConfig>>>,
+    event_bus: Arc<std::sync::RwLock<Option<crate::bus::EventBus>>>,
 }
 
 impl ProactiveEngine {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        let mut default_reminders = HashMap::new();
+        let now = now_secs() as u64;
+
+        default_reminders.insert(
+            "rem-hourly-focus".to_string(),
+            PeriodicReminderConfig {
+                id: "rem-hourly-focus".to_string(),
+                title: "Pengingat Fokus Hime".to_string(),
+                message: "Sudah 1 jam beraktivitas. Luangkan sejenak untuk istirahat mata dan minum air.".to_string(),
+                interval_secs: 3600,
+                last_triggered_at: now,
+                is_active: true,
+            },
+        );
+
+        default_reminders.insert(
+            "rem-30min-posture".to_string(),
+            PeriodicReminderConfig {
+                id: "rem-30min-posture".to_string(),
+                title: "Peregangan 30 Menit".to_string(),
+                message: "Cek postur tubuh dan tarik napas dalam sebelum melanjutkan tugas.".to_string(),
+                interval_secs: 1800,
+                last_triggered_at: now,
+                is_active: false,
+            },
+        );
+
+        Self {
+            db,
+            reminders: Arc::new(std::sync::RwLock::new(default_reminders)),
+            event_bus: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    pub fn set_event_bus(&self, bus: crate::bus::EventBus) {
+        if let Ok(mut lock) = self.event_bus.write() {
+            *lock = Some(bus);
+        }
+    }
+
+    pub fn register_periodic_reminder(
+        &self,
+        id: &str,
+        title: &str,
+        message: &str,
+        interval_secs: u64,
+        is_active: bool,
+    ) -> PeriodicReminderConfig {
+        let now = now_secs() as u64;
+        let config = PeriodicReminderConfig {
+            id: id.to_string(),
+            title: title.to_string(),
+            message: message.to_string(),
+            interval_secs: interval_secs.max(60),
+            last_triggered_at: now,
+            is_active,
+        };
+        if let Ok(mut lock) = self.reminders.write() {
+            lock.insert(id.to_string(), config.clone());
+        }
+        config
+    }
+
+    pub fn list_periodic_reminders(&self) -> Vec<PeriodicReminderConfig> {
+        self.reminders.read().map(|m| m.values().cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn toggle_periodic_reminder(&self, id: &str, active: bool) -> bool {
+        if let Ok(mut lock) = self.reminders.write() {
+            if let Some(r) = lock.get_mut(id) {
+                r.is_active = active;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn remove_periodic_reminder(&self, id: &str) -> bool {
+        if let Ok(mut lock) = self.reminders.write() {
+            lock.remove(id).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Checks active periodic reminders and triggers any that have exceeded their interval.
+    /// When triggered:
+    /// 1. Signals Win32 `HimeShowIsland` and `HimeToggleAssistant` events
+    /// 2. Dispatches `SystemEvent::ProactiveReminderTriggered` to the system event bus
+    /// 3. Records a proactive suggestion in the database
+    pub fn check_and_trigger_periodic_reminders(&self) -> Vec<ProactiveSuggestionItem> {
+        let now = now_secs() as u64;
+        let mut triggered = Vec::new();
+
+        let mut to_fire = Vec::new();
+        if let Ok(mut lock) = self.reminders.write() {
+            for (_, r) in lock.iter_mut() {
+                if r.is_active && (now >= r.last_triggered_at.saturating_add(r.interval_secs)) {
+                    r.last_triggered_at = now;
+                    to_fire.push(r.clone());
+                }
+            }
+        }
+
+        for rem in to_fire {
+            signal_hime_show_island();
+            signal_hime_toggle_assistant();
+
+            if let Ok(guard) = self.event_bus.read() {
+                if let Some(ref bus) = *guard {
+                    bus.publish(crate::bus::SystemEvent::ProactiveReminderTriggered {
+                        reminder_id: rem.id.clone(),
+                        title: rem.title.clone(),
+                        message: rem.message.clone(),
+                        deadline_near: false,
+                    });
+                }
+            }
+
+            let kind = SituationKind::RoutineStart;
+            let title = truncate(&rem.title, 40);
+            let sug_id = self.insert_suggestion(&kind, title, rem.message.clone(), 0.9);
+            if let Ok(Some(sug)) = self.db.get_proactive_suggestion(&sug_id) {
+                triggered.push(Self::map_record(sug));
+            }
+        }
+
+        triggered
+    }
+
+    /// Inspects tasks in database for upcoming deadlines (e.g. within threshold_minutes).
+    /// When deadline is near:
+    /// 1. Signals `HimeShowIsland` and opens chat
+    /// 2. Dispatches `ProactiveReminderTriggered`
+    /// 3. Records `on_deadline_near`
+    pub fn check_and_trigger_deadline_reminders(&self, threshold_minutes: i64) -> Vec<ProactiveSuggestionItem> {
+        let now = now_secs();
+        let mut triggered = Vec::new();
+
+        if let Ok(tasks) = self.db.list_productivity_tasks("board-default") {
+            for task in tasks {
+                if task.status == "done" || task.status == "completed" {
+                    continue;
+                }
+                if let Some(due_date) = task.due_date {
+                    let diff_secs = due_date - now;
+                    let diff_mins = diff_secs / 60;
+                    if diff_secs > 0 && diff_mins <= threshold_minutes {
+                        let sentinel = format!("__deadline_reminded_{}__", task.id);
+                        if let Ok(Some(_)) = self.db.get_interaction_pref(&sentinel) {
+                            continue;
+                        }
+
+                        let desc = format!("Tenggat waktu dalam {} menit!", diff_mins);
+                        if let Some(sug_id) = self.on_deadline_near(&task.title, &desc) {
+                            signal_hime_show_island();
+                            signal_hime_toggle_assistant();
+
+                            if let Ok(guard) = self.event_bus.read() {
+                                if let Some(ref bus) = *guard {
+                                    bus.publish(crate::bus::SystemEvent::ProactiveReminderTriggered {
+                                        reminder_id: format!("deadline-{}", task.id),
+                                        title: format!("Deadline: {}", task.title),
+                                        message: desc.clone(),
+                                        deadline_near: true,
+                                    });
+                                }
+                            }
+
+                            let _ = self.db.upsert_interaction_pref(&InteractionPrefRecord {
+                                kind: sentinel,
+                                decision: "reminded".to_string(),
+                                backoff_count: 0,
+                                backoff_until: None,
+                                last_shown_at: Some(now),
+                                updated_at: now,
+                            });
+
+                            if let Ok(Some(sug)) = self.db.get_proactive_suggestion(&sug_id) {
+                                triggered.push(Self::map_record(sug));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        triggered
+    }
+
+    pub fn start_reminder_scheduler(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                self.check_and_trigger_periodic_reminders();
+                self.check_and_trigger_deadline_reminders(60);
+            }
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1267,5 +1521,88 @@ mod tests {
             assert!(!p.kind.starts_with("__"), "Sentinel key leaked: {}", p.kind);
         }
         assert!(prefs.iter().any(|p| p.kind == "file_duplicate"));
+    }
+
+    #[test]
+    fn test_periodic_reminder_registration_and_trigger() {
+        let e = engine_no_quiet();
+        let event_bus = crate::bus::EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        e.set_event_bus(event_bus);
+
+        // Register custom 60s reminder
+        let config = e.register_periodic_reminder(
+            "rem-test-1",
+            "Istirahat Belajar",
+            "Waktunya istirahat sejenak",
+            60,
+            true,
+        );
+        assert_eq!(config.id, "rem-test-1");
+        assert!(config.is_active);
+
+        // Force elapsed time by setting last_triggered_at in past
+        if let Ok(mut lock) = e.reminders.write() {
+            if let Some(r) = lock.get_mut("rem-test-1") {
+                r.last_triggered_at = (now_secs() as u64).saturating_sub(120);
+            }
+        }
+
+        let triggered = e.check_and_trigger_periodic_reminders();
+        assert!(!triggered.is_empty());
+        assert!(triggered.iter().any(|t| t.title.contains("Istirahat")));
+
+        // Verify EventBus message
+        let event = rx.try_recv().expect("Event should be published");
+        match event {
+            crate::bus::SystemEvent::ProactiveReminderTriggered { reminder_id, title, .. } => {
+                assert_eq!(reminder_id, "rem-test-1");
+                assert_eq!(title, "Istirahat Belajar");
+            }
+            other => panic!("Unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deadline_reminder_trigger() {
+        let e = engine_no_quiet();
+        let event_bus = crate::bus::EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        e.set_event_bus(event_bus);
+
+        // Create a task due in 20 minutes
+        let now = now_secs();
+        let due = now + 20 * 60;
+        let task = hime_storage::ProductivityTaskRecord {
+            id: "task-deadline-test".to_string(),
+            board_id: "board-default".to_string(),
+            column_id: "col-todo".to_string(),
+            title: "Pengumpulan Laporan Praktikum".to_string(),
+            description: Some("Kirim ke portal".to_string()),
+            priority: "high".to_string(),
+            status: "todo".to_string(),
+            due_date: Some(due),
+            estimated_minutes: Some(30),
+            actual_minutes: None,
+            labels: None,
+            parent_task_id: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        e.db.create_productivity_task(&task).unwrap();
+
+        let triggered = e.check_and_trigger_deadline_reminders(30);
+        assert!(!triggered.is_empty());
+        assert!(triggered.iter().any(|t| t.title.contains("Pengumpulan Laporan")));
+
+        // Verify EventBus message
+        let event = rx.try_recv().expect("Deadline event should be published");
+        match event {
+            crate::bus::SystemEvent::ProactiveReminderTriggered { deadline_near, .. } => {
+                assert!(deadline_near);
+            }
+            other => panic!("Unexpected event: {:?}", other),
+        }
     }
 }

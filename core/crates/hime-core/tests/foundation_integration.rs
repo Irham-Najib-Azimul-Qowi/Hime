@@ -224,3 +224,100 @@ async fn test_live_named_pipe_roundtrip() {
     drop(client);
     let _ = server_task.await;
 }
+
+#[tokio::test]
+#[cfg(windows)]
+async fn test_hime_quit_named_event_coordination() {
+    use windows::core::w;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+        SYNCHRONIZATION_ACCESS_RIGHTS,
+    };
+
+    let event_name = w!("HimeQuitTestEvent");
+
+    // 1. Create manual-reset event in unsignaled state
+    let h_event = unsafe { CreateEventW(None, true, false, event_name) }.expect("create event");
+
+    let raw_handle = h_event.0 as isize;
+
+    // 2. Spawn listener thread waiting on event
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    std::thread::spawn(move || {
+        use windows::Win32::Foundation::HANDLE;
+        let h_wait = HANDLE(raw_handle as *mut _);
+        let wait_res = unsafe { WaitForSingleObject(h_wait, 2000) };
+        let _ = tx.send(wait_res == WAIT_OBJECT_0);
+    });
+
+    // 3. Open event from another handle and signal it
+    let h_signal = unsafe { OpenEventW(EVENT_MODIFY_STATE, false, event_name) }.expect("open event");
+    let set_ok = unsafe { SetEvent(h_signal) };
+    assert!(set_ok.is_ok(), "SetEvent must succeed");
+    unsafe {
+        let _ = CloseHandle(h_signal);
+    }
+
+    // 4. Verify listener thread unblocked
+    let signaled = rx.await.expect("channel rx");
+    assert!(signaled, "Listener thread must unblock on SetEvent");
+
+    // 5. Test ResetEvent functionality
+    let h_reset = unsafe { OpenEventW(SYNCHRONIZATION_ACCESS_RIGHTS(0x00100002), false, event_name) }.expect("open for reset");
+    let reset_ok = unsafe { ResetEvent(h_reset) };
+    assert!(reset_ok.is_ok(), "ResetEvent must succeed");
+    let wait_res2 = unsafe { WaitForSingleObject(h_reset, 0) };
+    assert_eq!(wait_res2, WAIT_TIMEOUT, "Event must be unsignaled after ResetEvent");
+    unsafe {
+        let _ = CloseHandle(h_reset);
+        let _ = CloseHandle(h_event);
+    }
+}
+
+#[test]
+fn test_hime_active_persistence_and_cleanup_logic() {
+    use hime_core::{
+        cleanup_active_marker_on_quit, cleanup_active_marker_with_policy, is_os_shutting_down,
+    };
+
+    let temp_dir = std::env::temp_dir().join(format!("hime_test_persistence_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let marker_path = temp_dir.join("hime.active");
+
+    // 1. Verify live system metric API query executes without panicking and returns false under active test environment
+    let os_shutting_down_live = is_os_shutting_down();
+    assert!(
+        !os_shutting_down_live,
+        "Operating system should not be in shutting down state during test execution"
+    );
+
+    // 2. Simulate start: marker file is written
+    std::fs::write(&marker_path, "active=2026-11-20T12:00:00Z").unwrap();
+    assert!(marker_path.exists(), "Marker must exist while active");
+
+    // 3. Test OS reboot/shutdown discrimination:
+    // When OS is shutting down (policy evaluates to true), marker MUST NOT be removed
+    let cleaned_os = cleanup_active_marker_with_policy(&marker_path, || true).unwrap();
+    assert!(!cleaned_os, "Cleanup must report false when shutdown is in progress");
+    assert!(marker_path.exists(), "Marker must persist across simulated OS shutdown / reboot");
+
+    // 4. Test user-initiated quit policy:
+    // When user explicitly quits (policy evaluates to false), marker MUST be removed
+    let cleaned_user = cleanup_active_marker_with_policy(&marker_path, || false).unwrap();
+    assert!(cleaned_user, "Cleanup must report true on user-initiated quit");
+    assert!(!marker_path.exists(), "Marker must be deleted on user-initiated quit");
+
+    // 5. Test real live OS query integration (exercises GetSystemMetrics(SM_SHUTTINGDOWN) and file removal):
+    std::fs::write(&marker_path, "active=2026-11-20T12:01:00Z").unwrap();
+    assert!(marker_path.exists(), "Marker re-created for live query test");
+    let cleaned_live = cleanup_active_marker_on_quit(&marker_path).unwrap();
+    assert!(cleaned_live, "Live cleanup should remove marker when OS is not shutting down");
+    assert!(!marker_path.exists(), "Marker must be deleted by cleanup_active_marker_on_quit");
+
+    // 6. Test idempotency: calling cleanup on already deleted file succeeds and returns false
+    let cleaned_again = cleanup_active_marker_on_quit(&marker_path).unwrap();
+    assert!(!cleaned_again, "Idempotent cleanup returns false when marker is already absent");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

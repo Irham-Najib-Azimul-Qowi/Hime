@@ -60,6 +60,51 @@ pub fn get_system_metrics() -> SystemMetrics {
     }
 }
 
+/// Returns true if the host operating system is shutting down or the user is logging off.
+/// On Windows, queries `GetSystemMetrics(SM_SHUTTINGDOWN)`.
+pub fn is_os_shutting_down() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+        unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Evaluates shutdown persistence policy for the active marker file.
+/// If `is_os_shutting_down_fn()` returns true (OS shutdown or restart in progress),
+/// the marker file is preserved to support persistence across reboots, returning `Ok(false)`.
+/// If `is_os_shutting_down_fn()` returns false (user-initiated quit), the marker file
+/// is deleted, returning `Ok(true)` if removed (or `Ok(false)` if absent).
+pub fn cleanup_active_marker_with_policy<P: AsRef<std::path::Path>, F: Fn() -> bool>(
+    marker_path: P,
+    is_os_shutting_down_fn: F,
+) -> std::io::Result<bool> {
+    if is_os_shutting_down_fn() {
+        // OS shutdown/reboot: preserve marker file across reboot
+        Ok(false)
+    } else {
+        // User quit: clean up marker file
+        let path = marker_path.as_ref();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// Encapsulates marker cleanup using the live host OS shutdown discrimination.
+pub fn cleanup_active_marker_on_quit<P: AsRef<std::path::Path>>(
+    marker_path: P,
+) -> std::io::Result<bool> {
+    cleanup_active_marker_with_policy(marker_path, is_os_shutting_down)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

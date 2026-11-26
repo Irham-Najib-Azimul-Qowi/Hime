@@ -77,6 +77,7 @@ fn test_accountability_modes_and_screen_time_nudge() {
             category: "distracting".to_string(),
             duration_secs: 700, // > 10 min threshold in strict mode
             timestamp: 1000,
+            date_str: None,
         },
     ];
 

@@ -189,4 +189,59 @@ async fn test_core_server_phase14_rpc_endpoints() {
     let f4 = Frame::read_from(&mut client_reader).await.unwrap();
     let r4 = JsonRpcResponse::from_slice(&f4.payload).unwrap();
     assert!(r4.error.is_none());
+
+    // 5. proactive.settings.set & get
+    let req5 = JsonRpcRequest::new("rpc-5", "proactive.settings.set", Some(serde_json::json!({
+        "is_enabled": true,
+        "attention_mode": "cerewet",
+        "quiet_hour_start": 23,
+        "quiet_hour_end": 6,
+        "cooldown_minutes": 15
+    })));
+    let p5 = req5.to_bytes().unwrap();
+    Frame::new(MsgType::Request, p5).unwrap().write_to(&mut client_writer).await.unwrap();
+    let f5 = Frame::read_from(&mut client_reader).await.unwrap();
+    let r5 = JsonRpcResponse::from_slice(&f5.payload).unwrap();
+    assert!(r5.error.is_none());
+
+    let req6 = JsonRpcRequest::new("rpc-6", "proactive.settings.get", None);
+    let p6 = req6.to_bytes().unwrap();
+    Frame::new(MsgType::Request, p6).unwrap().write_to(&mut client_writer).await.unwrap();
+    let f6 = Frame::read_from(&mut client_reader).await.unwrap();
+    let r6 = JsonRpcResponse::from_slice(&f6.payload).unwrap();
+    assert!(r6.error.is_none());
+    let s_res = r6.result.unwrap();
+    assert_eq!(s_res["attention_mode"], "cerewet");
+
+    // 6. proactive.rules.set, list, get, reset
+    let req7 = JsonRpcRequest::new("rpc-7", "proactive.rules.set", Some(serde_json::json!({
+        "kind": "file_duplicate",
+        "decision": "always"
+    })));
+    let p7 = req7.to_bytes().unwrap();
+    Frame::new(MsgType::Request, p7).unwrap().write_to(&mut client_writer).await.unwrap();
+    let f7 = Frame::read_from(&mut client_reader).await.unwrap();
+    let r7 = JsonRpcResponse::from_slice(&f7.payload).unwrap();
+    assert!(r7.error.is_none());
+
+    let req8 = JsonRpcRequest::new("rpc-8", "proactive.rules.list", None);
+    let p8 = req8.to_bytes().unwrap();
+    Frame::new(MsgType::Request, p8).unwrap().write_to(&mut client_writer).await.unwrap();
+    let f8 = Frame::read_from(&mut client_reader).await.unwrap();
+    let r8 = JsonRpcResponse::from_slice(&f8.payload).unwrap();
+    assert!(r8.error.is_none());
+    let rules = r8.result.unwrap();
+    assert!(rules.as_array().unwrap().iter().any(|r| r["kind"] == "file_duplicate" && r["decision"] == "always"));
+
+    // 7. proactive.trigger_event
+    let req9 = JsonRpcRequest::new("rpc-9", "proactive.trigger_event", Some(serde_json::json!({
+        "kind": "storage_low",
+        "drive": "D:",
+        "percent_free": 5
+    })));
+    let p9 = req9.to_bytes().unwrap();
+    Frame::new(MsgType::Request, p9).unwrap().write_to(&mut client_writer).await.unwrap();
+    let f9 = Frame::read_from(&mut client_reader).await.unwrap();
+    let r9 = JsonRpcResponse::from_slice(&f9.payload).unwrap();
+    assert!(r9.error.is_none());
 }

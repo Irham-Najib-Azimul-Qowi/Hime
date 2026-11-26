@@ -50,6 +50,7 @@ windows = { version = "0.58.0", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
     "Win32_NetworkManagement_IpHelper",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -64,6 +65,7 @@ anyhow = "1.0.86"
 # Async Trait and Utilities
 async-trait = "0.1.80"
 regex = "1.10.5"
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls", "json", "query"] }
 
 # Internal Workspace Crates
 hime-ipc = { path = "crates/hime-ipc" }

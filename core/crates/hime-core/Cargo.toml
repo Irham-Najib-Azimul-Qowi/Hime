@@ -24,10 +24,15 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 zeroize = { workspace = true }
 async-trait = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
 
 hime-ipc = { workspace = true }
 hime-security = { workspace = true }
 hime-pal = { workspace = true }
 hime-storage = { workspace = true }
 sha2 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
 

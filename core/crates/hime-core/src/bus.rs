@@ -50,6 +50,12 @@ pub enum SystemEvent {
         bytes_transferred: i64,
         total_bytes: i64,
     },
+    ProactiveReminderTriggered {
+        reminder_id: String,
+        title: String,
+        message: String,
+        deadline_near: bool,
+    },
     ShutdownInitiated,
 }
 
