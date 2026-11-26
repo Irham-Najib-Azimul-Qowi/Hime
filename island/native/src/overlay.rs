@@ -6,8 +6,8 @@ use windows::core::Result;
 use crate::animation::SpringValue;
 use crate::d2d::{NativeSurface, Rect, TextAlign};
 use crate::theme::{
-    ACCENT_CYAN, CORNER_RADIUS, GLASS_BORDER, GLASS_SURFACE, STATUS_OFFLINE, SURFACE_ELEVATED,
-    TEXT_PRIMARY, TEXT_SECONDARY,
+    ACCENT_CYAN, CORNER_RADIUS, DOCK_SURFACE, GLASS_BORDER, STATUS_OFFLINE, STATUS_WARNING,
+    SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 const DEFAULT_AUTO_HIDE_SECS: f32 = 2.2;
@@ -142,12 +142,32 @@ impl OverlayHud {
         let rect = self.computed_rect(sw, sh);
 
         surface.set_rounded_region(rect, CORNER_RADIUS);
-        surface.fill_rounded_rect(rect, CORNER_RADIUS, GLASS_SURFACE.with_alpha(0.92 * alpha))?;
+        surface.fill_rounded_rect(rect, CORNER_RADIUS, DOCK_SURFACE.with_alpha(0.95 * alpha))?;
         surface.stroke_rounded_rect(
             rect,
             CORNER_RADIUS,
-            GLASS_BORDER.with_alpha(0.18 * alpha),
+            GLASS_BORDER.with_alpha(alpha),
             1.0,
+        )?;
+
+        let icon_badge = Rect::new(rect.x + 14.0, rect.y + 12.0, 26.0, 26.0);
+        let icon_color = match self.kind {
+            HudKind::Volume if self.muted => STATUS_OFFLINE,
+            HudKind::Volume => ACCENT_CYAN,
+            HudKind::Brightness => STATUS_WARNING,
+        };
+        let icon_glyph = match self.kind {
+            HudKind::Volume if self.muted => "🔇",
+            HudKind::Volume => "🔊",
+            HudKind::Brightness => "☀",
+        };
+        surface.fill_rounded_rect(icon_badge, 8.0, SURFACE_ELEVATED.with_alpha(alpha))?;
+        surface.draw_text(
+            icon_glyph,
+            icon_badge,
+            13.0,
+            icon_color.with_alpha(alpha),
+            TextAlign::Center,
         )?;
 
         let title = match self.kind {
@@ -160,11 +180,11 @@ impl OverlayHud {
             HudKind::Volume => self
                 .device_name
                 .as_deref()
-                .unwrap_or("Default Audio Device"),
+                .unwrap_or("Audio Output"),
             HudKind::Brightness => "Display",
         };
 
-        let header_rect = Rect::new(rect.x + 16.0, rect.y + 10.0, rect.width - 76.0, 18.0);
+        let header_rect = Rect::new(rect.x + 48.0, rect.y + 10.0, rect.width - 108.0, 18.0);
         surface.draw_text(
             title,
             header_rect,
@@ -187,7 +207,7 @@ impl OverlayHud {
             TextAlign::Trailing,
         )?;
 
-        let sub_rect = Rect::new(rect.x + 16.0, rect.y + 28.0, rect.width - 32.0, 16.0);
+        let sub_rect = Rect::new(rect.x + 48.0, rect.y + 27.0, rect.width - 64.0, 16.0);
         surface.draw_text(
             subtitle,
             sub_rect,

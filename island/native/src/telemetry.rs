@@ -10,7 +10,7 @@
 //! - Active media playback via SMTC (`GlobalSystemMediaTransportControlsSessionManager`)
 //! - Running top-level application windows (`EnumWindows` + `DwmGetWindowAttribute`)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -105,9 +105,89 @@ impl RunningWindow {
     pub fn to_dock_item(&self) -> DockItem {
         let id = format!("{}:{}", self.executable.to_lowercase(), self.hwnd);
         let mut item = DockItem::new(id, self.app_name.clone(), self.executable.clone(), false);
+        item.exe_path = self.exe_path.clone();
+        item.hwnds = vec![self.hwnd];
         item.running = true;
         item
     }
+}
+
+/// Formats a human-friendly Dock label from an executable filename (e.g. `"msedge.exe"` -> `"Edge"`).
+pub fn friendly_app_name(executable: &str) -> String {
+    let stem = executable
+        .strip_suffix(".exe")
+        .or_else(|| executable.strip_suffix(".EXE"))
+        .unwrap_or(executable)
+        .trim();
+    if stem.is_empty() {
+        return "App".to_string();
+    }
+    match stem.to_ascii_lowercase().as_str() {
+        "msedge" => "Microsoft Edge".to_string(),
+        "wt" => "Terminal".to_string(),
+        "explorer" => "Explorer".to_string(),
+        "applicationframehost" => "App".to_string(),
+        _ => {
+            let mut chars = stem.chars();
+            match chars.next() {
+                Some(first) if first.is_ascii_lowercase() => {
+                    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+                }
+                _ => stem.to_string(),
+            }
+        }
+    }
+}
+
+/// Groups [`RunningWindow`] entries by `executable.to_lowercase()`, preserving first-seen order.
+///
+/// Multiple windows belonging to the same executable collapse into a single [`DockItem`]
+/// with `hwnds` containing every window handle and `badge_count` set to the window count
+/// when more than one window is open.
+pub fn group_running_windows(windows: &[RunningWindow]) -> Vec<DockItem> {
+    let mut grouped: Vec<DockItem> = Vec::new();
+    let mut key_to_idx: HashMap<String, usize> = HashMap::new();
+
+    for win in windows {
+        let exe_key = win.executable.trim().to_lowercase();
+        let key = if !exe_key.is_empty() {
+            exe_key
+        } else if !win.exe_path.trim().is_empty() {
+            win.exe_path.trim().to_lowercase()
+        } else {
+            format!("hwnd:{}", win.hwnd)
+        };
+
+        if let Some(&idx) = key_to_idx.get(&key) {
+            let item = &mut grouped[idx];
+            if !item.hwnds.contains(&win.hwnd) {
+                item.hwnds.push(win.hwnd);
+            }
+            if item.exe_path.is_empty() && !win.exe_path.is_empty() {
+                item.exe_path = win.exe_path.clone();
+            }
+            item.badge_count = if item.hwnds.len() > 1 {
+                item.hwnds.len() as u32
+            } else {
+                0
+            };
+        } else {
+            let label = if win.app_name.trim().is_empty() {
+                friendly_app_name(&win.executable)
+            } else {
+                win.app_name.clone()
+            };
+            let mut item = DockItem::new(key.clone(), label, win.executable.clone(), false);
+            item.exe_path = win.exe_path.clone();
+            item.hwnds = vec![win.hwnd];
+            item.running = true;
+            item.badge_count = 0;
+            key_to_idx.insert(key, grouped.len());
+            grouped.push(item);
+        }
+    }
+
+    grouped
 }
 
 /// Point-in-time snapshot of all OS telemetry consumed by the native shell surfaces.
@@ -767,7 +847,7 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
         .and_then(|n| n.to_str())
         .unwrap_or("app.exe")
         .to_string();
-    let app_name = executable.strip_suffix(".exe").unwrap_or(&executable).to_string();
+    let app_name = friendly_app_name(&executable);
 
     out.push(RunningWindow {
         hwnd: hwnd.0 as isize,
@@ -878,8 +958,57 @@ mod tests {
         assert_eq!(item.id, "code.exe:42");
         assert_eq!(item.label, "Code");
         assert_eq!(item.executable, "Code.exe");
+        assert_eq!(item.exe_path, rw.exe_path);
+        assert_eq!(item.hwnds, vec![42]);
         assert!(item.running);
         assert!(!item.pinned);
+    }
+
+    #[test]
+    fn group_running_windows_collapses_same_executable_with_badge_count() {
+        let windows = vec![
+            RunningWindow {
+                hwnd: 101,
+                title: "Tab 1".to_string(),
+                app_name: "Chrome".to_string(),
+                executable: "chrome.exe".to_string(),
+                exe_path: r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string(),
+            },
+            RunningWindow {
+                hwnd: 102,
+                title: "Tab 2".to_string(),
+                app_name: "Chrome".to_string(),
+                executable: "Chrome.exe".to_string(),
+                exe_path: r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string(),
+            },
+            RunningWindow {
+                hwnd: 103,
+                title: "Tab 3".to_string(),
+                app_name: "Chrome".to_string(),
+                executable: "CHROME.EXE".to_string(),
+                exe_path: r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string(),
+            },
+            RunningWindow {
+                hwnd: 201,
+                title: "Terminal".to_string(),
+                app_name: "Terminal".to_string(),
+                executable: "wt.exe".to_string(),
+                exe_path: r"C:\Windows\System32\wt.exe".to_string(),
+            },
+        ];
+
+        let grouped = group_running_windows(&windows);
+        assert_eq!(grouped.len(), 2);
+
+        assert_eq!(grouped[0].id, "chrome.exe");
+        assert_eq!(grouped[0].hwnds, vec![101, 102, 103]);
+        assert_eq!(grouped[0].badge_count, 3);
+        assert!(grouped[0].running);
+
+        assert_eq!(grouped[1].id, "wt.exe");
+        assert_eq!(grouped[1].hwnds, vec![201]);
+        assert_eq!(grouped[1].badge_count, 0);
+        assert!(grouped[1].running);
     }
 
     #[test]

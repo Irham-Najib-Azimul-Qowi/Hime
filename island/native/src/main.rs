@@ -19,12 +19,13 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
-    FindWindowW, GetCursorPos, GetMessageW, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, IDI_APPLICATION, MF_STRING,
-    MSG, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP,
-    WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPED,
+    AppendMenuW, BringWindowToTop, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DispatchMessageW, FindWindowW, GetCursorPos, GetForegroundWindow, GetMessageW, IsIconic,
+    IsWindow, IsWindowVisible, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetTimer, ShowWindow, TrackPopupMenu, TranslateMessage, IDI_APPLICATION,
+    MF_STRING, MSG, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
 use hime_island_native::ai_drawer::{
@@ -33,7 +34,7 @@ use hime_island_native::ai_drawer::{
 use hime_island_native::d2d::{
     self, HimeExpression, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind, WM_SURFACE_EVENT,
 };
-use hime_island_native::dock::{DockBar, DockItem};
+use hime_island_native::dock::{DockAction, DockBar, DockItem};
 use hime_island_native::hotkey::{self, HotkeyAction, HotkeyManager};
 use hime_island_native::ipc_client::{
     AiProfileUpsertParams, ApprovalResolution, ChatTurnParams, ChatTurnResult, HimeIpcClient,
@@ -236,25 +237,8 @@ impl AppShell {
         };
         self.notch.set_expression(expr);
 
-        // Sync running windows into DockBar while preserving pinned items.
-        let active_ids: Vec<String> = snap
-            .running_windows
-            .iter()
-            .map(|w| format!("win-{}", w.hwnd))
-            .collect();
-        let stale_ids: Vec<String> = self
-            .dock
-            .items()
-            .iter()
-            .filter(|it| !it.pinned && !active_ids.contains(&it.id))
-            .map(|it| it.id.clone())
-            .collect();
-        for id in stale_ids {
-            self.dock.remove_item(&id);
-        }
-        for win in snap.running_windows.iter().take(12) {
-            self.dock.add_item(win.to_dock_item());
-        }
+        // Sync grouped running windows into DockBar while preserving pinned items & icon cache.
+        self.dock.sync_running_windows(&snap.running_windows);
 
         let vol_pair = (snap.volume.percent, snap.volume.muted);
         if notify_volume && self.last_volume.is_some_and(|prev| prev != vol_pair) {
@@ -292,7 +276,7 @@ impl AppShell {
         let _ = self.notch_surface.set_bounds(x, y, w, h);
     }
 
-    fn update_surface_click_through(&self) {
+    fn update_surface_click_through(&mut self) {
         if let Some((cx, cy)) = os_shell::cursor_position() {
             let screen = os_shell::screen_bounds_at_point(cx, cy);
             let (nx, ny, _, _) = notch_surface_bounds(self.notch.edge, screen);
@@ -321,6 +305,9 @@ impl AppShell {
                 let local_dy = (cy - dy) as f32 / dock_scale;
                 let dock_rect = self.dock.dock_rect(Rect::new(0.0, 0.0, dw_dip, dh_dip));
                 let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
+                if !over_dock && self.dock.has_hover() {
+                    self.dock.clear_hover();
+                }
                 self.dock_surface.set_click_through(!over_dock);
             } else {
                 self.dock_surface.set_click_through(true);
@@ -334,6 +321,7 @@ impl AppShell {
 
     fn handle_surface_event(&mut self, ev: SurfaceEvent, ctrl_hwnd: HWND) {
         if ev.hwnd == self.notch_surface.hwnd().0 as isize {
+            let mut render_now = false;
             match ev.kind {
                 SurfaceEventKind::LeftButtonDown { .. } => {
                     self.dragging_notch = true;
@@ -343,6 +331,7 @@ impl AppShell {
                 SurfaceEventKind::MouseMove { .. } => {
                     if self.notch.is_hidden {
                         self.notch.set_hidden(false);
+                        render_now = true;
                     }
                     if self.dragging_notch {
                         if let Some((cx, cy)) = os_shell::cursor_position() {
@@ -352,6 +341,7 @@ impl AppShell {
                                 self.drag_moved = true;
                                 let next_edge = os_shell::snap_notch_edge_from_cursor();
                                 self.apply_notch_edge(next_edge);
+                                render_now = true;
                             }
                         }
                     }
@@ -361,6 +351,7 @@ impl AppShell {
                         self.dragging_notch = false;
                         if !self.drag_moved {
                             self.notch.set_expanded(!self.notch.is_expanded);
+                            render_now = true;
                         }
                     }
                 }
@@ -371,8 +362,13 @@ impl AppShell {
                         self.sync_drawer_attachments();
                         self.notch
                             .set_ncm_center_alert(Some(format!("+{} file(s)", added.len())));
+                        render_now = true;
                     }
                 }
+            }
+            if render_now {
+                self.update_surface_click_through();
+                self.render_all();
             }
             self.ensure_fast_timer(ctrl_hwnd);
             return;
@@ -387,10 +383,22 @@ impl AppShell {
                     self.dock.set_hovered_at(x / scale, y / scale, rect);
                 }
                 SurfaceEventKind::LeftButtonUp { x, y } => {
-                    if let Some(idx) = self.dock.hit_test(x / scale, y / scale, rect) {
-                        if let Some(item) = self.dock.items().get(idx).cloned() {
-                            launch_dock_item(&item);
+                    match self.dock.hit_test_action(x / scale, y / scale, rect) {
+                        Some(DockAction::App(idx)) => {
+                            if let Some(item) = self.dock.items().get(idx).cloned() {
+                                focus_or_launch_dock_item(&item);
+                            }
                         }
+                        Some(DockAction::ToggleAiDrawer) => {
+                            self.handle_action(HotkeyAction::ToggleAssistant, ctrl_hwnd);
+                        }
+                        Some(DockAction::ToggleSettings) => {
+                            self.handle_action(HotkeyAction::ToggleShortcuts, ctrl_hwnd);
+                        }
+                        Some(DockAction::ToggleTray) => unsafe {
+                            show_tray_menu(ctrl_hwnd);
+                        },
+                        None => {}
                     }
                 }
                 SurfaceEventKind::LeftButtonDown { .. } | SurfaceEventKind::DropFiles { .. } => {}
@@ -648,14 +656,19 @@ impl AppShell {
                 } else {
                     os_shell::set_window_focusable(self.drawer_surface.hwnd(), false);
                     self.drawer_surface.hide();
+                    self.render_all();
                 }
             }
             HotkeyAction::ToggleNotch | HotkeyAction::ToggleCalendar => {
                 let next = !self.notch.is_expanded;
                 self.notch.set_expanded(next);
+                self.update_surface_click_through();
+                self.render_all();
             }
             HotkeyAction::ToggleMusic => {
                 self.notch.set_expanded(!self.notch.is_expanded);
+                self.update_surface_click_through();
+                self.render_all();
             }
             HotkeyAction::ToggleDock => {
                 let next = !self.dock.visible;
@@ -686,6 +699,10 @@ impl AppShell {
             }
             HotkeyAction::FocusDockSlot(slot) => {
                 self.dock.set_hovered(Some(slot as usize));
+                if let Some(item) = self.dock.items().get(slot as usize).cloned() {
+                    focus_or_launch_dock_item(&item);
+                }
+                self.render_all();
             }
             HotkeyAction::StopHime => unsafe {
                 PostQuitMessage(0);
@@ -867,7 +884,7 @@ fn log_render_error(surface: &str, stage: &str, err: &windows::core::Error) {
 }
 
 fn dock_surface_bounds(screen: os_shell::ScreenBounds) -> (i32, i32, u32, u32) {
-    let w = 720u32;
+    let w = 960u32.min(screen.width.max(320) as u32);
     let h = 96u32;
     (
         screen.x + (screen.width - w as i32) / 2,
@@ -881,7 +898,7 @@ fn notch_surface_bounds(edge: NotchEdge, screen: os_shell::ScreenBounds) -> (i32
     match edge {
         NotchEdge::Top => {
             let w = 540u32;
-            let h = 200u32;
+            let h = 260u32;
             (screen.x + (screen.width - w as i32) / 2, screen.y, w, h)
         }
         NotchEdge::Left => {
@@ -902,14 +919,43 @@ fn notch_surface_bounds(edge: NotchEdge, screen: os_shell::ScreenBounds) -> (i32
     }
 }
 
+fn focus_or_launch_dock_item(item: &DockItem) {
+    if !item.hwnds.is_empty() {
+        unsafe {
+            let fg = GetForegroundWindow().0 as isize;
+            let target_raw = if item.hwnds.len() > 1 && item.hwnds[0] == fg {
+                item.hwnds[1]
+            } else {
+                item.hwnds[0]
+            };
+            let wnd = HWND(target_raw as *mut std::ffi::c_void);
+            if IsWindow(Some(wnd)).as_bool() {
+                if IsIconic(wnd).as_bool() {
+                    let _ = ShowWindow(wnd, SW_RESTORE);
+                } else if !IsWindowVisible(wnd).as_bool() {
+                    let _ = ShowWindow(wnd, SW_SHOW);
+                }
+                if !SetForegroundWindow(wnd).as_bool() {
+                    let _ = BringWindowToTop(wnd);
+                    let _ = SetForegroundWindow(wnd);
+                }
+                return;
+            }
+        }
+    }
+    launch_dock_item(item);
+}
+
 fn launch_dock_item(item: &DockItem) {
-    if item.executable.trim().is_empty() {
+    let target = if !item.exe_path.trim().is_empty() {
+        item.exe_path.trim()
+    } else {
+        item.executable.trim()
+    };
+    if target.is_empty() {
         return;
     }
-    let wide: Vec<u16> = OsStr::new(&item.executable)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let wide: Vec<u16> = OsStr::new(target).encode_wide().chain(Some(0)).collect();
     unsafe {
         let _ = ShellExecuteW(
             None,
