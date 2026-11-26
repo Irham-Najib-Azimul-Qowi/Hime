@@ -7,10 +7,7 @@ use windows::core::Result;
 
 use crate::animation::{Spring, SpringValue};
 use crate::d2d::{LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
-use crate::theme::{
-    DIVIDER_HAIRLINE, GLASS_CONTROL, GLASS_HAIRLINE, STATUS_LIVE_AMBER, STATUS_LIVE_GREEN,
-    STATUS_LIVE_RED, SYSTEM_BLUE, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-};
+use crate::theme::{AdaptivePalette, TEXT_PRIMARY};
 
 pub const DRAWER_WIDTH: f32 = 440.0;
 pub const DRAWER_HEIGHT: f32 = 500.0;
@@ -554,6 +551,8 @@ impl AiDrawer {
             return Ok(());
         }
 
+        let p = surface.palette();
+
         // Emerge/recede without collapsing from scale(0) — start from 0.94 scale with soft vertical slide.
         let scale_factor = 0.94 + 0.06 * progress;
         let pw = self.width * scale_factor;
@@ -567,12 +566,12 @@ impl AiDrawer {
 
         // Header brand icon + monochrome title
         let brand_icon = Rect::new(px + 18.0, py + 17.0, 16.0, 16.0);
-        surface.draw_sf_symbol(brand_icon, SfSymbol::Sparkle, SYSTEM_BLUE, 1.5)?;
+        surface.draw_sf_symbol(brand_icon, SfSymbol::Sparkle, p.accent, 1.5)?;
         surface.draw_text_bold(
             "Hime AI",
             Rect::new(px + 38.0, py + 12.0, 78.0, 28.0),
             14.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
@@ -583,8 +582,8 @@ impl AiDrawer {
         let seg_w = (tab_rects[2].1.x + tab_rects[2].1.width) - tab_rects[0].1.x + 6.0;
         let seg_h = tab_rects[0].1.height + 4.0;
         let seg_container = Rect::new(seg_x, seg_y, seg_w, seg_h);
-        surface.fill_rounded_rect(seg_container, 10.0, GLASS_CONTROL)?;
-        surface.stroke_rounded_rect(seg_container, 10.0, GLASS_HAIRLINE, 0.8)?;
+        surface.fill_rounded_rect(seg_container, 10.0, p.control_fill)?;
+        surface.stroke_rounded_rect(seg_container, 10.0, p.hairline_border, 0.8)?;
 
         // Sliding active tab indicator driven by `tab_spring`
         let slide_idx = self.tab_spring.value.clamp(0.0, 2.0);
@@ -599,27 +598,26 @@ impl AiDrawer {
             r_lo.width,
             r_lo.height,
         );
-        surface.draw_liquid_glass_panel(
-            active_pill,
-            LiquidGlassStyle::tinted(SYSTEM_BLUE, 8.0).without_shadow(),
-        )?;
+        surface.fill_rounded_rect(active_pill, 8.0, p.accent)?;
 
         for (tab, rect) in tab_rects {
             let active = self.active_tab == tab;
             let hovered = !active && self.is_hovered(rect);
             if hovered {
-                surface.fill_rounded_rect(
-                    rect,
-                    8.0,
-                    crate::theme::GLASS_CONTROL_HOVER.with_alpha_mul(0.6),
-                )?;
+                surface.fill_rounded_rect(rect, 8.0, p.control_hover)?;
             }
             let icon = match tab {
                 DrawerTab::Chat => SfSymbol::Sparkle,
                 DrawerTab::Translate => SfSymbol::Globe,
                 DrawerTab::Workspace => SfSymbol::Terminal,
             };
-            let fg = if active { TEXT_PRIMARY } else { TEXT_SECONDARY };
+            let fg = if active {
+                TEXT_PRIMARY
+            } else if hovered {
+                p.text_primary
+            } else {
+                p.text_secondary
+            };
             let icon_rect = Rect::new(rect.x + 7.0, rect.y + (rect.height - 12.0) * 0.5, 12.0, 12.0);
             surface.draw_sf_symbol(icon_rect, icon, fg, 1.3)?;
             let label_rect = Rect::new(rect.x + 20.0, rect.y, rect.width - 23.0, rect.height);
@@ -630,7 +628,7 @@ impl AiDrawer {
             }
         }
 
-        // Close button (`SfSymbol::CloseX`, no ASCII `"X"`)
+        // Close button (`SfSymbol::CloseX`)
         let close_r = self.button_rect(self.close_rect());
         surface.draw_liquid_glass_button(
             close_r,
@@ -640,7 +638,7 @@ impl AiDrawer {
             self.is_pressed(self.close_rect()),
         )?;
         let close_icon = Rect::new(close_r.x + 7.0, close_r.y + 7.0, 14.0, 14.0);
-        surface.draw_sf_symbol(close_icon, SfSymbol::CloseX, TEXT_SECONDARY, 1.5)?;
+        surface.draw_sf_symbol(close_icon, SfSymbol::CloseX, p.text_secondary, 1.5)?;
 
         // Subtle hairline divider below header
         surface.draw_line(
@@ -648,31 +646,45 @@ impl AiDrawer {
             py + 48.0,
             px + pw - 18.0,
             py + 48.0,
-            DIVIDER_HAIRLINE,
+            p.divider,
             1.0,
         )?;
 
         match self.active_tab {
-            DrawerTab::Chat => self.render_chat_tab(surface, panel.height)?,
-            DrawerTab::Translate => self.render_translate_tab(surface, panel.height)?,
-            DrawerTab::Workspace => self.render_workspace_tab(surface, panel.height)?,
+            DrawerTab::Chat => self.render_chat_tab(surface, panel.height, &p)?,
+            DrawerTab::Translate => self.render_translate_tab(surface, panel.height, &p)?,
+            DrawerTab::Workspace => self.render_workspace_tab(surface, panel.height, &p)?,
         }
 
         Ok(())
     }
 
-    fn render_chat_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
+    fn render_adaptive_card(
+        &self,
+        surface: &NativeSurface,
+        rect: Rect,
+        radius: f32,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        surface.fill_rounded_rect(rect, radius, p.glass_elevated)?;
+        surface.stroke_rounded_rect(rect, radius, p.hairline_border, 0.85)?;
+        Ok(())
+    }
+
+    fn render_chat_tab(
+        &self,
+        surface: &NativeSurface,
+        panel_height: f32,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         // Attachments bar from FileShelf
         if !self.attachments.is_empty() {
             let attach_bar = Rect::new(20.0, 56.0, self.width - 40.0, 28.0);
-            surface.draw_liquid_glass_panel(
-                attach_bar,
-                LiquidGlassStyle::elevated(9.0).without_shadow(),
-            )?;
+            self.render_adaptive_card(surface, attach_bar, 9.0, p)?;
             surface.draw_sf_symbol(
                 Rect::new(28.0, 63.0, 14.0, 14.0),
                 SfSymbol::FolderDrop,
-                SYSTEM_BLUE,
+                p.accent,
                 1.4,
             )?;
             let summary = format!("{} shelf attachment(s)", self.attachments.len());
@@ -680,7 +692,7 @@ impl AiDrawer {
                 &summary,
                 Rect::new(48.0, 56.0, self.width - 168.0, 28.0),
                 11.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Leading,
             )?;
             let clear_raw = self.clear_attachments_rect();
@@ -695,14 +707,14 @@ impl AiDrawer {
             surface.draw_sf_symbol(
                 Rect::new(clear_r.x + 8.0, clear_r.y + 7.0, 12.0, 12.0),
                 SfSymbol::Trash,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 1.3,
             )?;
             surface.draw_text(
                 "Clear",
                 Rect::new(clear_r.x + 20.0, clear_r.y, clear_r.width - 24.0, clear_r.height),
                 11.0,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Center,
             )?;
         }
@@ -715,12 +727,7 @@ impl AiDrawer {
                 break;
             }
             let bubble = Rect::new(20.0, msg_y, self.width - 40.0, 44.0);
-            let style = match msg.role {
-                ChatRole::User => LiquidGlassStyle::elevated(11.0).without_shadow(),
-                ChatRole::Assistant => LiquidGlassStyle::clear(11.0).without_shadow(),
-                ChatRole::System => LiquidGlassStyle::elevated(11.0).without_shadow(),
-            };
-            surface.draw_liquid_glass_panel(bubble, style)?;
+            self.render_adaptive_card(surface, bubble, 11.0, p)?;
 
             let role_label = match msg.role {
                 ChatRole::User => "You",
@@ -734,9 +741,9 @@ impl AiDrawer {
                 ChatRole::System => "System",
             };
             let role_color = match msg.role {
-                ChatRole::Assistant => SYSTEM_BLUE,
-                ChatRole::User => TEXT_SECONDARY,
-                ChatRole::System => TEXT_TERTIARY,
+                ChatRole::Assistant => p.accent,
+                ChatRole::User => p.text_secondary,
+                ChatRole::System => p.text_tertiary,
             };
             surface.draw_text_bold(
                 role_label,
@@ -750,16 +757,16 @@ impl AiDrawer {
                 Rect::new(32.0, msg_y + 19.0, self.width - 64.0, 21.0),
                 12.0,
                 if msg.role == ChatRole::System {
-                    TEXT_SECONDARY
+                    p.text_secondary
                 } else {
-                    TEXT_PRIMARY
+                    p.text_primary
                 },
                 TextAlign::Leading,
             )?;
             msg_y += 52.0;
         }
 
-        // Pending approval cards
+        // Pending approval cards (single primary accent CTA + calm monochrome Deny with semantic red icon)
         let mut card_y = 340.0;
         for card in self
             .approvals
@@ -770,23 +777,20 @@ impl AiDrawer {
                 break;
             }
             let rect = Rect::new(20.0, card_y, self.width - 40.0, 68.0);
-            surface.draw_liquid_glass_panel(
-                rect,
-                LiquidGlassStyle::elevated(12.0).without_shadow(),
-            )?;
-            surface.stroke_rounded_rect(rect, 12.0, STATUS_LIVE_AMBER.with_alpha(0.55), 1.0)?;
+            self.render_adaptive_card(surface, rect, 12.0, p)?;
+            surface.stroke_rounded_rect(rect, 12.0, p.status_amber.with_alpha(0.55), 1.0)?;
 
             surface.draw_sf_symbol(
                 Rect::new(30.0, card_y + 10.0, 14.0, 14.0),
                 SfSymbol::ShieldCheck,
-                STATUS_LIVE_AMBER,
+                p.status_amber,
                 1.4,
             )?;
             surface.draw_text_bold(
                 &format!("Approve {}: {}", card.tool_name, card.summary),
                 Rect::new(50.0, card_y + 7.0, self.width - 80.0, 22.0),
                 11.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Leading,
             )?;
 
@@ -798,7 +802,7 @@ impl AiDrawer {
             surface.draw_liquid_glass_button(
                 approve,
                 7.0,
-                Some(STATUS_LIVE_GREEN),
+                Some(p.accent),
                 self.is_hovered(approve_raw),
                 self.is_pressed(approve_raw),
             )?;
@@ -819,21 +823,21 @@ impl AiDrawer {
             surface.draw_liquid_glass_button(
                 deny,
                 7.0,
-                Some(STATUS_LIVE_RED),
+                None,
                 self.is_hovered(deny_raw),
                 self.is_pressed(deny_raw),
             )?;
             surface.draw_sf_symbol(
                 Rect::new(deny.x + 8.0, deny.y + 7.5, 10.0, 10.0),
                 SfSymbol::CloseX,
-                TEXT_PRIMARY,
+                p.status_red,
                 1.4,
             )?;
             surface.draw_text(
                 "Deny",
                 Rect::new(deny.x + 18.0, deny.y, deny.width - 22.0, deny.height),
                 11.0,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
             card_y += 76.0;
@@ -842,19 +846,16 @@ impl AiDrawer {
         // Input footer
         if panel_height >= 120.0 {
             let input_rect = Rect::new(20.0, self.height - 48.0, self.width - 116.0, 32.0);
-            surface.draw_liquid_glass_panel(
-                input_rect,
-                LiquidGlassStyle::elevated(10.0).without_shadow(),
-            )?;
+            self.render_adaptive_card(surface, input_rect, 10.0, p)?;
             let prompt_text = if self.draft_prompt.is_empty() {
                 "Ask Hime AI..."
             } else {
                 self.draft_prompt.as_str()
             };
             let prompt_color = if self.draft_prompt.is_empty() {
-                TEXT_TERTIARY
+                p.text_tertiary
             } else {
-                TEXT_PRIMARY
+                p.text_primary
             };
             surface.draw_text(
                 prompt_text,
@@ -871,7 +872,7 @@ impl AiDrawer {
                     input_rect.y + 8.0,
                     approx_caret_x,
                     input_rect.y + input_rect.height - 8.0,
-                    SYSTEM_BLUE,
+                    p.accent,
                     1.5,
                 )?;
             }
@@ -882,21 +883,22 @@ impl AiDrawer {
             surface.draw_liquid_glass_button(
                 send_rect,
                 10.0,
-                if can_send { Some(SYSTEM_BLUE) } else { None },
+                if can_send { Some(p.accent) } else { None },
                 self.is_hovered(send_raw),
                 self.is_pressed(send_raw),
             )?;
+            let send_fg = if can_send { TEXT_PRIMARY } else { p.text_secondary };
             surface.draw_sf_symbol(
                 Rect::new(send_rect.x + 9.0, send_rect.y + 10.0, 12.0, 12.0),
                 SfSymbol::SendArrow,
-                TEXT_PRIMARY,
+                send_fg,
                 1.5,
             )?;
             surface.draw_text_bold(
                 "Send",
                 Rect::new(send_rect.x + 21.0, send_rect.y, send_rect.width - 25.0, send_rect.height),
                 11.5,
-                TEXT_PRIMARY,
+                send_fg,
                 TextAlign::Center,
             )?;
         }
@@ -904,7 +906,12 @@ impl AiDrawer {
         Ok(())
     }
 
-    fn render_translate_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
+    fn render_translate_tab(
+        &self,
+        surface: &NativeSurface,
+        panel_height: f32,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         if panel_height < 140.0 {
             return Ok(());
         }
@@ -913,37 +920,34 @@ impl AiDrawer {
             "Selection Translate",
             Rect::new(20.0, 58.0, 220.0, 24.0),
             13.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
         let lang_badge = Rect::new(self.width - 130.0, 58.0, 110.0, 24.0);
-        surface.fill_rounded_rect(lang_badge, 8.0, GLASS_CONTROL)?;
-        surface.stroke_rounded_rect(lang_badge, 8.0, GLASS_HAIRLINE, 0.8)?;
+        surface.fill_rounded_rect(lang_badge, 8.0, p.control_fill)?;
+        surface.stroke_rounded_rect(lang_badge, 8.0, p.hairline_border, 0.8)?;
         surface.draw_sf_symbol(
             Rect::new(lang_badge.x + 8.0, lang_badge.y + 6.0, 12.0, 12.0),
             SfSymbol::Globe,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.3,
         )?;
         surface.draw_text(
             &format!("Target: {}", self.translation.target_lang.to_uppercase()),
             Rect::new(lang_badge.x + 22.0, lang_badge.y, lang_badge.width - 26.0, lang_badge.height),
             10.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
         let source_card = Rect::new(20.0, 92.0, self.width - 40.0, 112.0);
-        surface.draw_liquid_glass_panel(
-            source_card,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, source_card, 12.0, p)?;
         surface.draw_text(
             &format!("SOURCE ({})", self.translation.source_lang.to_uppercase()),
             Rect::new(32.0, 100.0, self.width - 64.0, 18.0),
             10.5,
-            TEXT_TERTIARY,
+            p.text_tertiary,
             TextAlign::Leading,
         )?;
         let source_body = if self.translation.source_text.is_empty() {
@@ -952,9 +956,9 @@ impl AiDrawer {
             self.translation.source_text.as_str()
         };
         let source_color = if self.translation.source_text.is_empty() {
-            TEXT_SECONDARY
+            p.text_secondary
         } else {
-            TEXT_PRIMARY
+            p.text_primary
         };
         surface.draw_text(
             source_body,
@@ -965,10 +969,7 @@ impl AiDrawer {
         )?;
 
         let result_card = Rect::new(20.0, 216.0, self.width - 40.0, 160.0);
-        surface.draw_liquid_glass_panel(
-            result_card,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, result_card, 12.0, p)?;
         let header_label = if self.translation.cached {
             "TRANSLATION • CACHED"
         } else {
@@ -978,11 +979,7 @@ impl AiDrawer {
             header_label,
             Rect::new(32.0, 224.0, self.width - 64.0, 18.0),
             10.5,
-            if self.translation.cached {
-                SYSTEM_BLUE
-            } else {
-                TEXT_TERTIARY
-            },
+            if self.translation.cached { p.accent } else { p.text_tertiary },
             TextAlign::Leading,
         )?;
         let translated_body = if self.translation.translated_text.is_empty() {
@@ -991,9 +988,9 @@ impl AiDrawer {
             self.translation.translated_text.as_str()
         };
         let translated_color = if self.translation.translated_text.is_empty() {
-            TEXT_SECONDARY
+            p.text_secondary
         } else {
-            TEXT_PRIMARY
+            p.text_primary
         };
         surface.draw_text(
             translated_body,
@@ -1015,14 +1012,14 @@ impl AiDrawer {
         surface.draw_sf_symbol(
             Rect::new(clear_rect.x + 12.0, clear_rect.y + 9.0, 13.0, 13.0),
             SfSymbol::Trash,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.3,
         )?;
         surface.draw_text(
             "Clear",
             Rect::new(clear_rect.x + 26.0, clear_rect.y, clear_rect.width - 32.0, clear_rect.height),
             11.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Center,
         )?;
 
@@ -1032,21 +1029,22 @@ impl AiDrawer {
         surface.draw_liquid_glass_button(
             copy_rect,
             8.0,
-            if has_result { Some(SYSTEM_BLUE) } else { None },
+            if has_result { Some(p.accent) } else { None },
             self.is_hovered(copy_raw),
             self.is_pressed(copy_raw),
         )?;
+        let copy_fg = if has_result { TEXT_PRIMARY } else { p.text_secondary };
         surface.draw_sf_symbol(
             Rect::new(copy_rect.x + 14.0, copy_rect.y + 9.0, 13.0, 13.0),
             SfSymbol::Copy,
-            if has_result { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            copy_fg,
             1.4,
         )?;
         surface.draw_text_bold(
             "Copy",
             Rect::new(copy_rect.x + 28.0, copy_rect.y, copy_rect.width - 34.0, copy_rect.height),
             11.5,
-            if has_result { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            copy_fg,
             TextAlign::Center,
         )?;
 
@@ -1055,7 +1053,7 @@ impl AiDrawer {
                 notice,
                 Rect::new(20.0, 434.0, self.width - 40.0, 22.0),
                 11.0,
-                STATUS_LIVE_GREEN,
+                p.status_green,
                 TextAlign::Leading,
             )?;
         }
@@ -1063,39 +1061,41 @@ impl AiDrawer {
         Ok(())
     }
 
-    fn render_workspace_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
+    fn render_workspace_tab(
+        &self,
+        surface: &NativeSurface,
+        panel_height: f32,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         if panel_height < 160.0 {
             return Ok(());
         }
 
         // Developer card
         let dev_card = Rect::new(20.0, 58.0, self.width - 40.0, 192.0);
-        surface.draw_liquid_glass_panel(
-            dev_card,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, dev_card, 12.0, p)?;
         surface.draw_sf_symbol(
             Rect::new(34.0, 71.0, 15.0, 15.0),
             SfSymbol::Terminal,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
         surface.draw_text_bold(
             "Developer",
             Rect::new(54.0, 68.0, 160.0, 22.0),
             13.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
         let branch_pill = Rect::new(self.width - 174.0, 66.0, 140.0, 24.0);
-        surface.fill_rounded_rect(branch_pill, 7.0, GLASS_CONTROL)?;
-        surface.stroke_rounded_rect(branch_pill, 7.0, GLASS_HAIRLINE, 0.8)?;
+        surface.fill_rounded_rect(branch_pill, 7.0, p.control_fill)?;
+        surface.stroke_rounded_rect(branch_pill, 7.0, p.hairline_border, 0.8)?;
         surface.draw_text(
             &self.developer.branch,
             branch_pill,
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -1113,14 +1113,14 @@ impl AiDrawer {
             &git_summary,
             Rect::new(34.0, 102.0, self.width - 68.0, 22.0),
             11.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
         let scan_color = if self.developer.secret_findings_count == 0 {
-            STATUS_LIVE_GREEN
+            p.status_green
         } else {
-            STATUS_LIVE_RED
+            p.status_red
         };
         let scan_summary = format!(
             "Secret Scan: {} finding(s)",
@@ -1139,7 +1139,7 @@ impl AiDrawer {
                 status,
                 Rect::new(34.0, 202.0, self.width - 200.0, 24.0),
                 11.0,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Leading,
             )?;
         }
@@ -1156,47 +1156,44 @@ impl AiDrawer {
         surface.draw_sf_symbol(
             Rect::new(dev_btn.x + 9.0, dev_btn.y + 9.0, 13.0, 13.0),
             SfSymbol::ShieldCheck,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text(
             "Dev Check",
             Rect::new(dev_btn.x + 22.0, dev_btn.y, dev_btn.width - 26.0, dev_btn.height),
             11.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
         // Documents card
         let docs_card = Rect::new(20.0, 266.0, self.width - 40.0, 174.0);
-        surface.draw_liquid_glass_panel(
-            docs_card,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, docs_card, 12.0, p)?;
         surface.draw_sf_symbol(
             Rect::new(34.0, 281.0, 15.0, 15.0),
             SfSymbol::Document,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
         surface.draw_text_bold(
             "Documents",
             Rect::new(54.0, 278.0, 160.0, 22.0),
             13.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
         let total_jobs =
             self.documents.active_jobs + self.documents.completed_jobs + self.documents.failed_jobs;
         let jobs_pill = Rect::new(self.width - 144.0, 276.0, 110.0, 24.0);
-        surface.fill_rounded_rect(jobs_pill, 7.0, GLASS_CONTROL)?;
-        surface.stroke_rounded_rect(jobs_pill, 7.0, GLASS_HAIRLINE, 0.8)?;
+        surface.fill_rounded_rect(jobs_pill, 7.0, p.control_fill)?;
+        surface.stroke_rounded_rect(jobs_pill, 7.0, p.hairline_border, 0.8)?;
         surface.draw_text(
             &format!("{total_jobs} job(s)"),
             jobs_pill,
             11.0,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Center,
         )?;
 
@@ -1210,7 +1207,7 @@ impl AiDrawer {
             &jobs_summary,
             Rect::new(34.0, 314.0, self.width - 68.0, 22.0),
             11.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
@@ -1223,7 +1220,7 @@ impl AiDrawer {
             latest_doc,
             Rect::new(34.0, 346.0, self.width - 68.0, 22.0),
             11.0,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
 
@@ -1239,14 +1236,14 @@ impl AiDrawer {
         surface.draw_sf_symbol(
             Rect::new(docs_btn.x + 9.0, docs_btn.y + 9.0, 13.0, 13.0),
             SfSymbol::Refresh,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text(
             "Refresh",
             Rect::new(docs_btn.x + 22.0, docs_btn.y, docs_btn.width - 26.0, docs_btn.height),
             11.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -1540,5 +1537,46 @@ mod tests {
             drawer.render(&surface).expect("AiDrawer::render should succeed");
             surface.end_draw_and_present().expect("present should succeed");
         }
+    }
+
+    #[test]
+    fn drawer_adapts_liquid_glass_between_light_and_dark_backdrops() {
+        use crate::theme::{ColorThemeMode, ThemePolarity};
+
+        let surface = match NativeSurface::new("AiDrawerAdaptiveTest", -2200, -2200, 440, 500) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut drawer = AiDrawer::new();
+        drawer.open();
+        for _ in 0..60 {
+            drawer.tick(1.0 / 60.0);
+        }
+        drawer.push_user_message("u1", "Check contrast");
+        drawer.push_approval_card(ApprovalCard {
+            id: "a1".into(),
+            tool_name: "read".into(),
+            summary: "README.md".into(),
+            risk_level: "low".into(),
+            status: ApprovalStatus::Pending,
+        });
+
+        let mut dark_bg = vec![10_u8; 64 * 64 * 4];
+        for px in dark_bg.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        surface.set_backdrop_pixels(64, 64, &dark_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface.begin_draw();
+        drawer.render(&surface).expect("LightGlass drawer render should succeed");
+        surface.end_draw_and_present().expect("LightGlass present");
+
+        let bright_bg = vec![245_u8; 64 * 64 * 4];
+        surface.set_backdrop_pixels(64, 64, &bright_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        surface.begin_draw();
+        drawer.render(&surface).expect("DarkGlass drawer render should succeed");
+        surface.end_draw_and_present().expect("DarkGlass present");
     }
 }

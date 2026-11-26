@@ -43,16 +43,16 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BringWindowToTop, CallWindowProcW, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowExW, FindWindowW,
-    GetClassNameA, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongA, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer,
-    LoadCursorW, LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongA, SetWindowLongPtrW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, GWL_EXSTYLE, GWLP_WNDPROC, HTCLIENT,
-    HWND_MESSAGE, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_STRING, MSG, PM_REMOVE, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-    TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+    GetAncestor, GetClassNameA, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongA,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    KillTimer, LoadCursorW, LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongA,
+    SetWindowLongPtrW, ShowWindow, TrackPopupMenu, TranslateMessage, GA_ROOT, GWL_EXSTYLE,
+    GWLP_WNDPROC, HTCLIENT, HWND_MESSAGE, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_STRING, MSG,
+    PM_REMOVE, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_TIMER, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
 };
 
 use hime_island_native::ai_drawer::{
@@ -92,6 +92,7 @@ use hime_island_native::shelf::{FileShelf, ShelfItemKind};
 use hime_island_native::telemetry::{
     self, NetworkKind, RunningWindow, TelemetryHandle, TelemetrySnapshot, WifiNetworkInfo,
 };
+use hime_island_native::theme::ColorThemeMode;
 
 const CONTROLLER_CLASS: PCWSTR = w!("HimeIslandNativeController");
 const TRAY_ICON_ID: u32 = 1;
@@ -119,6 +120,7 @@ const VK_T: u32 = 0x54;
 const PROACTIVE_EVAL_INTERVAL: Duration = Duration::from_secs(60);
 const CORE_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MEDIA_TIMELINE_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+const BACKDROP_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 
 static ORIG_SURFACE_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static EXTRA_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
@@ -870,6 +872,61 @@ fn open_shell_uri(uri: &str) {
     }
 }
 
+#[derive(Default)]
+struct BackdropSlot {
+    last_at: Option<Instant>,
+    last_hash: Option<u64>,
+}
+
+fn hash_backdrop(width: u32, height: u32, bgra: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ ((width as u64) << 32) ^ (height as u64);
+    for chunk in bgra.chunks_exact(16) {
+        let word = u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[8], chunk[9], chunk[10], chunk[11],
+        ]);
+        h ^= word;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
+fn update_surface_backdrop(
+    capturer: &mut os_shell::BackdropCapturer,
+    surface: &NativeSurface,
+    slot: &mut BackdropSlot,
+    bounds: (i32, i32, u32, u32),
+    exclude_hwnds: &[isize],
+    is_surface_hidden: bool,
+    force: bool,
+) -> bool {
+    let now = Instant::now();
+    if !force
+        && slot
+            .last_at
+            .is_some_and(|t| now.duration_since(t) < BACKDROP_REFRESH_INTERVAL)
+    {
+        return false;
+    }
+    slot.last_at = Some(now);
+    let Some(cap) = capturer.capture_region(
+        bounds.0,
+        bounds.1,
+        bounds.2,
+        bounds.3,
+        exclude_hwnds,
+        is_surface_hidden,
+    ) else {
+        return false;
+    };
+    let h = hash_backdrop(cap.width, cap.height, &cap.bgra);
+    if slot.last_hash == Some(h) {
+        return false;
+    }
+    slot.last_hash = Some(h);
+    surface.set_backdrop_pixels(cap.width, cap.height, &cap.bgra);
+    true
+}
+
 struct AppShell {
     notch: NotchView,
     dock: DockBar,
@@ -891,6 +948,13 @@ struct AppShell {
     overlay_right_surface: NativeSurface,
     settings_surface: Option<NativeSurface>,
     drawer_surface: Option<NativeSurface>,
+    backdrop_capturer: os_shell::BackdropCapturer,
+    backdrop_notch: BackdropSlot,
+    backdrop_dock: BackdropSlot,
+    backdrop_overlay_left: BackdropSlot,
+    backdrop_overlay_right: BackdropSlot,
+    backdrop_settings: BackdropSlot,
+    backdrop_drawer: BackdropSlot,
     last_tick: Instant,
     startup_at: Instant,
     startup_trim_done: bool,
@@ -944,7 +1008,6 @@ impl AppShell {
         }
         subclass_surface(notch_surface.hwnd());
         notch_surface.set_click_through(true);
-        notch_surface.show();
         os_shell::enable_file_drop(notch_surface.hwnd(), true);
 
         let (dx, dy, dock_w, dock_h) = dock_surface_bounds(screen, 1.0);
@@ -1028,6 +1091,13 @@ impl AppShell {
             overlay_right_surface,
             settings_surface: None,
             drawer_surface: None,
+            backdrop_capturer: os_shell::BackdropCapturer::new(),
+            backdrop_notch: BackdropSlot::default(),
+            backdrop_dock: BackdropSlot::default(),
+            backdrop_overlay_left: BackdropSlot::default(),
+            backdrop_overlay_right: BackdropSlot::default(),
+            backdrop_settings: BackdropSlot::default(),
+            backdrop_drawer: BackdropSlot::default(),
             last_tick: now,
             startup_at: now,
             startup_trim_done: false,
@@ -1080,6 +1150,7 @@ impl AppShell {
 
         let initial_snap = shell.telemetry.snapshot();
         shell.apply_telemetry(&initial_snap, false);
+        shell.refresh_all_backdrops_startup();
         shell.sync_overlay_visibility();
         shell.notch_surface.show();
         if shell.dock.visible {
@@ -1090,6 +1161,216 @@ impl AppShell {
         shell.render_all();
         shell.log_startup_diag();
         Ok(shell)
+    }
+
+    fn apply_color_theme_to_surfaces(&self) {
+        let mode = ColorThemeMode::from_str_lossy(&self.native_settings.color_theme);
+        self.notch_surface.set_color_theme_mode(mode);
+        self.dock_surface.set_color_theme_mode(mode);
+        self.overlay_left_surface.set_color_theme_mode(mode);
+        self.overlay_right_surface.set_color_theme_mode(mode);
+        if let Some(ref surf) = self.settings_surface {
+            surf.set_color_theme_mode(mode);
+        }
+        if let Some(ref surf) = self.drawer_surface {
+            surf.set_color_theme_mode(mode);
+        }
+    }
+
+    fn own_hwnds(&self) -> Vec<isize> {
+        let mut hwnds = vec![
+            self.notch_surface.hwnd().0 as isize,
+            self.dock_surface.hwnd().0 as isize,
+            self.overlay_left_surface.hwnd().0 as isize,
+            self.overlay_right_surface.hwnd().0 as isize,
+        ];
+        if let Some(ref s) = self.settings_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
+        if let Some(ref s) = self.drawer_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
+        hwnds
+    }
+
+    fn refresh_all_backdrops_startup(&mut self) {
+        let screen = os_shell::primary_screen_bounds();
+        let exclude = self.own_hwnds();
+        let n_scale = (self.notch_surface.dpi() / 96.0).max(0.5);
+        let n_bounds = notch_surface_bounds(self.notch.edge, screen, n_scale);
+        let _ = update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            &self.notch_surface,
+            &mut self.backdrop_notch,
+            n_bounds,
+            &exclude,
+            true,
+            true,
+        );
+        let d_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+        let d_bounds = dock_surface_bounds(screen, d_scale);
+        let _ = update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            &self.dock_surface,
+            &mut self.backdrop_dock,
+            d_bounds,
+            &exclude,
+            true,
+            true,
+        );
+    }
+
+    fn capture_notch_backdrop(&mut self, force: bool, is_hidden: bool) {
+        let screen = os_shell::primary_screen_bounds();
+        let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
+        let bounds = notch_surface_bounds(self.notch.edge, screen, scale);
+        let exclude = self.own_hwnds();
+        if update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            &self.notch_surface,
+            &mut self.backdrop_notch,
+            bounds,
+            &exclude,
+            is_hidden,
+            force,
+        ) {
+            self.dirty_notch = true;
+        }
+    }
+
+    fn capture_dock_backdrop(&mut self, force: bool, is_hidden: bool) {
+        let screen = os_shell::primary_screen_bounds();
+        let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+        let bounds = dock_surface_bounds(screen, scale);
+        let exclude = self.own_hwnds();
+        if update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            &self.dock_surface,
+            &mut self.backdrop_dock,
+            bounds,
+            &exclude,
+            is_hidden,
+            force,
+        ) {
+            self.dirty_dock = true;
+        }
+    }
+
+    fn capture_overlay_backdrop(&mut self, is_left: bool, force: bool, is_hidden: bool) {
+        let screen = os_shell::primary_screen_bounds();
+        let exclude = self.own_hwnds();
+        let (bounds, changed) = if is_left {
+            let scale = (self.overlay_left_surface.dpi() / 96.0).max(0.5);
+            let b = left_overlay_bounds(screen, scale);
+            let c = update_surface_backdrop(
+                &mut self.backdrop_capturer,
+                &self.overlay_left_surface,
+                &mut self.backdrop_overlay_left,
+                b,
+                &exclude,
+                is_hidden,
+                force,
+            );
+            (b, c)
+        } else {
+            let scale = (self.overlay_right_surface.dpi() / 96.0).max(0.5);
+            let b = right_overlay_bounds(screen, scale);
+            let c = update_surface_backdrop(
+                &mut self.backdrop_capturer,
+                &self.overlay_right_surface,
+                &mut self.backdrop_overlay_right,
+                b,
+                &exclude,
+                is_hidden,
+                force,
+            );
+            (b, c)
+        };
+        let _ = bounds;
+        if changed {
+            if is_left {
+                self.dirty_overlay_left = true;
+            } else {
+                self.dirty_overlay_right = true;
+            }
+        }
+    }
+
+    fn capture_settings_backdrop(&mut self, force: bool, is_hidden: bool) {
+        let exclude = self.own_hwnds();
+        let Some(ref surf) = self.settings_surface else {
+            return;
+        };
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
+            return;
+        }
+        let bounds = (
+            r.left,
+            r.top,
+            (r.right - r.left).max(1) as u32,
+            (r.bottom - r.top).max(1) as u32,
+        );
+        if update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            surf,
+            &mut self.backdrop_settings,
+            bounds,
+            &exclude,
+            is_hidden,
+            force,
+        ) {
+            self.dirty_settings = true;
+        }
+    }
+
+    fn capture_drawer_backdrop(&mut self, force: bool, is_hidden: bool) {
+        let exclude = self.own_hwnds();
+        let Some(ref surf) = self.drawer_surface else {
+            return;
+        };
+        let mut r = RECT::default();
+        if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
+            return;
+        }
+        let bounds = (
+            r.left,
+            r.top,
+            (r.right - r.left).max(1) as u32,
+            (r.bottom - r.top).max(1) as u32,
+        );
+        if update_surface_backdrop(
+            &mut self.backdrop_capturer,
+            surf,
+            &mut self.backdrop_drawer,
+            bounds,
+            &exclude,
+            is_hidden,
+            force,
+        ) {
+            self.dirty_drawer = true;
+        }
+    }
+
+    fn refresh_visible_backdrops(&mut self) {
+        if !self.notch.is_hidden {
+            self.capture_notch_backdrop(false, false);
+        }
+        if self.dock.visible && !self.dock.is_hidden {
+            self.capture_dock_backdrop(false, false);
+        }
+        if self.overlays.volume.is_visible() {
+            self.capture_overlay_backdrop(true, false, false);
+        }
+        if self.overlays.brightness.is_visible() {
+            self.capture_overlay_backdrop(false, false, false);
+        }
+        if self.settings.visible {
+            self.capture_settings_backdrop(false, false);
+        }
+        if self.ai_drawer.visible {
+            self.capture_drawer_backdrop(false, false);
+        }
     }
 
     fn ensure_ipc_client(&mut self) -> Arc<HimeIpcClient> {
@@ -1140,7 +1421,12 @@ impl AppShell {
         }
         let hwnd = settings_surface.hwnd();
         subclass_surface(hwnd);
+        settings_surface.set_color_theme_mode(ColorThemeMode::from_str_lossy(
+            &self.native_settings.color_theme,
+        ));
         self.settings_surface = Some(settings_surface);
+        self.backdrop_settings = BackdropSlot::default();
+        self.capture_settings_backdrop(true, true);
         self.dirty_settings = true;
         Some(hwnd)
     }
@@ -1172,7 +1458,12 @@ impl AppShell {
         let hwnd = drawer_surface.hwnd();
         subclass_surface(hwnd);
         os_shell::enable_file_drop(hwnd, true);
+        drawer_surface.set_color_theme_mode(ColorThemeMode::from_str_lossy(
+            &self.native_settings.color_theme,
+        ));
         self.drawer_surface = Some(drawer_surface);
+        self.backdrop_drawer = BackdropSlot::default();
+        self.capture_drawer_backdrop(true, true);
         self.dirty_drawer = true;
         Some(hwnd)
     }
@@ -1184,6 +1475,7 @@ impl AppShell {
                 drop(surf);
                 d2d::trim_working_set();
             }
+            self.backdrop_settings = BackdropSlot::default();
             self.dirty_settings = false;
         }
     }
@@ -1195,6 +1487,7 @@ impl AppShell {
                 drop(surf);
                 d2d::trim_working_set();
             }
+            self.backdrop_drawer = BackdropSlot::default();
             self.dirty_drawer = false;
         }
     }
@@ -1253,6 +1546,7 @@ impl AppShell {
     fn apply_native_settings(&mut self, ns: &NativeSettings, save: bool) {
         let norm = ns.normalized();
         self.native_settings = norm.clone();
+        self.apply_color_theme_to_surfaces();
         apply_native_settings_to_panel(&norm, &mut self.settings);
         if save {
             let _ = SettingsStore::save(&norm);
@@ -1513,6 +1807,9 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_left = true;
             } else if self.last_snap_volume != Some(vol_pair) {
+                if !self.overlays.volume.is_visible() {
+                    self.capture_overlay_backdrop(true, true, true);
+                }
                 self.overlays.show_volume(
                     snap.volume.percent,
                     snap.volume.muted,
@@ -1541,6 +1838,9 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_right = true;
             } else if self.last_snap_brightness != Some(bri) {
+                if !self.overlays.brightness.is_visible() {
+                    self.capture_overlay_backdrop(false, true, true);
+                }
                 self.overlays.show_brightness(bri);
                 self.notch.set_brightness(bri);
                 self.dirty_notch = true;
@@ -1617,6 +1917,7 @@ impl AppShell {
             if keep_notch_visible {
                 self.notch_leave_at = None;
                 if (near_wake || over_notch || drag_near_notch) && self.notch.is_hidden {
+                    self.capture_notch_backdrop(true, true);
                     self.notch.set_hidden(false);
                 }
             } else if self.native_settings.notch_mode == "peek" {
@@ -1672,6 +1973,9 @@ impl AppShell {
                 ) || os_shell::is_point_in_rect(local_dx, local_dy, wake);
 
                 if self.dock.is_hidden && self.dock.show_progress.value <= 0.2 {
+                    if over_wake {
+                        self.capture_dock_backdrop(true, true);
+                    }
                     self.dock.set_edge_hovered(over_wake);
                     self.dock_surface.set_click_through(true);
                 } else {
@@ -1838,17 +2142,31 @@ impl AppShell {
         let surf_rect = Rect::new(0.0, 0.0, sw, sh);
         let lx = (cx - ox) as f32 / scale;
         let ly = (cy - oy) as f32 / scale;
-        let (hud, surf) = if is_left {
-            (&mut self.overlays.volume, &self.overlay_left_surface)
-        } else {
-            (&mut self.overlays.brightness, &self.overlay_right_surface)
+        let (enabled, was_visible, is_expanded, is_hovered, is_dragging, over_pill, over_wake_rect) = {
+            let hud = if is_left {
+                &self.overlays.volume
+            } else {
+                &self.overlays.brightness
+            };
+            (
+                hud.enabled,
+                hud.is_visible(),
+                hud.is_expanded(),
+                hud.is_hovered,
+                hud.is_dragging,
+                hud.is_expanded() && hud.hit_test_pill(lx, ly, surf_rect),
+                os_shell::is_point_in_rect(lx, ly, hud.wake_hit_rect(surf_rect)),
+            )
         };
-        if !hud.enabled {
+        if !enabled {
+            let surf = if is_left {
+                &self.overlay_left_surface
+            } else {
+                &self.overlay_right_surface
+            };
             surf.set_click_through(true);
             return false;
         }
-        let over_pill = hud.is_expanded() && hud.hit_test_pill(lx, ly, surf_rect);
-        let over_wake_rect = os_shell::is_point_in_rect(lx, ly, hud.wake_hit_rect(surf_rect));
         let over_edge = os_shell::is_overlay_edge_hovered(
             cx as f32,
             cy as f32,
@@ -1858,7 +2176,15 @@ impl AppShell {
             OVERLAY_DIP_HEIGHT * scale,
         );
         let over = over_pill || over_wake_rect || over_edge;
-        if over != hud.is_hovered && (over || !hud.is_dragging) {
+        if over && !was_visible {
+            self.capture_overlay_backdrop(is_left, true, true);
+        }
+        let (hud, surf) = if is_left {
+            (&mut self.overlays.volume, &self.overlay_left_surface)
+        } else {
+            (&mut self.overlays.brightness, &self.overlay_right_surface)
+        };
+        if over != is_hovered && (over || !is_dragging) {
             hud.set_hovered(over);
             if is_left {
                 self.dirty_overlay_left = true;
@@ -1866,7 +2192,7 @@ impl AppShell {
                 self.dirty_overlay_right = true;
             }
         }
-        let interactive = hud.is_expanded() || hud.is_hovered || hud.is_dragging;
+        let interactive = is_expanded || hud.is_expanded() || hud.is_hovered || is_dragging;
         surf.set_click_through(!interactive);
         over
     }
@@ -2801,6 +3127,7 @@ impl AppShell {
             | SettingsAction::ToggleNotchMode
             | SettingsAction::ToggleFreeDrag
             | SettingsAction::ToggleHimeAi
+            | SettingsAction::CycleColorTheme
             | SettingsAction::ResetToDefaults => {
                 let ns = extract_native_settings_from_panel(&self.settings);
                 self.apply_native_settings(&ns, true);
@@ -3873,6 +4200,7 @@ impl AppShell {
             || watch_outside_click
             || self.notch.has_active_banner();
 
+        self.refresh_visible_backdrops();
         self.sync_overlay_visibility();
         self.render_all();
         self.release_settings_surface_if_idle();
@@ -4401,6 +4729,7 @@ fn apply_native_settings_to_panel(ns: &NativeSettings, panel: &mut SettingsPanel
     panel.state.dock_win_number_enabled = norm.dock_win_number_enabled;
     panel.state.volume_overlay_enabled = norm.volume_overlay_enabled;
     panel.state.brightness_overlay_enabled = norm.brightness_overlay_enabled;
+    panel.state.color_theme = norm.color_theme.clone();
     panel.state.hime_ai_enabled = norm.hime_ai_enabled;
     panel.state.hime_router_url = norm.hime_router_url.clone();
     panel.state.hime_router_model = norm.hime_router_model.clone();
@@ -4434,6 +4763,7 @@ fn extract_native_settings_from_panel(panel: &SettingsPanel) -> NativeSettings {
         dock_win_number_enabled: panel.state.dock_win_number_enabled,
         volume_overlay_enabled: panel.state.volume_overlay_enabled,
         brightness_overlay_enabled: panel.state.brightness_overlay_enabled,
+        color_theme: panel.state.color_theme.clone(),
         hime_ai_enabled: panel.state.hime_ai_enabled,
         hime_router_url: panel.state.hime_router_url.clone(),
         hime_router_model: panel.state.hime_router_model.clone(),
@@ -4834,8 +5164,14 @@ fn notch_surface_bounds(
 
 fn focus_hwnd(hwnd_raw: isize) -> bool {
     unsafe {
-        let wnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-        if IsWindow(Some(wnd)).as_bool() {
+        let raw_wnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        if IsWindow(Some(raw_wnd)).as_bool() {
+            let root = GetAncestor(raw_wnd, GA_ROOT);
+            let wnd = if !root.0.is_null() && IsWindow(Some(root)).as_bool() {
+                root
+            } else {
+                raw_wnd
+            };
             if IsIconic(wnd).as_bool() {
                 let _ = ShowWindow(wnd, SW_RESTORE);
             } else if !IsWindowVisible(wnd).as_bool() {
@@ -4854,7 +5190,12 @@ fn focus_hwnd(hwnd_raw: isize) -> bool {
 fn focus_or_launch_dock_item(item: &DockItem) {
     if !item.hwnds.is_empty() {
         let fg = unsafe { GetForegroundWindow().0 as isize };
-        let target_raw = if item.hwnds.len() > 1 && item.hwnds[0] == fg {
+        let is_first_fg = unsafe {
+            let first = HWND(item.hwnds[0] as *mut std::ffi::c_void);
+            let root = GetAncestor(first, GA_ROOT);
+            item.hwnds[0] == fg || (!root.0.is_null() && root.0 as isize == fg)
+        };
+        let target_raw = if item.hwnds.len() > 1 && is_first_fg {
             item.hwnds[1]
         } else {
             item.hwnds[0]
@@ -5240,6 +5581,7 @@ mod tests {
         ns.dock_win_number_enabled = false;
         ns.volume_overlay_enabled = false;
         ns.brightness_overlay_enabled = true;
+        ns.color_theme = "light".to_string();
         ns.hime_ai_enabled = false;
         ns.hime_router_url = "https://api.openai.com/v1".to_string();
         ns.hime_router_model = "gpt-4o-mini".to_string();

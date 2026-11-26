@@ -37,6 +37,8 @@ pub struct NativeSettings {
 
     pub volume_overlay_enabled: bool,
     pub brightness_overlay_enabled: bool,
+    /// `"auto"` | `"dark"` | `"light"`
+    pub color_theme: String,
 
     pub hime_ai_enabled: bool,
     pub hime_router_url: String,
@@ -58,6 +60,7 @@ impl Default for NativeSettings {
             dock_win_number_enabled: true,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: true,
+            color_theme: "auto".to_string(),
             hime_ai_enabled: true,
             hime_router_url: DEFAULT_ROUTER_URL.to_string(),
             hime_router_model: DEFAULT_ROUTER_MODEL.to_string(),
@@ -72,6 +75,7 @@ impl NativeSettings {
         out.notch_mode = normalize_notch_mode(&out.notch_mode).to_string();
         out.notch_edge = normalize_notch_edge(&out.notch_edge).to_string();
         out.dock_mode = normalize_dock_mode(&out.dock_mode).to_string();
+        out.color_theme = normalize_color_theme(&out.color_theme).to_string();
         if out.hime_router_url.trim().is_empty() {
             out.hime_router_url = DEFAULT_ROUTER_URL.to_string();
         } else {
@@ -116,6 +120,17 @@ impl NativeSettings {
         }
         .to_string();
         &self.dock_mode
+    }
+
+    /// Cycles `color_theme`: `"auto"` -> `"dark"` -> `"light"` -> `"auto"`.
+    pub fn cycle_color_theme(&mut self) -> &str {
+        self.color_theme = match normalize_color_theme(&self.color_theme) {
+            "auto" => "dark",
+            "dark" => "light",
+            _ => "auto",
+        }
+        .to_string();
+        &self.color_theme
     }
 }
 
@@ -255,6 +270,12 @@ impl SettingsStore {
             ],
             def.brightness_overlay_enabled,
         );
+        let color_theme = read_str(
+            map,
+            &["hime-color-theme", "bloom-color-theme", "color_theme"],
+        )
+        .map(|s| normalize_color_theme(&s).to_string())
+        .unwrap_or(def.color_theme);
 
         let hime_ai_enabled = read_bool(
             map,
@@ -281,6 +302,7 @@ impl SettingsStore {
             dock_win_number_enabled,
             volume_overlay_enabled,
             brightness_overlay_enabled,
+            color_theme,
             hime_ai_enabled,
             hime_router_url,
             hime_router_model,
@@ -329,6 +351,11 @@ impl SettingsStore {
             "bloom-brightness-overlay-enabled".into(),
             bool_str_value(s.brightness_overlay_enabled),
         );
+        map.insert(
+            "hime-color-theme".into(),
+            Value::String(s.color_theme.clone()),
+        );
+        map.insert("bloom-color-theme".into(), Value::String(s.color_theme));
 
         map.insert(
             "bloom-assistant-enabled".into(),
@@ -368,6 +395,14 @@ fn normalize_dock_mode(raw: &str) -> &'static str {
         "auto-hide" | "autohide" => "auto-hide",
         "smart" => "smart",
         _ => "fixed",
+    }
+}
+
+pub fn normalize_color_theme(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dark" => "dark",
+        "light" => "light",
+        _ => "auto",
     }
 }
 
@@ -482,6 +517,7 @@ mod tests {
             dock_win_number_enabled: false,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: false,
+            color_theme: "dark".to_string(),
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
             hime_router_model: "gemini-2.5-flash".to_string(),
@@ -510,6 +546,7 @@ mod tests {
         updated.notch_edge = "right".to_string();
         updated.dock_mode = "smart".to_string();
         updated.free_drag_enabled = true;
+        updated.color_theme = "light".to_string();
         updated.hime_router_model = "gpt-4o-mini".to_string();
         SettingsStore::save_to_path(&path, &updated).unwrap();
 
@@ -527,11 +564,34 @@ mod tests {
             Some("peek")
         );
         assert_eq!(
+            raw_map.get("hime-color-theme").and_then(|v| v.as_str()),
+            Some("light")
+        );
+        assert_eq!(
+            raw_map.get("bloom-color-theme").and_then(|v| v.as_str()),
+            Some("light")
+        );
+        assert_eq!(
             raw_map.get("hime-9router-model").and_then(|v| v.as_str()),
             Some("gpt-4o-mini")
         );
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn color_theme_normalizes_cycles_and_reads_legacy_key() {
+        let mut ns = NativeSettings::default();
+        assert_eq!(ns.color_theme, "auto");
+        assert_eq!(ns.cycle_color_theme(), "dark");
+        assert_eq!(ns.cycle_color_theme(), "light");
+        assert_eq!(ns.cycle_color_theme(), "auto");
+
+        let legacy = SettingsStore::from_json_str(r#"{"bloom-color-theme":"LIGHT"}"#).unwrap();
+        assert_eq!(legacy.color_theme, "light");
+
+        let invalid = SettingsStore::from_json_str(r#"{"hime-color-theme":"neon"}"#).unwrap();
+        assert_eq!(invalid.color_theme, "auto");
     }
 
     #[test]

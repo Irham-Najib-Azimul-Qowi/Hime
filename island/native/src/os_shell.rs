@@ -20,8 +20,14 @@ use std::time::Duration;
 
 use windows::core::{BOOL, PCSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC, DeleteObject, FillRect,
+    GetDC, GetMonitorInfoW, GetSysColor, MonitorFromPoint, ReleaseDC, SelectObject,
+    SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BACKGROUND,
+    DIB_RGB_COLORS, HALFTONE, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ABM_GETSTATE, ABM_GETTASKBARPOS,
@@ -33,12 +39,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics, GetWindowLongA,
-    GetWindowLongW, GetWindowRect, IsWindowVisible, SetForegroundWindow,
+    GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongA, SetWindowLongW, SetWindowPos, ShowWindow,
     GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_HIDEWINDOW, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TRANSPARENT,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 use crate::d2d::Rect;
@@ -618,31 +624,64 @@ pub fn is_notch_edge_hovered(
     let ry = cursor_y - screen.y as f32;
     let sw = screen.width.max(1) as f32;
     let sh = screen.height.max(1) as f32;
+    if rx < 0.0 || rx > sw || ry < 0.0 || ry > sh {
+        return false;
+    }
     let rect = notch.computed_rect(sw, sh);
 
     if notch.is_hidden {
-        let margin = wake_margin_px.max(1.0);
+        // When hidden, strictly match the minimized 48x3 target bar span unless dragging files
+        // externally (wake_margin_px > 20.0) so top-edge hover never leaks across wide empty space.
+        let is_drag = wake_margin_px > 20.0;
+        let margin = if is_drag {
+            wake_margin_px
+        } else {
+            wake_margin_px.clamp(3.0, 6.0)
+        };
         let wake_rect = match notch.edge {
             NotchEdge::Top => {
-                let span = rect.width.max(220.0);
+                let base_w = if rect.width > 1.0 { rect.width } else { 48.0 };
+                let span = if is_drag { base_w.max(220.0) } else { base_w.min(64.0) };
                 let x = (sw - span) * 0.5;
-                Rect::new(x, 0.0, span, rect.height.max(1.0) + margin)
+                Rect::new(x, 0.0, span, margin.max(rect.height))
             }
             NotchEdge::Left => {
-                let span = rect.height.max(200.0);
+                let base_h = if rect.height > 1.0 { rect.height } else { 48.0 };
+                let span = if is_drag { base_h.max(200.0) } else { base_h.min(64.0) };
                 let y = (sh - span) * 0.5;
-                Rect::new(0.0, y, rect.width.max(1.0) + margin, span)
+                Rect::new(0.0, y, margin.max(rect.width), span)
             }
             NotchEdge::Right => {
-                let span = rect.height.max(200.0);
+                let base_h = if rect.height > 1.0 { rect.height } else { 48.0 };
+                let span = if is_drag { base_h.max(200.0) } else { base_h.min(64.0) };
                 let y = (sh - span) * 0.5;
-                let w = rect.width.max(1.0) + margin;
-                Rect::new(sw - w, y, w, span)
+                let w = margin.max(rect.width);
+                Rect::new((sw - w).max(0.0), y, w, span)
             }
         };
         is_point_in_rect(rx, ry, wake_rect)
     } else {
-        is_point_in_rect(rx, ry, rect)
+        // Use at least the collapsed pill dimensions with 4px hysteresis so mid-animation spring
+        // frames after waking never drop below the cursor and cause open/close flicker.
+        let hyst = 4.0_f32;
+        let stable_rect = match notch.edge {
+            NotchEdge::Top => {
+                let w = rect.width.max(276.0) + hyst * 2.0;
+                let h = rect.height.max(36.0) + hyst;
+                Rect::new(((sw - w) * 0.5).max(0.0), 0.0, w.min(sw), h)
+            }
+            NotchEdge::Left => {
+                let w = rect.width.max(46.0) + hyst;
+                let h = rect.height.max(200.0) + hyst * 2.0;
+                Rect::new(0.0, ((sh - h) * 0.5).max(0.0), w, h.min(sh))
+            }
+            NotchEdge::Right => {
+                let w = rect.width.max(46.0) + hyst;
+                let h = rect.height.max(200.0) + hyst * 2.0;
+                Rect::new((sw - w).max(0.0), ((sh - h) * 0.5).max(0.0), w, h.min(sh))
+            }
+        };
+        is_point_in_rect(rx, ry, stable_rect)
     }
 }
 
@@ -1141,6 +1180,625 @@ pub fn create_virtual_desktop() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// 5. Lightweight Desktop & Below-Z-Order Window Backdrop Capture
+// ---------------------------------------------------------------------------
+
+/// Premultiplied opaque BGRA backdrop buffer for a native shell surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedBackdrop {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// Captures desktop wallpaper + visible non-Hime windows underneath a surface without
+/// `WDA_EXCLUDEFROMCAPTURE` (keeping screenshots intact and steady-state RAM tiny).
+#[derive(Debug, Default)]
+pub struct BackdropCapturer {
+    cached_wallpaper_path: Option<String>,
+    cached_wallpaper_color: u32,
+    cached_wallpaper_screen: Option<ScreenBounds>,
+    wallpaper_w: u32,
+    wallpaper_h: u32,
+    wallpaper_bgra: Vec<u8>,
+}
+
+impl BackdropCapturer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Captures a downsampled opaque BGRA backdrop for `(screen_x, screen_y, width, height)`
+    /// excluding Hime's own HWNDs. When `is_surface_hidden` is `true`, uses a single `<0.5ms`
+    /// screen `StretchBlt` before the surface becomes visible.
+    pub fn capture_region(
+        &mut self,
+        screen_x: i32,
+        screen_y: i32,
+        width: u32,
+        height: u32,
+        exclude_hwnds: &[isize],
+        is_surface_hidden: bool,
+    ) -> Option<CapturedBackdrop> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let cap_w = (width / 2).clamp(16, 480);
+        let cap_h = (height / 2).clamp(16, 280);
+
+        if is_surface_hidden {
+            if let Some(bgra) = capture_screen_region_bgra(
+                screen_x,
+                screen_y,
+                width as i32,
+                height as i32,
+                cap_w,
+                cap_h,
+            ) {
+                return Some(CapturedBackdrop {
+                    width: cap_w,
+                    height: cap_h,
+                    bgra,
+                });
+            }
+        }
+
+        let primary = primary_screen_bounds();
+        self.ensure_wallpaper_cache(primary);
+        let bgra = composite_windows_below(
+            screen_x,
+            screen_y,
+            width as i32,
+            height as i32,
+            cap_w,
+            cap_h,
+            exclude_hwnds,
+            primary,
+            (self.wallpaper_w, self.wallpaper_h, &self.wallpaper_bgra),
+        )?;
+        Some(CapturedBackdrop {
+            width: cap_w,
+            height: cap_h,
+            bgra,
+        })
+    }
+
+    fn ensure_wallpaper_cache(&mut self, screen: ScreenBounds) {
+        let wp_path = query_desktop_wallpaper_path();
+        let bg_color = unsafe { GetSysColor(COLOR_BACKGROUND) };
+        if self.cached_wallpaper_screen == Some(screen)
+            && self.cached_wallpaper_path == wp_path
+            && self.cached_wallpaper_color == bg_color
+            && !self.wallpaper_bgra.is_empty()
+        {
+            return;
+        }
+
+        let target_w = ((screen.width.max(1) as u32) / 4).clamp(120, 480);
+        let target_h = ((screen.height.max(1) as u32) / 4).clamp(68, 270);
+        let pixels = wp_path
+            .as_deref()
+            .and_then(|p| decode_wallpaper_scaled_bgra(p, target_w, target_h))
+            .unwrap_or_else(|| solid_colorref_bgra(bg_color, target_w, target_h));
+
+        self.cached_wallpaper_path = wp_path;
+        self.cached_wallpaper_color = bg_color;
+        self.cached_wallpaper_screen = Some(screen);
+        self.wallpaper_w = target_w;
+        self.wallpaper_h = target_h;
+        self.wallpaper_bgra = pixels;
+    }
+}
+
+fn solid_colorref_bgra(colorref: u32, width: u32, height: u32) -> Vec<u8> {
+    let r = (colorref & 0xFF) as u8;
+    let g = ((colorref >> 8) & 0xFF) as u8;
+    let b = ((colorref >> 16) & 0xFF) as u8;
+    let count = (width as usize).saturating_mul(height as usize);
+    let mut out = Vec::with_capacity(count * 4);
+    for _ in 0..count {
+        out.extend_from_slice(&[b, g, r, 255]);
+    }
+    out
+}
+
+fn force_opaque_alpha(bgra: &mut [u8]) {
+    for px in bgra.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+fn query_desktop_wallpaper_path() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETDESKWALLPAPER};
+    let mut buf = [0u16; 520];
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETDESKWALLPAPER,
+            buf.len() as u32,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            Default::default(),
+        )
+    }
+    .is_ok();
+    if !ok {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let path = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+    (!path.is_empty() && std::path::Path::new(&path).is_file()).then_some(path)
+}
+
+fn decode_wallpaper_scaled_bgra(path: &str, target_w: u32, target_h: u32) -> Option<Vec<u8>> {
+    #[repr(C)]
+    struct GdiplusStartupInput {
+        gdiplus_version: u32,
+        debug_event_callback: usize,
+        suppress_background_threads: i32,
+        suppress_external_codecs: i32,
+    }
+    #[link(name = "gdiplus")]
+    extern "system" {
+        fn GdiplusStartup(
+            token: *mut usize,
+            input: *const GdiplusStartupInput,
+            output: *mut c_void,
+        ) -> i32;
+        fn GdiplusShutdown(token: usize);
+        fn GdipLoadImageFromFile(filename: *const u16, image: *mut *mut c_void) -> i32;
+        fn GdipDisposeImage(image: *mut c_void) -> i32;
+        fn GdipCreateFromHDC(
+            hdc: windows::Win32::Graphics::Gdi::HDC,
+            graphics: *mut *mut c_void,
+        ) -> i32;
+        fn GdipDeleteGraphics(graphics: *mut c_void) -> i32;
+        fn GdipDrawImageRectI(
+            graphics: *mut c_void,
+            image: *mut c_void,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut token: usize = 0;
+        let input = GdiplusStartupInput {
+            gdiplus_version: 1,
+            debug_event_callback: 0,
+            suppress_background_threads: 0,
+            suppress_external_codecs: 0,
+        };
+        if GdiplusStartup(&mut token, &input, std::ptr::null_mut()) != 0 {
+            return None;
+        }
+
+        let wide = to_wide_null(path);
+        let mut image: *mut c_void = std::ptr::null_mut();
+        if GdipLoadImageFromFile(wide.as_ptr(), &mut image) != 0 || image.is_null() {
+            GdiplusShutdown(token);
+            return None;
+        }
+
+        let mem_dc = CreateCompatibleDC(None);
+        if mem_dc.0.is_null() {
+            GdipDisposeImage(image);
+            GdiplusShutdown(token);
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: target_w as i32,
+                biHeight: -(target_h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        else {
+            let _ = DeleteDC(mem_dc);
+            GdipDisposeImage(image);
+            GdiplusShutdown(token);
+            return None;
+        };
+        let old = SelectObject(mem_dc, dib.into());
+        let byte_len = (target_w as usize)
+            .saturating_mul(target_h as usize)
+            .saturating_mul(4);
+        std::ptr::write_bytes(bits as *mut u8, 0, byte_len);
+
+        let mut graphics: *mut c_void = std::ptr::null_mut();
+        let ok = GdipCreateFromHDC(mem_dc, &mut graphics) == 0 && !graphics.is_null();
+        let drawn = ok
+            && GdipDrawImageRectI(graphics, image, 0, 0, target_w as i32, target_h as i32) == 0;
+        if !graphics.is_null() {
+            GdipDeleteGraphics(graphics);
+        }
+
+        let mut out = if drawn && !bits.is_null() {
+            let mut slice = std::slice::from_raw_parts(bits as *const u8, byte_len).to_vec();
+            force_opaque_alpha(&mut slice);
+            Some(slice)
+        } else {
+            None
+        };
+
+        let _ = SelectObject(mem_dc, old);
+        let _ = DeleteObject(dib.into());
+        let _ = DeleteDC(mem_dc);
+        GdipDisposeImage(image);
+        GdiplusShutdown(token);
+        out.take()
+    }
+}
+
+fn capture_screen_region_bgra(
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    cap_w: u32,
+    cap_h: u32,
+) -> Option<Vec<u8>> {
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.0.is_null() {
+            return None;
+        }
+        let mem_dc = CreateCompatibleDC(Some(screen_dc));
+        if mem_dc.0.is_null() {
+            let _ = ReleaseDC(None, screen_dc);
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: cap_w as i32,
+                biHeight: -(cap_h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(dib) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        else {
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(None, screen_dc);
+            return None;
+        };
+        let old = SelectObject(mem_dc, dib.into());
+        let _ = SetStretchBltMode(mem_dc, HALFTONE);
+        let ok = StretchBlt(
+            mem_dc,
+            0,
+            0,
+            cap_w as i32,
+            cap_h as i32,
+            Some(screen_dc),
+            sx,
+            sy,
+            sw.max(1),
+            sh.max(1),
+            SRCCOPY,
+        )
+        .as_bool();
+
+        let byte_len = (cap_w as usize).saturating_mul(cap_h as usize).saturating_mul(4);
+        let out = if ok && !bits.is_null() {
+            let mut buf = std::slice::from_raw_parts(bits as *const u8, byte_len).to_vec();
+            force_opaque_alpha(&mut buf);
+            Some(buf)
+        } else {
+            None
+        };
+
+        let _ = SelectObject(mem_dc, old);
+        let _ = DeleteObject(dib.into());
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+        out
+    }
+}
+
+struct BackdropWinCandidate {
+    hwnd: HWND,
+    rect: RECT,
+}
+
+struct BackdropWinSearch<'a> {
+    region: RECT,
+    exclude_hwnds: &'a [isize],
+    windows: Vec<BackdropWinCandidate>,
+}
+
+fn collect_intersecting_windows(region: RECT, exclude_hwnds: &[isize]) -> Vec<BackdropWinCandidate> {
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut BackdropWinSearch<'_>);
+        let raw = hwnd.0 as isize;
+        if search.exclude_hwnds.contains(&raw) || is_desktop_shell_hwnd(hwnd) {
+            return BOOL(1);
+        }
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return BOOL(1);
+        }
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
+            return BOOL(1);
+        }
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+        {
+            return BOOL(1);
+        }
+        let mut rect = RECT::default();
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut _ as *mut c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_err()
+            && GetWindowRect(hwnd, &mut rect).is_err()
+        {
+            return BOOL(1);
+        }
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return BOOL(1);
+        }
+        let intersects = rect.left < search.region.right
+            && rect.right > search.region.left
+            && rect.top < search.region.bottom
+            && rect.bottom > search.region.top;
+        if intersects {
+            search.windows.push(BackdropWinCandidate { hwnd, rect });
+        }
+        BOOL(1)
+    }
+
+    let mut search = BackdropWinSearch {
+        region,
+        exclude_hwnds,
+        windows: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_proc),
+            LPARAM(&mut search as *mut BackdropWinSearch<'_> as isize),
+        );
+    }
+    // EnumWindows yields top-to-bottom Z-order; reverse to draw bottom-to-top.
+    if search.windows.len() > 6 {
+        search.windows.truncate(6);
+    }
+    search.windows.reverse();
+    search.windows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_windows_below(
+    sx: i32,
+    sy: i32,
+    sw: i32,
+    sh: i32,
+    cap_w: u32,
+    cap_h: u32,
+    exclude_hwnds: &[isize],
+    screen: ScreenBounds,
+    wallpaper: (u32, u32, &[u8]),
+) -> Option<Vec<u8>> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn PrintWindow(hwnd: HWND, hdcblt: windows::Win32::Graphics::Gdi::HDC, nflags: u32) -> BOOL;
+    }
+    const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+
+    let (wp_w, wp_h, wp_bytes) = wallpaper;
+    let region = RECT {
+        left: sx,
+        top: sy,
+        right: sx + sw.max(1),
+        bottom: sy + sh.max(1),
+    };
+    let windows_below = collect_intersecting_windows(region, exclude_hwnds);
+
+    unsafe {
+        let cap_dc = CreateCompatibleDC(None);
+        if cap_dc.0.is_null() {
+            return None;
+        }
+        let cap_bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: cap_w as i32,
+                biHeight: -(cap_h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut cap_bits: *mut c_void = std::ptr::null_mut();
+        let Ok(cap_dib) =
+            CreateDIBSection(Some(cap_dc), &cap_bmi, DIB_RGB_COLORS, &mut cap_bits, None, 0)
+        else {
+            let _ = DeleteDC(cap_dc);
+            return None;
+        };
+        let cap_old = SelectObject(cap_dc, cap_dib.into());
+        let byte_len = (cap_w as usize).saturating_mul(cap_h as usize).saturating_mul(4);
+
+        // 1. Seed cap_dc with the matching slice of cached wallpaper (or desktop background color).
+        if wp_w > 0
+            && wp_h > 0
+            && wp_bytes.len() == (wp_w as usize * wp_h as usize * 4)
+            && !cap_bits.is_null()
+        {
+            sample_wallpaper_slice(
+                wp_bytes,
+                wp_w,
+                wp_h,
+                screen,
+                region,
+                cap_w,
+                cap_h,
+                std::slice::from_raw_parts_mut(cap_bits as *mut u8, byte_len),
+            );
+        } else {
+            let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(
+                GetSysColor(COLOR_BACKGROUND),
+            ));
+            let fill_r = RECT {
+                left: 0,
+                top: 0,
+                right: cap_w as i32,
+                bottom: cap_h as i32,
+            };
+            let _ = FillRect(cap_dc, &fill_r, brush);
+            let _ = DeleteObject(brush.into());
+        }
+
+        // 2. Composite visible non-Hime windows below Hime Z-order onto cap_dc.
+        if !windows_below.is_empty() {
+            let _ = SetStretchBltMode(cap_dc, HALFTONE);
+            let win_dc = CreateCompatibleDC(None);
+            if !win_dc.0.is_null() {
+                for cand in windows_below {
+                    let win_w = (cand.rect.right - cand.rect.left).clamp(1, screen.width.max(1));
+                    let win_h = (cand.rect.bottom - cand.rect.top).clamp(1, screen.height.max(1));
+                    let win_bmi = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: win_w,
+                            biHeight: -win_h,
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB.0,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let mut win_bits: *mut c_void = std::ptr::null_mut();
+                    let Ok(win_dib) = CreateDIBSection(
+                        Some(win_dc),
+                        &win_bmi,
+                        DIB_RGB_COLORS,
+                        &mut win_bits,
+                        None,
+                        0,
+                    ) else {
+                        continue;
+                    };
+                    let win_old = SelectObject(win_dc, win_dib.into());
+                    let ok = PrintWindow(cand.hwnd, win_dc, PW_RENDERFULLCONTENT).as_bool()
+                        || PrintWindow(cand.hwnd, win_dc, 0).as_bool();
+                    if ok {
+                        let ix0 = cand.rect.left.max(region.left);
+                        let iy0 = cand.rect.top.max(region.top);
+                        let ix1 = cand.rect.right.min(region.right);
+                        let iy1 = cand.rect.bottom.min(region.bottom);
+                        let iw = (ix1 - ix0).max(0);
+                        let ih = (iy1 - iy0).max(0);
+                        if iw > 0 && ih > 0 {
+                            let src_x = ix0 - cand.rect.left;
+                            let src_y = iy0 - cand.rect.top;
+                            let dst_x = (((ix0 - region.left) as f32 / sw.max(1) as f32)
+                                * cap_w as f32)
+                                .floor() as i32;
+                            let dst_y = (((iy0 - region.top) as f32 / sh.max(1) as f32)
+                                * cap_h as f32)
+                                .floor() as i32;
+                            let dst_w =
+                                (((iw as f32 / sw.max(1) as f32) * cap_w as f32).ceil() as i32)
+                                    .max(1);
+                            let dst_h =
+                                (((ih as f32 / sh.max(1) as f32) * cap_h as f32).ceil() as i32)
+                                    .max(1);
+                            let _ = StretchBlt(
+                                cap_dc,
+                                dst_x,
+                                dst_y,
+                                dst_w,
+                                dst_h,
+                                Some(win_dc),
+                                src_x,
+                                src_y,
+                                iw,
+                                ih,
+                                SRCCOPY,
+                            );
+                        }
+                    }
+                    let _ = SelectObject(win_dc, win_old);
+                    let _ = DeleteObject(win_dib.into());
+                }
+                let _ = DeleteDC(win_dc);
+            }
+        }
+
+        let out = if !cap_bits.is_null() {
+            let mut buf = std::slice::from_raw_parts(cap_bits as *const u8, byte_len).to_vec();
+            force_opaque_alpha(&mut buf);
+            Some(buf)
+        } else {
+            None
+        };
+
+        let _ = SelectObject(cap_dc, cap_old);
+        let _ = DeleteObject(cap_dib.into());
+        let _ = DeleteDC(cap_dc);
+        out
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_wallpaper_slice(
+    wp_bytes: &[u8],
+    wp_w: u32,
+    wp_h: u32,
+    screen: ScreenBounds,
+    region: RECT,
+    dst_w: u32,
+    dst_h: u32,
+    dst: &mut [u8],
+) {
+    let sw = screen.width.max(1) as f32;
+    let sh = screen.height.max(1) as f32;
+    let reg_w = (region.right - region.left).max(1) as f32;
+    let reg_h = (region.bottom - region.top).max(1) as f32;
+
+    for dy in 0..dst_h {
+        let world_y = region.top as f32 + (dy as f32 + 0.5) / dst_h as f32 * reg_h;
+        let wy = (((world_y - screen.y as f32) / sh).clamp(0.0, 0.9999) * wp_h as f32) as usize;
+        let src_row = wy * wp_w as usize * 4;
+        let dst_row = dy as usize * dst_w as usize * 4;
+        for dx in 0..dst_w {
+            let world_x = region.left as f32 + (dx as f32 + 0.5) / dst_w as f32 * reg_w;
+            let wx =
+                (((world_x - screen.x as f32) / sw).clamp(0.0, 0.9999) * wp_w as f32) as usize;
+            let s_idx = src_row + wx * 4;
+            let d_idx = dst_row + dx as usize * 4;
+            dst[d_idx..d_idx + 4].copy_from_slice(&wp_bytes[s_idx..s_idx + 4]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit Tests
 // ---------------------------------------------------------------------------
 
@@ -1186,11 +1844,21 @@ mod tests {
             notch.tick(1.0 / 60.0);
         }
 
-        // Hidden top notch is centered horizontally; hovering top edge inside its span wakes it.
+        // Hovering strictly inside the 48px minimized top-center bar wakes it.
         assert!(is_notch_edge_hovered(960.0, 3.0, &notch, screen, 6.0));
+        // Hovering outside the 48px minimized span on the top edge MUST NOT leak/wake!
+        assert!(!is_notch_edge_hovered(870.0, 3.0, &notch, screen, 6.0));
+        assert!(!is_notch_edge_hovered(1050.0, 3.0, &notch, screen, 6.0));
         // Hovering far away from the notch or at bottom does not wake it.
         assert!(!is_notch_edge_hovered(960.0, 40.0, &notch, screen, 6.0));
         assert!(!is_notch_edge_hovered(960.0, 1078.0, &notch, screen, 6.0));
+
+        // Immediately after waking (mid-animation before width_spring reaches 276), stable
+        // target bounds + hysteresis keep cursor inside without open/close flicker.
+        notch.set_hidden(false);
+        notch.tick(1.0 / 60.0);
+        assert!(is_notch_edge_hovered(960.0, 5.0, &notch, screen, 6.0));
+        assert!(is_notch_edge_hovered(960.0, 34.0, &notch, screen, 6.0));
 
         // Full-edge wake helper checks edge threshold anywhere along the edge.
         assert!(is_cursor_at_notch_wake_edge(100.0, 4.0, NotchEdge::Top, screen, 6.0));
@@ -1333,5 +2001,42 @@ mod tests {
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].name, "Desktop 1");
         assert!(fallback[0].active);
+    }
+
+    #[test]
+    fn backdrop_capturer_samples_wallpaper_slice_with_opaque_alpha() {
+        let mut wp = vec![0u8; 4 * 4 * 4];
+        // Bottom-right pixel (x=3, y=3) painted bright cyan, alpha=0 initially
+        let idx = (3 * 4 + 3) * 4;
+        wp[idx] = 240;
+        wp[idx + 1] = 180;
+        wp[idx + 2] = 20;
+        let mut dst = vec![0u8; 2 * 2 * 4];
+        sample_wallpaper_slice(
+            &wp,
+            4,
+            4,
+            ScreenBounds::new(0, 0, 100, 100),
+            RECT {
+                left: 75,
+                top: 75,
+                right: 100,
+                bottom: 100,
+            },
+            2,
+            2,
+            &mut dst,
+        );
+        force_opaque_alpha(&mut dst);
+        assert_eq!(&dst[0..4], &[240, 180, 20, 255]);
+
+        let mut capturer = BackdropCapturer::new();
+        let cap = capturer
+            .capture_region(0, 0, 200, 100, &[], false)
+            .expect("capture_region returns buffer");
+        assert_eq!(cap.width, 100);
+        assert_eq!(cap.height, 50);
+        assert_eq!(cap.bgra.len(), 100 * 50 * 4);
+        assert!(cap.bgra.chunks_exact(4).all(|px| px[3] == 255));
     }
 }

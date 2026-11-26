@@ -13,11 +13,7 @@ use windows::core::Result;
 
 use crate::animation::{Spring, SpringValue};
 use crate::d2d::{LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
-use crate::theme::{
-    Color, DIVIDER_HAIRLINE, GLASS_CLEAR, GLASS_CONTROL, GLASS_CONTROL_HOVER, GLASS_ELEVATED,
-    GLASS_HAIRLINE, STATUS_LIVE_GREEN, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TEXT_PRIMARY,
-    TEXT_SECONDARY, TEXT_TERTIARY,
-};
+use crate::theme::Color;
 
 pub const SETTINGS_WIDTH: f32 = 740.0;
 pub const SETTINGS_HEIGHT: f32 = 520.0;
@@ -250,6 +246,8 @@ pub struct SettingsState {
 
     pub volume_overlay_enabled: bool,
     pub brightness_overlay_enabled: bool,
+    /// `"auto"` | `"dark"` | `"light"`
+    pub color_theme: String,
 
     pub hime_ai_enabled: bool,
     pub hime_router_url: String,
@@ -281,6 +279,7 @@ impl Default for SettingsState {
             dock_win_number_enabled: true,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: true,
+            color_theme: "auto".to_string(),
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
             hime_router_model: "hime-combo".to_string(),
@@ -303,6 +302,7 @@ pub enum SettingsAction {
     ToggleDockMode,
     ToggleNotchMode,
     ToggleFreeDrag,
+    CycleColorTheme,
     ToggleHimeAi,
     ToggleTranslateOptIn,
     CycleProactiveBudget,
@@ -329,6 +329,7 @@ pub enum SettingsControl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RowControlId {
+    CycleColorTheme,
     ToggleTimeFormat24h,
     ToggleNotifSuppression,
     ResetToDefaults,
@@ -373,7 +374,7 @@ enum RowVisual {
     Picker(String),
     Button {
         label: String,
-        status_dot: Option<Color>,
+        status_connected: Option<bool>,
     },
     SummaryCard {
         icon: SfSymbol,
@@ -618,6 +619,15 @@ impl SettingsPanel {
 
     fn apply_row_control(&mut self, row: RowControlId) -> SettingsAction {
         match row {
+            RowControlId::CycleColorTheme => {
+                self.state.color_theme = match self.state.color_theme.as_str() {
+                    "auto" => "dark",
+                    "dark" => "light",
+                    _ => "auto",
+                }
+                .to_string();
+                SettingsAction::CycleColorTheme
+            }
             RowControlId::ToggleTimeFormat24h => {
                 self.state.time_format_24h = !self.state.time_format_24h;
                 SettingsAction::UpdateSettings
@@ -940,6 +950,12 @@ impl SettingsPanel {
         match self.active_tab {
             SettingsTab::General => vec![
                 RenderedRow {
+                    id: RowControlId::CycleColorTheme,
+                    title: "Color Theme",
+                    desc: "Auto adapts to desktop contrast, or force Dark / Light glass".to_string(),
+                    kind: RowVisual::Picker(capitalize_mode(&self.state.color_theme)),
+                },
+                RenderedRow {
                     id: RowControlId::ToggleTimeFormat24h,
                     title: "24-Hour Clock",
                     desc: "Display 24-hour time in the Notch status bar".to_string(),
@@ -957,7 +973,7 @@ impl SettingsPanel {
                     desc: "Restore all Notch, Dock, Overlay, and AI settings".to_string(),
                     kind: RowVisual::Button {
                         label: "Reset".to_string(),
-                        status_dot: None,
+                        status_connected: None,
                     },
                 },
             ],
@@ -1019,7 +1035,7 @@ impl SettingsPanel {
                         } else {
                             "Clear Pinned".to_string()
                         },
-                        status_dot: None,
+                        status_connected: None,
                     },
                 },
             ],
@@ -1076,11 +1092,7 @@ impl SettingsPanel {
                         } else {
                             "Test & Save".to_string()
                         },
-                        status_dot: Some(if self.state.router_9_detected {
-                            STATUS_LIVE_GREEN
-                        } else {
-                            STATUS_MUTED
-                        }),
+                        status_connected: Some(self.state.router_9_detected),
                     },
                 },
                 RenderedRow {
@@ -1238,6 +1250,7 @@ impl SettingsPanel {
 
         let (sw, sh) = surface.dip_size();
         let (draw_w, draw_h) = self.render_size_for_surface(sw, sh);
+        let palette = surface.palette();
 
         let panel_rect = Rect::new(0.0, 0.0, draw_w, draw_h);
         surface.set_rounded_region(panel_rect, 16.0);
@@ -1251,7 +1264,7 @@ impl SettingsPanel {
             "Settings",
             Rect::new(18.0, 8.0, 120.0, 26.0),
             12.0,
-            TEXT_TERTIARY,
+            palette.text_tertiary,
             TextAlign::Leading,
         )?;
 
@@ -1265,9 +1278,9 @@ impl SettingsPanel {
             inset_rect(close_r, 6.0),
             SfSymbol::CloseX,
             if close_hovered {
-                TEXT_PRIMARY
+                palette.text_primary
             } else {
-                TEXT_SECONDARY
+                palette.text_secondary
             },
             1.5,
         )?;
@@ -1276,23 +1289,23 @@ impl SettingsPanel {
             return Ok(());
         }
 
-        // Sidebar smoked glass pane & hairline dividers
+        // Sidebar frosted/smoked glass pane & hairline dividers
         let sidebar_bg = Rect::new(
             1.0,
             TITLEBAR_HEIGHT,
             SIDEBAR_WIDTH - 1.0,
             draw_h - TITLEBAR_HEIGHT - 1.0,
         );
-        surface.fill_rounded_rect(sidebar_bg, 0.0, GLASS_CLEAR.with_alpha(0.42))?;
+        surface.fill_rounded_rect(sidebar_bg, 0.0, palette.glass_clear.with_alpha_mul(0.45))?;
         surface.fill_rounded_rect(
             Rect::new(SIDEBAR_WIDTH, 1.0, 1.0, draw_h - 2.0),
             0.0,
-            DIVIDER_HAIRLINE,
+            palette.divider,
         )?;
         surface.fill_rounded_rect(
             Rect::new(SIDEBAR_WIDTH + 1.0, TITLEBAR_HEIGHT, draw_w - SIDEBAR_WIDTH - 2.0, 1.0),
             0.0,
-            DIVIDER_HAIRLINE,
+            palette.divider,
         )?;
 
         // Sidebar app badge & title
@@ -1301,21 +1314,21 @@ impl SettingsPanel {
         surface.draw_sf_symbol(
             inset_rect(badge_rect, 6.0),
             SfSymbol::Sparkle,
-            TEXT_PRIMARY,
+            palette.text_primary,
             1.4,
         )?;
         surface.draw_text_bold(
             "Hime",
             Rect::new(54.0, TITLEBAR_HEIGHT + 10.0, SIDEBAR_WIDTH - 64.0, 20.0),
             14.0,
-            TEXT_PRIMARY,
+            palette.text_primary,
             TextAlign::Leading,
         )?;
         surface.draw_text(
             "System Shell",
             Rect::new(54.0, TITLEBAR_HEIGHT + 29.0, SIDEBAR_WIDTH - 64.0, 16.0),
             10.5,
-            TEXT_SECONDARY,
+            palette.text_secondary,
             TextAlign::Leading,
         )?;
 
@@ -1328,7 +1341,7 @@ impl SettingsPanel {
             );
             surface.draw_liquid_glass_panel(
                 ind_rect,
-                LiquidGlassStyle::tinted(SYSTEM_BLUE_TINT, 8.0).without_shadow(),
+                LiquidGlassStyle::tinted(palette.accent_tint, 8.0).without_shadow(),
             )?;
         }
 
@@ -1345,21 +1358,21 @@ impl SettingsPanel {
                 surface.fill_rounded_rect(
                     rect,
                     8.0,
-                    GLASS_CONTROL.with_alpha_mul(self.hover_progress.value.clamp(0.4, 1.0)),
+                    palette.control_fill.with_alpha_mul(self.hover_progress.value.clamp(0.4, 1.0)),
                 )?;
             }
 
             let icon_color = if is_active {
-                SYSTEM_BLUE
+                palette.accent
             } else if is_hovered {
-                TEXT_PRIMARY
+                palette.text_primary
             } else {
-                TEXT_SECONDARY
+                palette.text_secondary
             };
             let text_color = if is_active || is_hovered {
-                TEXT_PRIMARY
+                palette.text_primary
             } else {
-                TEXT_PRIMARY.with_alpha(0.84)
+                palette.text_primary.with_alpha_mul(0.84)
             };
 
             let icon_rect = Rect::new(rect.x + 10.0, rect.y + (rect.height - 15.0) * 0.5, 15.0, 15.0);
@@ -1381,14 +1394,14 @@ impl SettingsPanel {
             self.active_tab.label(),
             Rect::new(content_x, TITLEBAR_HEIGHT + 12.0, content_w, 26.0),
             18.0,
-            TEXT_PRIMARY.with_alpha_mul(content_alpha),
+            palette.text_primary.with_alpha_mul(content_alpha),
             TextAlign::Leading,
         )?;
         surface.draw_text(
             self.active_tab.subtitle(),
             Rect::new(content_x, TITLEBAR_HEIGHT + 39.0, content_w, 18.0),
             11.5,
-            TEXT_SECONDARY.with_alpha_mul(content_alpha),
+            palette.text_secondary.with_alpha_mul(content_alpha),
             TextAlign::Leading,
         )?;
 
@@ -1417,17 +1430,17 @@ impl SettingsPanel {
             let selected = self.selected_index == Some(idx);
 
             let card_fill = if hovered {
-                GLASS_ELEVATED.with_alpha_mul(content_alpha)
+                palette.glass_elevated.with_alpha_mul(content_alpha)
             } else {
-                GLASS_ELEVATED.with_alpha_mul(0.74 * content_alpha)
+                palette.glass_elevated.with_alpha_mul(0.76 * content_alpha)
             };
             surface.fill_rounded_rect(r, 10.0, card_fill)?;
             let border_color = if selected {
-                SYSTEM_BLUE.with_alpha(0.75 * content_alpha)
+                palette.accent.with_alpha(0.75 * content_alpha)
             } else if hovered {
-                GLASS_HAIRLINE.with_alpha_mul(1.25 * content_alpha)
+                palette.hairline_border.with_alpha_mul(1.25 * content_alpha)
             } else {
-                DIVIDER_HAIRLINE.with_alpha_mul(content_alpha)
+                palette.divider.with_alpha_mul(content_alpha)
             };
             surface.stroke_rounded_rect(r, 10.0, border_color, if selected { 1.2 } else { 1.0 })?;
 
@@ -1441,14 +1454,14 @@ impl SettingsPanel {
                 surface.draw_sf_symbol(
                     icon_rect,
                     icon,
-                    TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                    palette.text_secondary.with_alpha_mul(content_alpha),
                     1.4,
                 )?;
                 surface.draw_text(
                     row.title,
                     Rect::new(r.x + 28.0, r.y + 7.0, (r.width - 78.0).max(40.0), 18.0),
                     11.5,
-                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    palette.text_primary.with_alpha_mul(content_alpha),
                     TextAlign::Leading,
                 )?;
 
@@ -1456,13 +1469,13 @@ impl SettingsPanel {
                 surface.fill_rounded_rect(
                     badge,
                     6.0,
-                    GLASS_CONTROL.with_alpha_mul(content_alpha),
+                    palette.control_fill.with_alpha_mul(content_alpha),
                 )?;
                 surface.draw_text(
                     &count.to_string(),
                     badge,
                     11.0,
-                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    palette.text_primary.with_alpha_mul(content_alpha),
                     TextAlign::Center,
                 )?;
 
@@ -1471,29 +1484,29 @@ impl SettingsPanel {
                     btn,
                     7.0,
                     if hovered {
-                        GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                        palette.control_hover.with_alpha_mul(content_alpha)
                     } else {
-                        GLASS_CONTROL.with_alpha_mul(content_alpha)
+                        palette.control_fill.with_alpha_mul(content_alpha)
                     },
                 )?;
                 surface.stroke_rounded_rect(
                     btn,
                     7.0,
-                    GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                    palette.hairline_border.with_alpha_mul(content_alpha),
                     1.0,
                 )?;
                 let refresh_r = Rect::new(btn.x + btn.width * 0.5 - 30.0, btn.y + 5.0, 12.0, 12.0);
                 surface.draw_sf_symbol(
                     refresh_r,
                     SfSymbol::Refresh,
-                    TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                    palette.text_secondary.with_alpha_mul(content_alpha),
                     1.3,
                 )?;
                 surface.draw_text(
                     action_label,
                     Rect::new(btn.x + 10.0, btn.y, btn.width - 10.0, btn.height),
                     11.0,
-                    TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                    palette.text_primary.with_alpha_mul(content_alpha),
                     TextAlign::Center,
                 )?;
                 continue;
@@ -1504,14 +1517,14 @@ impl SettingsPanel {
                 row.title,
                 Rect::new(r.x + 14.0, r.y + 6.0, r.width * 0.62, 18.0),
                 12.0,
-                TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                palette.text_primary.with_alpha_mul(content_alpha),
                 TextAlign::Leading,
             )?;
             surface.draw_text(
                 &row.desc,
                 Rect::new(r.x + 14.0, r.y + 23.0, r.width * 0.64, 16.0),
                 10.5,
-                TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                palette.text_secondary.with_alpha_mul(content_alpha),
                 TextAlign::Leading,
             )?;
 
@@ -1523,9 +1536,9 @@ impl SettingsPanel {
                     let sw_x = r.x + r.width - sw_w - 14.0;
                     let sw_y = r.y + (r.height - sw_h) * 0.5;
                     let prog = self.toggle_progress(row.id, on);
-                    let off_track = GLASS_CONTROL_HOVER;
-                    let track_color = off_track
-                        .lerp(SYSTEM_BLUE, prog)
+                    let track_color = palette
+                        .control_hover
+                        .lerp(palette.accent, prog)
                         .with_alpha_mul(content_alpha);
                     surface.fill_rounded_rect(
                         Rect::new(sw_x, sw_y, sw_w, sw_h),
@@ -1536,7 +1549,7 @@ impl SettingsPanel {
                         surface.stroke_rounded_rect(
                             Rect::new(sw_x, sw_y, sw_w, sw_h),
                             sw_h * 0.5,
-                            GLASS_HAIRLINE.with_alpha_mul((1.0 - prog) * content_alpha),
+                            palette.hairline_border.with_alpha_mul((1.0 - prog) * content_alpha),
                             1.0,
                         )?;
                     }
@@ -1545,7 +1558,7 @@ impl SettingsPanel {
                     surface.fill_rounded_rect(
                         Rect::new(knob_x, sw_y + 3.0, knob_d, knob_d),
                         knob_d * 0.5,
-                        TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                        Color::from_rgb_u8(0xFF, 0xFF, 0xFF).with_alpha_mul(content_alpha),
                     )?;
                 }
                 RowVisual::Picker(val) => {
@@ -1561,22 +1574,27 @@ impl SettingsPanel {
                         pill_rect,
                         7.0,
                         if hovered {
-                            GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                            palette.control_hover.with_alpha_mul(content_alpha)
                         } else {
-                            GLASS_CONTROL.with_alpha_mul(content_alpha)
+                            palette.control_fill.with_alpha_mul(content_alpha)
                         },
                     )?;
                     surface.stroke_rounded_rect(
                         pill_rect,
                         7.0,
-                        GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                        palette.hairline_border.with_alpha_mul(content_alpha),
                         1.0,
                     )?;
                     surface.draw_text(
                         &val,
-                        Rect::new(pill_rect.x + 10.0, pill_rect.y, pill_rect.width - 28.0, pill_rect.height),
+                        Rect::new(
+                            pill_rect.x + 10.0,
+                            pill_rect.y,
+                            pill_rect.width - 28.0,
+                            pill_rect.height,
+                        ),
                         11.5,
-                        TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                        palette.text_primary.with_alpha_mul(content_alpha),
                         TextAlign::Leading,
                     )?;
                     surface.draw_sf_symbol(
@@ -1587,11 +1605,14 @@ impl SettingsPanel {
                             11.0,
                         ),
                         SfSymbol::ChevronDown,
-                        TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                        palette.text_secondary.with_alpha_mul(content_alpha),
                         1.4,
                     )?;
                 }
-                RowVisual::Button { label, status_dot } => {
+                RowVisual::Button {
+                    label,
+                    status_connected,
+                } => {
                     let pill_w = 132.0_f32.min(r.width * 0.33);
                     let pill_h = 26.0;
                     let pill_rect = Rect::new(
@@ -1604,18 +1625,23 @@ impl SettingsPanel {
                         pill_rect,
                         7.0,
                         if hovered {
-                            GLASS_CONTROL_HOVER.with_alpha_mul(content_alpha)
+                            palette.control_hover.with_alpha_mul(content_alpha)
                         } else {
-                            GLASS_CONTROL.with_alpha_mul(content_alpha)
+                            palette.control_fill.with_alpha_mul(content_alpha)
                         },
                     )?;
                     surface.stroke_rounded_rect(
                         pill_rect,
                         7.0,
-                        GLASS_HAIRLINE.with_alpha_mul(content_alpha),
+                        palette.hairline_border.with_alpha_mul(content_alpha),
                         1.0,
                     )?;
-                    if let Some(dot_color) = status_dot {
+                    if let Some(connected) = status_connected {
+                        let dot_color = if connected {
+                            palette.status_green
+                        } else {
+                            palette.status_muted
+                        };
                         surface.fill_circle(
                             pill_rect.x + 14.0,
                             pill_rect.y + pill_rect.height * 0.5,
@@ -1631,7 +1657,7 @@ impl SettingsPanel {
                                 pill_rect.height,
                             ),
                             11.5,
-                            TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                            palette.text_primary.with_alpha_mul(content_alpha),
                             TextAlign::Center,
                         )?;
                     } else {
@@ -1639,7 +1665,7 @@ impl SettingsPanel {
                             &label,
                             pill_rect,
                             11.5,
-                            TEXT_PRIMARY.with_alpha_mul(content_alpha),
+                            palette.text_primary.with_alpha_mul(content_alpha),
                             TextAlign::Center,
                         )?;
                     }
@@ -1649,7 +1675,7 @@ impl SettingsPanel {
                         &val,
                         Rect::new(r.x + r.width * 0.65, r.y, r.width * 0.35 - 14.0, r.height),
                         11.5,
-                        TEXT_SECONDARY.with_alpha_mul(content_alpha),
+                        palette.text_secondary.with_alpha_mul(content_alpha),
                         TextAlign::Trailing,
                     )?;
                 }
@@ -1662,14 +1688,14 @@ impl SettingsPanel {
                 surface.draw_sf_symbol(
                     Rect::new(content_x, draw_h - 26.0, 12.0, 12.0),
                     SfSymbol::Check,
-                    STATUS_LIVE_GREEN,
+                    palette.status_green,
                     1.5,
                 )?;
                 surface.draw_text(
                     notice,
                     Rect::new(content_x + 18.0, draw_h - 30.0, content_w - 18.0, 20.0),
                     11.0,
-                    TEXT_SECONDARY,
+                    palette.text_secondary,
                     TextAlign::Leading,
                 )?;
             }
@@ -1687,6 +1713,7 @@ impl Default for SettingsPanel {
 
 fn row_to_action(row: RowControlId) -> SettingsAction {
     match row {
+        RowControlId::CycleColorTheme => SettingsAction::CycleColorTheme,
         RowControlId::CycleNotchBehavior | RowControlId::CycleNotchEdge => {
             SettingsAction::ToggleNotchMode
         }
@@ -1732,6 +1759,9 @@ fn proactive_budget_desc(budget: &str) -> &'static str {
 
 fn capitalize_mode(mode: &str) -> String {
     match mode {
+        "auto" => "Auto".to_string(),
+        "dark" => "Dark".to_string(),
+        "light" => "Light".to_string(),
         "fixed" => "Fixed".to_string(),
         "smart" => "Smart".to_string(),
         "peek" => "Peek".to_string(),
@@ -1863,8 +1893,9 @@ mod tests {
 
         panel.open();
         assert_eq!(panel.selected_index, Some(0));
-        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 1 (Suppress Notifs)
-        assert_eq!(panel.selected_index, Some(1));
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 1 (24-Hour Clock)
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 2 (Suppress Notifs)
+        assert_eq!(panel.selected_index, Some(2));
         assert_eq!(
             panel.handle_key_down(0x0D),
             Some(SettingsControl::ToggleNotifSuppression)
@@ -1944,6 +1975,8 @@ mod tests {
 
     #[test]
     fn settings_window_renders_liquid_glass_and_sf_symbols_without_error() {
+        use crate::theme::ColorThemeMode;
+
         let surface = match NativeSurface::new(
             "HimeSettingsTest",
             -2000,
@@ -1957,15 +1990,50 @@ mod tests {
         let mut panel = SettingsPanel::new();
         panel.open();
         panel.set_status_notice(Some("Connected to 9Router".to_string()));
-        for &tab in &SettingsTab::ALL {
-            panel.select_tab(tab);
-            for _ in 0..45 {
-                panel.tick(1.0 / 60.0);
+        for mode in [ColorThemeMode::Dark, ColorThemeMode::Light] {
+            surface.set_color_theme_mode(mode);
+            for &tab in &SettingsTab::ALL {
+                panel.select_tab(tab);
+                for _ in 0..45 {
+                    panel.tick(1.0 / 60.0);
+                }
+                surface.begin_draw();
+                panel.render(&surface).expect("settings render");
+                surface.end_draw_and_present().expect("settings present");
             }
-            surface.begin_draw();
-            panel.render(&surface).expect("settings render");
-            surface.end_draw_and_present().expect("settings present");
         }
+    }
+
+    #[test]
+    fn cycle_color_theme_row_cycles_auto_dark_light() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+        assert_eq!(panel.state.color_theme, "auto");
+
+        let theme_rect = panel
+            .row_rects()
+            .into_iter()
+            .find(|(id, _)| *id == RowControlId::CycleColorTheme)
+            .expect("CycleColorTheme row")
+            .1;
+        let cx = theme_rect.x + theme_rect.width * 0.5;
+        let cy = theme_rect.y + theme_rect.height * 0.5;
+
+        assert_eq!(
+            panel.handle_click(cx, cy),
+            Some(SettingsAction::CycleColorTheme)
+        );
+        assert_eq!(panel.state.color_theme, "dark");
+        assert_eq!(
+            panel.handle_click(cx, cy),
+            Some(SettingsAction::CycleColorTheme)
+        );
+        assert_eq!(panel.state.color_theme, "light");
+        assert_eq!(
+            panel.handle_click(cx, cy),
+            Some(SettingsAction::CycleColorTheme)
+        );
+        assert_eq!(panel.state.color_theme, "auto");
     }
 
     fn rects_overlap(a: Rect, b: Rect) -> bool {

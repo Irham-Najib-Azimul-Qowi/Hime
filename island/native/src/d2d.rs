@@ -1,27 +1,29 @@
-//! Direct2D + DirectWrite + Layered 32-bit Per-Pixel Alpha (`UpdateLayeredWindow`) surface.
+//! Direct2D + DirectWrite + Layered 32-bit Per-Pixel Alpha (`UpdateLayeredWindow`) surface
+//! with real Liquid Glass backdrop Gaussian blur (`frost`), SDF bevel refraction, chromatic
+//! edge dispersion, adaptive Light/Dark Glass contrast, and Windows WIC UWP icon extraction.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
-use windows::core::{s, w, HRESULT, PCWSTR, Result};
+use windows::core::{s, w, GUID, HRESULT, Interface, PCWSTR, Result};
 use windows_numerics::Vector2 as D2D_POINT_2F;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
-    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory1, ID2D1Layer,
-    ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
-    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
-    D2D1_LAYER_PARAMETERS, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_LINE_JOIN_ROUND,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES1,
 };
@@ -37,7 +39,9 @@ use windows::Win32::Graphics::Gdi::{
     SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Shell::ExtractIconExW;
@@ -54,9 +58,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::theme::{
-    Color, FONT_FAMILY, GLASS_CLEAR, GLASS_ELEVATED, GLASS_HAIRLINE, GLASS_INNER_SHADE,
-    GLASS_REGULAR, GLASS_SPECULAR_BOTTOM, GLASS_SPECULAR_TOP, STATUS_LIVE_AMBER, STATUS_LIVE_GREEN,
-    STATUS_LIVE_RED, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TRANSPARENT,
+    AdaptivePalette, Color, ColorThemeMode, ThemePolarity, FONT_FAMILY, STATUS_LIVE_AMBER,
+    STATUS_LIVE_GREEN, STATUS_LIVE_RED, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TRANSPARENT,
 };
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("HimeIslandNativeSurface");
@@ -344,15 +347,25 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
                     break;
                 }
             }
-            if hicon.0.is_null() {
-                let gcl = GetClassLongPtrW(wnd, GCLP_HICON);
-                if gcl != 0 {
-                    hicon = HICON(gcl as *mut std::ffi::c_void);
-                } else {
-                    let gcl_sm = GetClassLongPtrW(wnd, GCLP_HICONSM);
-                    if gcl_sm != 0 {
-                        hicon = HICON(gcl_sm as *mut std::ffi::c_void);
-                    }
+        }
+
+        // For UWP apps (WindowsApps / AppxManifest / Assets), CoreWindow's GCLP_HICON is the
+        // generic IDI_APPLICATION page icon; resolve the real package PNG before class HICON.
+        if hicon.0.is_null() && is_uwp_package_path(exe_path) {
+            if let Some(uwp_icon) = extract_uwp_package_icon(exe_path, target_size) {
+                return Some(uwp_icon);
+            }
+        }
+
+        if hicon.0.is_null() && hwnd != 0 {
+            let wnd = HWND(hwnd as *mut std::ffi::c_void);
+            let gcl = GetClassLongPtrW(wnd, GCLP_HICON);
+            if gcl != 0 {
+                hicon = HICON(gcl as *mut std::ffi::c_void);
+            } else {
+                let gcl_sm = GetClassLongPtrW(wnd, GCLP_HICONSM);
+                if gcl_sm != 0 {
+                    hicon = HICON(gcl_sm as *mut std::ffi::c_void);
                 }
             }
         }
@@ -374,6 +387,9 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
         }
 
         if hicon.0.is_null() {
+            if !exe_path.is_empty() {
+                return extract_uwp_package_icon(exe_path, target_size);
+            }
             return None;
         }
 
@@ -381,8 +397,279 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
         if owned_icon {
             let _ = DestroyIcon(hicon);
         }
-        extracted
+        extracted.or_else(|| {
+            if !exe_path.is_empty() {
+                extract_uwp_package_icon(exe_path, target_size)
+            } else {
+                None
+            }
+        })
     }
+}
+
+/// Decodes an image file (PNG/BMP/JPG) via Windows Imaging Component (`IWICImagingFactory`)
+/// into `target_w x target_h` 32-bit premultiplied BGRA pixels.
+pub fn decode_image_bgra_premul(
+    path: &Path,
+    target_w: u32,
+    target_h: u32,
+) -> Option<IconRgba> {
+    if target_w == 0 || target_h == 0 || !path.exists() {
+        return None;
+    }
+    let path_str = path.to_str()?;
+    let wide_path = to_wide_null(path_str);
+
+    // Verified against wincodec.h
+    const CLSID_WIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
+    const IID_IWIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xec5ec8a9_c395_4314_9c77_54d7a935ff70);
+    const GUID_WIC_32BPP_PBGRA: GUID = GUID::from_u128(0x6fddc324_4e03_4bfe_b185_3d77768dc910);
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const WIC_DECODE_METADATA_CACHE_ON_DEMAND: u32 = 0;
+    const WIC_DITHER_NONE: u32 = 0;
+    const WIC_PALETTE_CUSTOM: u32 = 0;
+    const WIC_INTERP_FANT: u32 = 3;
+
+    struct RawCom(*mut std::ffi::c_void);
+    impl Drop for RawCom {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    let vtbl = *(self.0 as *const *const usize);
+                    let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+                        std::mem::transmute(*vtbl.add(2));
+                    release(self.0);
+                }
+            }
+        }
+    }
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let factory_unk: windows::core::IUnknown =
+            CoCreateInstance(&CLSID_WIC_IMAGING_FACTORY, None, CLSCTX_ALL).ok()?;
+        let mut wic_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if factory_unk.query(&IID_IWIC_IMAGING_FACTORY, &mut wic_ptr).is_err() || wic_ptr.is_null()
+        {
+            return None;
+        }
+        let factory = RawCom(wic_ptr);
+        let f_vtbl = *(factory.0 as *const *const usize);
+
+        // IWICImagingFactory::CreateDecoderFromFilename (slot 3)
+        let create_decoder: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            PCWSTR,
+            *const GUID,
+            u32,
+            u32,
+            *mut *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*f_vtbl.add(3));
+        let mut decoder_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if create_decoder(
+            factory.0,
+            PCWSTR(wide_path.as_ptr()),
+            std::ptr::null(),
+            GENERIC_READ,
+            WIC_DECODE_METADATA_CACHE_ON_DEMAND,
+            &mut decoder_ptr,
+        )
+        .is_err()
+            || decoder_ptr.is_null()
+        {
+            return None;
+        }
+        let decoder = RawCom(decoder_ptr);
+        let d_vtbl = *(decoder.0 as *const *const usize);
+
+        // IWICBitmapDecoder::GetFrame (slot 13)
+        let get_frame: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            u32,
+            *mut *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*d_vtbl.add(13));
+        let mut frame_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if get_frame(decoder.0, 0, &mut frame_ptr).is_err() || frame_ptr.is_null() {
+            return None;
+        }
+        let frame = RawCom(frame_ptr);
+
+        // IWICImagingFactory::CreateBitmapScaler (slot 11)
+        let create_scaler: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*f_vtbl.add(11));
+        let mut scaler_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if create_scaler(factory.0, &mut scaler_ptr).is_err() || scaler_ptr.is_null() {
+            return None;
+        }
+        let scaler = RawCom(scaler_ptr);
+        let s_vtbl = *(scaler.0 as *const *const usize);
+
+        // IWICBitmapScaler::Initialize (slot 8)
+        let scaler_init: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            u32,
+            u32,
+            u32,
+        ) -> HRESULT = std::mem::transmute(*s_vtbl.add(8));
+        if scaler_init(scaler.0, frame.0, target_w, target_h, WIC_INTERP_FANT).is_err() {
+            return None;
+        }
+
+        // IWICImagingFactory::CreateFormatConverter (slot 10)
+        let create_conv: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*f_vtbl.add(10));
+        let mut conv_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if create_conv(factory.0, &mut conv_ptr).is_err() || conv_ptr.is_null() {
+            return None;
+        }
+        let conv = RawCom(conv_ptr);
+        let c_vtbl = *(conv.0 as *const *const usize);
+
+        // IWICFormatConverter::Initialize (slot 8)
+        let conv_init: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *const GUID,
+            u32,
+            *mut std::ffi::c_void,
+            f64,
+            u32,
+        ) -> HRESULT = std::mem::transmute(*c_vtbl.add(8));
+        if conv_init(
+            conv.0,
+            scaler.0,
+            &GUID_WIC_32BPP_PBGRA,
+            WIC_DITHER_NONE,
+            std::ptr::null_mut(),
+            0.0,
+            WIC_PALETTE_CUSTOM,
+        )
+        .is_err()
+        {
+            return None;
+        }
+
+        // IWICBitmapSource::CopyPixels (slot 7)
+        let copy_pixels: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *const std::ffi::c_void,
+            u32,
+            u32,
+            *mut u8,
+        ) -> HRESULT = std::mem::transmute(*c_vtbl.add(7));
+        let stride = target_w.checked_mul(4)?;
+        let byte_len = (stride as usize).checked_mul(target_h as usize)?;
+        let mut bgra = vec![0u8; byte_len];
+        if copy_pixels(
+            conv.0,
+            std::ptr::null(),
+            stride,
+            byte_len as u32,
+            bgra.as_mut_ptr(),
+        )
+        .is_err()
+        {
+            return None;
+        }
+
+        Some(IconRgba {
+            width: target_w,
+            height: target_h,
+            bgra_premul: bgra,
+        })
+    }
+}
+
+fn find_best_uwp_asset_png(exe_dir: &Path) -> Option<PathBuf> {
+    let assets_dir = exe_dir.join("Assets");
+    let entries = std::fs::read_dir(&assets_dir).ok()?;
+    let mut best: Option<(i32, PathBuf)> = None;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_png = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+        if !is_png {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        let mut score: i32 = if lower.contains("square44x44logo") {
+            400
+        } else if lower.contains("applist") {
+            360
+        } else if lower.contains("medtile") || lower.contains("square150x150logo") {
+            280
+        } else if lower.contains("storelogo") {
+            220
+        } else if lower.contains("logo") {
+            140
+        } else {
+            continue;
+        };
+
+        if lower.contains("unplated") {
+            score += 120;
+        }
+        if lower.contains("targetsize-48") || lower.contains("targetsize-64") {
+            score += 90;
+        } else if lower.contains("scale-200") {
+            score += 80;
+        } else if lower.contains("scale-150") {
+            score += 60;
+        } else if lower.contains("scale-400") {
+            score += 50;
+        } else if lower.contains("scale-100") {
+            score += 30;
+        }
+        if lower.contains("altform-") && !lower.contains("altform-unplated") {
+            score -= 60;
+        }
+        if lower.contains("contrast-white") || lower.contains("contrast-black") {
+            score -= 150;
+        }
+        if lower.contains("wide") || lower.contains("splash") {
+            score -= 300;
+        }
+
+        if best.as_ref().is_none_or(|(best_s, _)| score > *best_s) {
+            best = Some((score, path));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn is_uwp_package_path(exe_path: &str) -> bool {
+    if exe_path.is_empty() {
+        return false;
+    }
+    let lower_path = exe_path.to_ascii_lowercase();
+    if lower_path.contains("windowsapps") {
+        return true;
+    }
+    if let Some(exe_dir) = Path::new(exe_path).parent() {
+        return exe_dir.join("AppxManifest.xml").exists() || exe_dir.join("Assets").is_dir();
+    }
+    false
+}
+
+fn extract_uwp_package_icon(exe_path: &str, target_size: u32) -> Option<IconRgba> {
+    if !is_uwp_package_path(exe_path) {
+        return None;
+    }
+    let exe_dir = Path::new(exe_path).parent()?;
+    let png_path = find_best_uwp_asset_png(exe_dir)?;
+    let size = target_size.clamp(32, 64);
+    decode_image_bgra_premul(&png_path, size, size)
 }
 
 unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
@@ -776,6 +1063,90 @@ impl Drop for BackingDib {
     }
 }
 
+/// Per-surface desktop/window backdrop snapshot for real Liquid Glass Gaussian blur (`frost`),
+/// bevel refraction, and automatic Light/Dark Glass contrast adaptation.
+#[derive(Debug, Clone)]
+pub struct BackdropBuffer {
+    pub width: u32,
+    pub height: u32,
+    pub bgra_premul: Vec<u8>,
+    pub avg_luminance: f32,
+}
+
+impl BackdropBuffer {
+    /// Builds a [`BackdropBuffer`] from 32-bit premultiplied BGRA pixels and computes its
+    /// average perceptual WCAG luminance (`0.0..=1.0`).
+    pub fn from_bgra_premul(width: u32, height: u32, bgra_premul: Vec<u8>) -> Option<Self> {
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))?;
+        if width == 0 || height == 0 || bgra_premul.len() < byte_len {
+            return None;
+        }
+        let avg_luminance = compute_avg_luminance(width, height, &bgra_premul[..byte_len]);
+        Some(Self {
+            width,
+            height,
+            bgra_premul: bgra_premul[..byte_len].to_vec(),
+            avg_luminance,
+        })
+    }
+}
+
+struct BackdropState {
+    raw: BackdropBuffer,
+    blurred_w: u32,
+    blurred_h: u32,
+    blurred_bgra: Vec<u8>,
+    generation: u64,
+}
+
+impl BackdropState {
+    fn new(raw: BackdropBuffer, generation: u64) -> Self {
+        let (blurred_w, blurred_h, blurred_bgra) =
+            blur_bgra_half_res(raw.width, raw.height, &raw.bgra_premul);
+        Self {
+            raw,
+            blurred_w,
+            blurred_h,
+            blurred_bgra,
+            generation,
+        }
+    }
+}
+
+const MAX_GLASS_BITMAP_CACHE: usize = 24;
+
+#[derive(Default)]
+struct GlassBitmapCache {
+    entries: HashMap<u64, ID2D1Bitmap>,
+    order: VecDeque<u64>,
+}
+
+impl GlassBitmapCache {
+    fn get(&self, key: u64) -> Option<ID2D1Bitmap> {
+        self.entries.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u64, bmp: ID2D1Bitmap) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        while self.order.len() >= MAX_GLASS_BITMAP_CACHE {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.order.push_back(key);
+        self.entries.insert(key, bmp);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
 /// Borderless topmost `WS_EX_LAYERED` window backed by Direct2D `ID2D1DCRenderTarget`,
 /// a cached 32-bit premultiplied BGRA DIB section, and `UpdateLayeredWindow(ULW_ALPHA)`.
 pub struct NativeSurface {
@@ -790,6 +1161,10 @@ pub struct NativeSurface {
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     text_format_cache: RefCell<HashMap<(u32, u8, bool), IDWriteTextFormat>>,
     bitmap_cache: RefCell<BitmapCache>,
+    glass_bitmap_cache: RefCell<GlassBitmapCache>,
+    backdrop: RefCell<Option<BackdropState>>,
+    backdrop_gen: Cell<u64>,
+    color_theme_mode: Cell<ColorThemeMode>,
     cached_layer: RefCell<Option<ID2D1Layer>>,
     round_cap_stroke: RefCell<Option<ID2D1StrokeStyle>>,
     last_region_key: RefCell<Option<RegionKey>>,
@@ -854,12 +1229,67 @@ impl NativeSurface {
                 brush_cache: RefCell::new(HashMap::new()),
                 text_format_cache: RefCell::new(HashMap::new()),
                 bitmap_cache: RefCell::new(BitmapCache::default()),
+                glass_bitmap_cache: RefCell::new(GlassBitmapCache::default()),
+                backdrop: RefCell::new(None),
+                backdrop_gen: Cell::new(0),
+                color_theme_mode: Cell::new(ColorThemeMode::Auto),
                 cached_layer: RefCell::new(None),
                 round_cap_stroke: RefCell::new(None),
                 last_region_key: RefCell::new(None),
                 region_is_empty: RefCell::new(false),
             })
         }
+    }
+
+    /// Sets the user color theme preference (`Auto`, `Dark`, or `Light`).
+    pub fn set_color_theme_mode(&self, mode: ColorThemeMode) {
+        if self.color_theme_mode.get() != mode {
+            self.color_theme_mode.set(mode);
+            self.glass_bitmap_cache.borrow_mut().clear();
+        }
+    }
+
+    /// Returns the active [`ColorThemeMode`].
+    pub fn color_theme_mode(&self) -> ColorThemeMode {
+        self.color_theme_mode.get()
+    }
+
+    /// Supplies a captured 32-bit premultiplied BGRA backdrop buffer behind this surface for
+    /// real Gaussian `frost` blur, bevel refraction, and adaptive Light/Dark Glass contrast.
+    pub fn set_backdrop_pixels(&self, width: u32, height: u32, bgra_premul: &[u8]) {
+        let Some(buf) = BackdropBuffer::from_bgra_premul(width, height, bgra_premul.to_vec()) else {
+            return;
+        };
+        self.set_backdrop(Some(buf));
+    }
+
+    /// Replaces or clears the surface's [`BackdropBuffer`].
+    pub fn set_backdrop(&self, backdrop: Option<BackdropBuffer>) {
+        let next_gen = self.backdrop_gen.get().wrapping_add(1);
+        self.backdrop_gen.set(next_gen);
+        self.glass_bitmap_cache.borrow_mut().clear();
+        *self.backdrop.borrow_mut() = backdrop.map(|raw| BackdropState::new(raw, next_gen));
+    }
+
+    /// Clears any cached backdrop buffer (reverts to headless/flat adaptive glass fallback).
+    pub fn clear_backdrop(&self) {
+        self.set_backdrop(None);
+    }
+
+    /// Returns the average perceptual luminance (`0.0..=1.0`) of the current backdrop, if set.
+    pub fn backdrop_luminance(&self) -> Option<f32> {
+        self.backdrop.borrow().as_ref().map(|b| b.raw.avg_luminance)
+    }
+
+    /// Resolves the effective [`ThemePolarity`] (`LightGlass` vs `DarkGlass`) from
+    /// [`ColorThemeMode`] and the current backdrop luminance.
+    pub fn theme_polarity(&self) -> ThemePolarity {
+        self.palette().polarity
+    }
+
+    /// Returns the resolved [`AdaptivePalette`] for this surface's current polarity.
+    pub fn palette(&self) -> AdaptivePalette {
+        AdaptivePalette::resolve(self.color_theme_mode.get(), self.backdrop_luminance())
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -1445,8 +1875,8 @@ impl NativeSurface {
         }
     }
 
-    /// Draws an Apple Liquid Glass `EdgeSurface` contour (concave ears + smoked glass fill +
-    /// top/diagonal specular bevel sheen + inner shadow rim + crisp 1px hairline border).
+    /// Draws an Apple Liquid Glass `EdgeSurface` contour (concave ears + real blurred/refracted
+    /// backdrop with edge bevel dispersion + crisp 1px optical rim, or clean flat adaptive fallback).
     pub fn draw_liquid_glass_edge_surface(
         &self,
         rect: Rect,
@@ -1459,10 +1889,6 @@ impl NativeSurface {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
         }
-        let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
-        let (base_fill, spec_top, spec_bot, border_top, border_bot) =
-            resolve_liquid_glass_colors(style);
-
         unsafe {
             if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
                 let shadow_rect = Rect::new(
@@ -1480,56 +1906,22 @@ impl NativeSurface {
                 )?;
             }
 
+            if self.try_draw_refracted_glass(
+                rect,
+                style,
+                Some((ear_w, radius, edge, flares)),
+            )? {
+                return Ok(());
+            }
+
+            // Headless / no-backdrop fallback: clean flat adaptive glass + 1px optical rim (no diagonal gradient).
+            let palette = self.palette();
+            let (base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
             let geo = self.build_contour_geometry(&ops)?;
             let fill_brush = self.create_brush(base_fill)?;
             self.d2d_target.FillGeometry(&geo, &fill_brush, None);
-
-            // Specular diagonal bevel sheen across the glass surface
-            let sheen_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: spec_top.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.38,
-                    color: spec_top.with_alpha_mul(0.22).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.80,
-                    color: Color::rgba(1.0, 1.0, 1.0, 0.0).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: spec_bot.to_d2d(),
-                },
-            ];
-            let sheen_brush = self.create_linear_gradient(
-                pt(rect.x, rect.y),
-                pt(rect.x + rect.width * 0.45, rect.y + rect.height),
-                &sheen_stops,
-            )?;
-            self.d2d_target.FillGeometry(&geo, &sheen_brush, None);
-
-            // Crisp specular 1px hairline border
-            let border_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: border_top.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.5,
-                    color: GLASS_HAIRLINE.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: border_bot.to_d2d(),
-                },
-            ];
-            let border_brush = self.create_linear_gradient(
-                pt(rect.x, rect.y),
-                pt(rect.x + rect.width, rect.y + rect.height),
-                &border_stops,
-            )?;
+            let border_brush = self.create_brush(border_col)?;
             self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
             Ok(())
         }
@@ -1577,8 +1969,8 @@ impl NativeSurface {
     }
 
     /// Draws an Apple Liquid Glass rounded panel (`Regular`, `Clear`, `Elevated`, or `Tinted`):
-    /// soft outer drop shadow -> translucent smoked glass fill -> diagonal/top specular rim
-    /// gradient -> soft inner shadow rim -> crisp 1px white/tinted hairline border.
+    /// soft outer drop shadow -> real blurred+refracted backdrop with subtle RGB edge dispersion
+    /// and 1px optical rim (or clean flat adaptive frosted fill when no backdrop is present).
     pub fn draw_liquid_glass_panel(&self, rect: Rect, style: LiquidGlassStyle) -> Result<()> {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
@@ -1588,8 +1980,6 @@ impl NativeSurface {
             .max(0.0)
             .min(rect.width * 0.5)
             .min(rect.height * 0.5);
-        let (base_fill, spec_top, spec_bot, border_top, border_bot) =
-            resolve_liquid_glass_colors(style);
 
         unsafe {
             if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
@@ -1602,6 +1992,13 @@ impl NativeSurface {
                 )?;
             }
 
+            if self.try_draw_refracted_glass(rect, style, None)? {
+                return Ok(());
+            }
+
+            // Headless / no-backdrop fallback: clean flat adaptive translucency + 1px optical rim.
+            let palette = self.palette();
+            let (base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
             let rr = D2D1_ROUNDED_RECT {
                 rect: rect.to_d2d(),
                 radiusX: radius,
@@ -1610,52 +2007,30 @@ impl NativeSurface {
             let fill_brush = self.create_brush(base_fill)?;
             self.d2d_target.FillRoundedRectangle(&rr, &fill_brush);
 
-            // Diagonal specular bevel sheen (lit edge + opposite-side Fresnel bounce)
-            let sheen_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: spec_top.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.36,
-                    color: spec_top.with_alpha_mul(0.24).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.78,
-                    color: Color::rgba(1.0, 1.0, 1.0, 0.0).to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: spec_bot.to_d2d(),
-                },
-            ];
-            let sheen_brush = self.create_linear_gradient(
-                pt(rect.x, rect.y),
-                pt(rect.x + rect.width * 0.45, rect.y + rect.height),
-                &sheen_stops,
-            )?;
-            self.d2d_target.FillRoundedRectangle(&rr, &sheen_brush);
-
-            // Soft inner shadow rim just inside the outer edge
+            // Subtle 1px optical inner highlight along inner edge
             if rect.width > 6.0 && rect.height > 6.0 {
                 let inner_rr = D2D1_ROUNDED_RECT {
                     rect: Rect::new(
-                        rect.x + 1.5,
-                        rect.y + 1.5,
-                        rect.width - 3.0,
-                        rect.height - 3.0,
+                        rect.x + 1.25,
+                        rect.y + 1.25,
+                        rect.width - 2.5,
+                        rect.height - 2.5,
                     )
                     .to_d2d(),
-                    radiusX: (radius - 1.5).max(0.0),
-                    radiusY: (radius - 1.5).max(0.0),
+                    radiusX: (radius - 1.25).max(0.0),
+                    radiusY: (radius - 1.25).max(0.0),
                 };
-                let shade_alpha = if style.pressed { 0.28 } else { 0.16 };
-                let shade_brush = self.create_brush(GLASS_INNER_SHADE.with_alpha(shade_alpha))?;
+                let rim_alpha = if palette.polarity == ThemePolarity::LightGlass {
+                    0.50
+                } else {
+                    0.12
+                };
+                let inner_brush = self.create_brush(Color::rgba(1.0, 1.0, 1.0, rim_alpha))?;
                 self.d2d_target
-                    .DrawRoundedRectangle(&inner_rr, &shade_brush, 1.2, None);
+                    .DrawRoundedRectangle(&inner_rr, &inner_brush, 0.85, None);
             }
 
-            // Crisp 1px specular hairline border
+            // Crisp 1px outer hairline border
             let border_rr = D2D1_ROUNDED_RECT {
                 rect: Rect::new(
                     rect.x + 0.5,
@@ -1667,32 +2042,14 @@ impl NativeSurface {
                 radiusX: (radius - 0.5).max(0.0),
                 radiusY: (radius - 0.5).max(0.0),
             };
-            let border_stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: border_top.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 0.5,
-                    color: GLASS_HAIRLINE.to_d2d(),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: border_bot.to_d2d(),
-                },
-            ];
-            let border_brush = self.create_linear_gradient(
-                pt(rect.x, rect.y),
-                pt(rect.x + rect.width, rect.y + rect.height),
-                &border_stops,
-            )?;
+            let border_brush = self.create_brush(border_col)?;
             self.d2d_target
                 .DrawRoundedRectangle(&border_rr, &border_brush, 1.0, None);
             Ok(())
         }
     }
 
-    /// Draws a compact Liquid Glass button/pill with hover/press specular response and optional tint.
+    /// Draws a compact Liquid Glass button/pill with adaptive hover/press response and optional tint.
     pub fn draw_liquid_glass_button(
         &self,
         rect: Rect,
@@ -1701,13 +2058,133 @@ impl NativeSurface {
         hovered: bool,
         pressed: bool,
     ) -> Result<()> {
-        let mut style = match tint {
-            Some(c) => LiquidGlassStyle::tinted(c, corner_radius).with_shadow(4.0, 1.5, 0.16),
-            None => LiquidGlassStyle::button(corner_radius, hovered, pressed),
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let palette = self.palette();
+        let radius = corner_radius
+            .max(0.0)
+            .min(rect.width * 0.5)
+            .min(rect.height * 0.5);
+        let fill = match tint {
+            Some(c) => {
+                let lift = if pressed { 0.14 } else if hovered { 0.08 } else { 0.0 };
+                c.with_alpha((c.a.clamp(0.24, 0.88) + lift).clamp(0.24, 0.94))
+            }
+            None => {
+                if pressed {
+                    palette.control_active
+                } else if hovered {
+                    palette.control_hover
+                } else {
+                    palette.control_fill
+                }
+            }
         };
-        style.hovered = hovered;
-        style.pressed = pressed;
-        self.draw_liquid_glass_panel(rect, style)
+        let border = match tint {
+            Some(c) => c.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.40).with_alpha(0.45),
+            None => palette.hairline_border,
+        };
+        self.fill_rounded_rect(rect, radius, fill)?;
+        self.stroke_rounded_rect(
+            Rect::new(
+                rect.x + 0.5,
+                rect.y + 0.5,
+                (rect.width - 1.0).max(0.5),
+                (rect.height - 1.0).max(0.5),
+            ),
+            (radius - 0.5).max(0.0),
+            border,
+            1.0,
+        )?;
+        Ok(())
+    }
+
+    unsafe fn try_draw_refracted_glass(
+        &self,
+        rect: Rect,
+        style: LiquidGlassStyle,
+        edge_params: Option<(f32, f32, EdgeSide, bool)>,
+    ) -> Result<bool> {
+        let backdrop_ref = self.backdrop.borrow();
+        let Some(bd) = backdrop_ref.as_ref() else {
+            return Ok(false);
+        };
+
+        let scale = (self.dpi / 96.0).max(0.5);
+        let px_x = (rect.x * scale).floor();
+        let px_y = (rect.y * scale).floor();
+        let px_w = (rect.width * scale).ceil().max(1.0) as u32;
+        let px_h = (rect.height * scale).ceil().max(1.0) as u32;
+        if px_w == 0 || px_h == 0 {
+            return Ok(true);
+        }
+
+        let polarity = AdaptivePalette::resolve(
+            self.color_theme_mode.get(),
+            Some(bd.raw.avg_luminance),
+        )
+        .polarity;
+        let cache_key = glass_cache_key(
+            bd.generation,
+            polarity,
+            px_x as i32,
+            px_y as i32,
+            px_w,
+            px_h,
+            style,
+            edge_params,
+        );
+
+        let cached_bmp = self.glass_bitmap_cache.borrow().get(cache_key);
+        let bitmap = if let Some(cached) = cached_bmp {
+            cached
+        } else {
+            let pixels = rasterize_liquid_glass(
+                bd,
+                self.width,
+                self.height,
+                px_x,
+                px_y,
+                px_w,
+                px_h,
+                scale,
+                style,
+                polarity,
+                edge_params,
+            );
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: self.dpi,
+                dpiY: self.dpi,
+            };
+            let created = self.d2d_target.CreateBitmap(
+                D2D_SIZE_U {
+                    width: px_w,
+                    height: px_h,
+                },
+                Some(pixels.as_ptr() as *const _),
+                px_w * 4,
+                &props,
+            )?;
+            self.glass_bitmap_cache
+                .borrow_mut()
+                .insert(cache_key, created.clone());
+            created
+        };
+
+        let dest = rect.to_d2d();
+        self.d2d_target.DrawBitmap(
+            &bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            None,
+        );
+        Ok(true)
     }
 
     /// Updates hit-test/empty-hide state for `EdgeSurface` windows cleanly while letting
@@ -2234,21 +2711,24 @@ impl NativeSurface {
                 self.draw_line(cx, ty, cx + r * 0.45, ty + r * 0.20, color, sw)?;
             }
             SfSymbol::ShortcutKeys => {
-                // Apple Command (⌘) symbol with rounded corners
-                let inner = s * 0.14;
-                let loop_r = s * 0.11;
-                self.draw_line(cx - inner, cy - inner, cx + inner, cy - inner, color, sw)?;
-                self.draw_line(cx - inner, cy + inner, cx + inner, cy + inner, color, sw)?;
-                self.draw_line(cx - inner, cy - inner, cx - inner, cy + inner, color, sw)?;
-                self.draw_line(cx + inner, cy - inner, cx + inner, cy + inner, color, sw)?;
-                for (sx, sy) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                    self.stroke_circle(
-                        cx + sx * (inner + loop_r),
-                        cy + sy * (inner + loop_r),
-                        loop_r,
-                        color,
-                        sw,
-                    )?;
+                // Windows-native 4-pane shortcut keycap (`[Win]`)
+                self.stroke_rounded_rect(
+                    Rect::new(cx - s * 0.36, cy - s * 0.32, s * 0.72, s * 0.64),
+                    (s * 0.12).max(2.0),
+                    color,
+                    sw,
+                )?;
+                let pane = s * 0.15;
+                let off = s * 0.105;
+                let pr = (s * 0.03).max(0.8);
+                for dx in [-off, off] {
+                    for dy in [-off, off] {
+                        self.fill_rounded_rect(
+                            Rect::new(cx + dx - pane * 0.5, cy + dy - pane * 0.5, pane, pane),
+                            pr,
+                            color,
+                        )?;
+                    }
                 }
             }
             SfSymbol::Gear => {
@@ -2443,15 +2923,28 @@ impl NativeSurface {
         }
     }
 
-    /// Draws a crisp sun icon (brightness) centered at `(cx, cy)`.
-    pub fn draw_sun_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
-        let r = (size * 0.24).max(2.0);
-        let sw = (size * 0.1).max(1.1);
+    /// Draws a rotating brightness sun icon inside `rect` with rays rotated by `angle_rad`.
+    pub fn draw_brightness_sun(
+        &self,
+        rect: Rect,
+        angle_rad: f32,
+        color: Color,
+        stroke_width: f32,
+    ) -> Result<()> {
+        let s = rect.width.min(rect.height).max(8.0);
+        let cx = rect.x + rect.width * 0.5;
+        let cy = rect.y + rect.height * 0.5;
+        let r = (s * 0.22).max(2.0);
+        let sw = if stroke_width > 0.0 {
+            stroke_width.max(0.8)
+        } else {
+            (s * 0.105).clamp(1.1, 2.4)
+        };
         self.stroke_circle(cx, cy, r, color, sw)?;
-        let inner = r + size * 0.12;
-        let outer = size * 0.48;
+        let inner = r + s * 0.11;
+        let outer = s * 0.46;
         for i in 0..8 {
-            let angle = (i as f32) * std::f32::consts::FRAC_PI_4;
+            let angle = angle_rad + (i as f32) * std::f32::consts::FRAC_PI_4;
             let (sin_a, cos_a) = angle.sin_cos();
             self.draw_line(
                 cx + cos_a * inner,
@@ -2463,6 +2956,16 @@ impl NativeSurface {
             )?;
         }
         Ok(())
+    }
+
+    /// Draws a crisp sun icon (brightness) centered at `(cx, cy)`.
+    pub fn draw_sun_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        self.draw_brightness_sun(
+            Rect::new(cx - size * 0.5, cy - size * 0.5, size, size),
+            0.0,
+            color,
+            (size * 0.1).max(1.1),
+        )
     }
 
     /// Draws a crisp speaker/volume icon centered at `(cx, cy)`.
@@ -2744,25 +3247,6 @@ impl NativeSurface {
         Ok(())
     }
 
-    unsafe fn create_linear_gradient(
-        &self,
-        start: D2D_POINT_2F,
-        end: D2D_POINT_2F,
-        stops: &[D2D1_GRADIENT_STOP],
-    ) -> Result<ID2D1LinearGradientBrush> {
-        let collection = self.d2d_target.CreateGradientStopCollection(
-            stops,
-            D2D1_GAMMA_2_2,
-            D2D1_EXTEND_MODE_CLAMP,
-        )?;
-        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-            startPoint: start,
-            endPoint: end,
-        };
-        self.d2d_target
-            .CreateLinearGradientBrush(&props, None, &collection)
-    }
-
     unsafe fn create_round_cap_stroke(&self) -> Result<ID2D1StrokeStyle> {
         if let Some(cached) = self.round_cap_stroke.borrow().as_ref() {
             return Ok(cached.clone());
@@ -2928,6 +3412,7 @@ impl NativeSurface {
         unsafe {
             self.brush_cache.borrow_mut().clear();
             self.bitmap_cache.borrow_mut().clear();
+            self.glass_bitmap_cache.borrow_mut().clear();
             self.cached_layer.borrow_mut().take();
             self.last_region_key.borrow_mut().take();
             let new_dib = BackingDib::new(width, height)?;
@@ -2945,6 +3430,7 @@ impl Drop for NativeSurface {
     fn drop(&mut self) {
         self.brush_cache.borrow_mut().clear();
         self.bitmap_cache.borrow_mut().clear();
+        self.glass_bitmap_cache.borrow_mut().clear();
         self.cached_layer.borrow_mut().take();
         unsafe {
             if !self.hwnd.0.is_null() {
@@ -3115,59 +3601,592 @@ fn to_wide_null(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
-/// Resolves `(base_fill, specular_top, specular_bottom, border_top, border_bottom)`
-/// for [`LiquidGlassStyle`], matching Apple's smoked glass + dual-sided Fresnel catchlight.
-fn resolve_liquid_glass_colors(style: LiquidGlassStyle) -> (Color, Color, Color, Color, Color) {
-    let hover_lift = if style.hovered { 0.05 } else { 0.0 };
-    let press_lift = if style.pressed { 0.04 } else { 0.0 };
-
+/// Resolves flat fallback `(base_fill, hairline_border)` from [`AdaptivePalette`] when no
+/// live backdrop snapshot is available (zero Windows 7 diagonal interior gradients).
+fn resolve_fallback_glass_colors(
+    palette: &AdaptivePalette,
+    style: LiquidGlassStyle,
+) -> (Color, Color) {
+    let lift = if style.pressed {
+        0.06
+    } else if style.hovered {
+        0.03
+    } else {
+        0.0
+    };
     let base_fill = match style.variant {
-        LiquidGlassVariant::Regular => {
-            GLASS_REGULAR.with_alpha((GLASS_REGULAR.a + hover_lift * 0.5).clamp(0.62, 0.85))
-        }
-        LiquidGlassVariant::Clear => {
-            GLASS_CLEAR.with_alpha((GLASS_CLEAR.a + hover_lift * 0.5).clamp(0.55, 0.78))
-        }
+        LiquidGlassVariant::Regular => palette
+            .glass_regular
+            .with_alpha((palette.glass_regular.a + lift).clamp(0.62, 0.90)),
+        LiquidGlassVariant::Clear => palette
+            .glass_clear
+            .with_alpha((palette.glass_clear.a + lift).clamp(0.55, 0.84)),
         LiquidGlassVariant::Elevated => {
-            let base = if style.pressed {
-                Color::from_rgba_u8(0x2C, 0x2C, 0x30, 0xDB)
+            if style.pressed {
+                palette.control_active.lerp(palette.glass_elevated, 0.6)
             } else if style.hovered {
-                Color::from_rgba_u8(0x28, 0x28, 0x2C, 0xD6)
+                palette.control_hover.lerp(palette.glass_elevated, 0.7)
             } else {
-                GLASS_ELEVATED
-            };
-            base
+                palette.glass_elevated
+            }
         }
         LiquidGlassVariant::Tinted(tint) => {
-            let alpha = (tint.a.clamp(0.28, 0.82) + hover_lift + press_lift).clamp(0.28, 0.88);
-            GLASS_REGULAR.lerp(tint.with_alpha(alpha), 0.72)
+            let alpha = (tint.a.clamp(0.26, 0.84) + lift).clamp(0.26, 0.88);
+            palette.glass_regular.lerp(tint.with_alpha(alpha), 0.72)
+        }
+    };
+    let border = match style.variant {
+        LiquidGlassVariant::Tinted(tint) => tint
+            .lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.45)
+            .with_alpha(0.45),
+        _ => palette.hairline_border,
+    };
+    (base_fill, border)
+}
+
+fn compute_avg_luminance(width: u32, height: u32, bgra_premul: &[u8]) -> f32 {
+    let total_px = (width as usize).saturating_mul(height as usize);
+    if total_px == 0 {
+        return 0.0;
+    }
+    let step = (total_px / 1024).max(1);
+    let mut sum = 0.0_f64;
+    let mut count = 0_usize;
+    let mut idx = 0_usize;
+    while idx < total_px {
+        let o = idx * 4;
+        let b = bgra_premul[o] as f32;
+        let g = bgra_premul[o + 1] as f32;
+        let r = bgra_premul[o + 2] as f32;
+        let a = bgra_premul[o + 3] as f32;
+        let (rf, gf, bf) = if a > 0.5 {
+            ((r / a).min(1.0), (g / a).min(1.0), (b / a).min(1.0))
+        } else {
+            (r / 255.0, g / 255.0, b / 255.0)
+        };
+        sum += (0.2126 * rf + 0.7152 * gf + 0.0722 * bf) as f64;
+        count += 1;
+        idx += step;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64).clamp(0.0, 1.0) as f32
+    }
+}
+
+/// Downsamples `src` 2x and runs a 3-pass O(W*H) separable box blur (converging to Gaussian
+/// `sigma ~ 12px` at full resolution) for smooth Liquid Glass `frost`.
+fn blur_bgra_half_res(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
+    let bw = (width / 2).max(1);
+    let bh = (height / 2).max(1);
+    let mut buf = vec![0u8; (bw as usize) * (bh as usize) * 4];
+    for y in 0..bh {
+        let sy0 = (y * 2).min(height - 1) as usize;
+        let sy1 = (y * 2 + 1).min(height - 1) as usize;
+        for x in 0..bw {
+            let sx0 = (x * 2).min(width - 1) as usize;
+            let sx1 = (x * 2 + 1).min(width - 1) as usize;
+            let i00 = (sy0 * width as usize + sx0) * 4;
+            let i10 = (sy0 * width as usize + sx1) * 4;
+            let i01 = (sy1 * width as usize + sx0) * 4;
+            let i11 = (sy1 * width as usize + sx1) * 4;
+            let dst = (y as usize * bw as usize + x as usize) * 4;
+            for c in 0..4 {
+                let avg = (src[i00 + c] as u32
+                    + src[i10 + c] as u32
+                    + src[i01 + c] as u32
+                    + src[i11 + c] as u32)
+                    >> 2;
+                buf[dst + c] = avg as u8;
+            }
+        }
+    }
+
+    let mut tmp = vec![0u8; buf.len()];
+    let radius = (bw.min(bh) as i32 / 3).clamp(2, 6);
+    for _ in 0..3 {
+        box_blur_h(&buf, &mut tmp, bw as usize, bh as usize, radius);
+        box_blur_v(&tmp, &mut buf, bw as usize, bh as usize, radius);
+    }
+    (bw, bh, buf)
+}
+
+fn box_blur_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: i32) {
+    let win = (radius * 2 + 1) as u32;
+    let w_max = w as i32 - 1;
+    for y in 0..h {
+        let row = y * w * 4;
+        let mut sb = 0_u32;
+        let mut sg = 0_u32;
+        let mut sr = 0_u32;
+        let mut sa = 0_u32;
+        for k in -radius..=radius {
+            let sx = k.clamp(0, w_max) as usize;
+            let o = row + sx * 4;
+            sb += src[o] as u32;
+            sg += src[o + 1] as u32;
+            sr += src[o + 2] as u32;
+            sa += src[o + 3] as u32;
+        }
+        for x in 0..w {
+            let o = row + x * 4;
+            dst[o] = (sb / win) as u8;
+            dst[o + 1] = (sg / win) as u8;
+            dst[o + 2] = (sr / win) as u8;
+            dst[o + 3] = (sa / win) as u8;
+
+            let rem_x = (x as i32 - radius).clamp(0, w_max) as usize;
+            let add_x = (x as i32 + radius + 1).clamp(0, w_max) as usize;
+            let ro = row + rem_x * 4;
+            let ao = row + add_x * 4;
+            sb = sb + src[ao] as u32 - src[ro] as u32;
+            sg = sg + src[ao + 1] as u32 - src[ro + 1] as u32;
+            sr = sr + src[ao + 2] as u32 - src[ro + 2] as u32;
+            sa = sa + src[ao + 3] as u32 - src[ro + 3] as u32;
+        }
+    }
+}
+
+fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: i32) {
+    let win = (radius * 2 + 1) as u32;
+    let h_max = h as i32 - 1;
+    let stride = w * 4;
+    for x in 0..w {
+        let col = x * 4;
+        let mut sb = 0_u32;
+        let mut sg = 0_u32;
+        let mut sr = 0_u32;
+        let mut sa = 0_u32;
+        for k in -radius..=radius {
+            let sy = k.clamp(0, h_max) as usize;
+            let o = sy * stride + col;
+            sb += src[o] as u32;
+            sg += src[o + 1] as u32;
+            sr += src[o + 2] as u32;
+            sa += src[o + 3] as u32;
+        }
+        for y in 0..h {
+            let o = y * stride + col;
+            dst[o] = (sb / win) as u8;
+            dst[o + 1] = (sg / win) as u8;
+            dst[o + 2] = (sr / win) as u8;
+            dst[o + 3] = (sa / win) as u8;
+
+            let rem_y = (y as i32 - radius).clamp(0, h_max) as usize;
+            let add_y = (y as i32 + radius + 1).clamp(0, h_max) as usize;
+            let ro = rem_y * stride + col;
+            let ao = add_y * stride + col;
+            sb = sb + src[ao] as u32 - src[ro] as u32;
+            sg = sg + src[ao + 1] as u32 - src[ro + 1] as u32;
+            sr = sr + src[ao + 2] as u32 - src[ro + 2] as u32;
+            sa = sa + src[ao + 3] as u32 - src[ro + 3] as u32;
+        }
+    }
+}
+
+/// Squircle rounded-rectangle signed distance & outward normal (`liquid-rust` `sdg_rrect`, `n = 2.79`).
+#[inline]
+fn sdg_rrect(px: f32, py: f32, hw: f32, hh: f32, r: f32, soft: f32) -> (f32, f32, f32) {
+    let sx = if px >= 0.0 { 1.0 } else { -1.0 };
+    let sy = if py >= 0.0 { 1.0 } else { -1.0 };
+    let wx = px.abs() - (hw - r);
+    let wy = py.abs() - (hh - r);
+    let g = wx.max(wy);
+    if g > 0.0 {
+        let qx = wx.max(1e-7);
+        let qy = wy.max(1e-7);
+        if r <= 0.5 {
+            let l = qx.hypot(qy);
+            return (l - r, sx * qx / l, sy * qy / l);
+        }
+        const N: f32 = 2.79;
+        let l = (qx.powf(N) + qy.powf(N)).powf(1.0 / N);
+        let gx = (qx / l).powf(N - 1.0);
+        let gy = (qy / l).powf(N - 1.0);
+        let gl = gx.hypot(gy).max(1e-6);
+        return ((l - r) / gl, sx * gx / gl, sy * gy / gl);
+    }
+    let inv_s = 1.0 / soft.max(1e-3);
+    let ex = ((wx - g) * inv_s).exp();
+    let ey = ((wy - g) * inv_s).exp();
+    let el = ex.hypot(ey).max(1e-6);
+    (g - r, sx * ex / el, sy * ey / el)
+}
+
+/// Signed distance & outward normal for an `EdgeSurface` contour (with optional concave ears).
+#[inline]
+fn sdg_edge_contour(
+    lx: f32,
+    ly: f32,
+    lw: f32,
+    lh: f32,
+    ear_w: f32,
+    radius: f32,
+    edge: EdgeSide,
+    flares: bool,
+) -> (f32, f32, f32) {
+    let (clw, clh, ux, uy) = match edge {
+        EdgeSide::Top => (lw, lh, lx, ly),
+        EdgeSide::Bottom => (lw, lh, lx, lh - ly),
+        EdgeSide::Left => (lh, lw, ly, lx),
+        EdgeSide::Right => (lh, lw, ly, lw - lx),
+    };
+    let ear = if flares {
+        ear_w.max(0.0).min(clw * 0.25)
+    } else {
+        0.0
+    };
+    let left = ear;
+    let right = (clw - ear).max(left + 1.0);
+    let body_w = right - left;
+    let r = radius.max(0.0).min(clh * 0.5).min(body_w * 0.5);
+
+    // Canonical top-anchored body: rounded only on bottom corners unless Bottom+!flares.
+    let (mut d, mut unx, mut uny) = if edge == EdgeSide::Bottom && !flares && r > 0.0 {
+        sdg_rrect(
+            ux - (left + body_w * 0.5),
+            uy - clh * 0.5,
+            body_w * 0.5,
+            clh * 0.5,
+            r,
+            6.0,
+        )
+    } else {
+        // Shift top boundary above y=0 so top bezel edge has no rounded corners or inward bevel.
+        let top_pad = 64.0_f32;
+        let eff_h = clh + top_pad;
+        let (bd, bnx, bny) = sdg_rrect(
+            ux - (left + body_w * 0.5),
+            (uy + top_pad) - eff_h * 0.5,
+            body_w * 0.5,
+            eff_h * 0.5,
+            r,
+            6.0,
+        );
+        // Clamp against y=0 flush edge
+        let top_d = -uy;
+        if top_d > bd {
+            (top_d, 0.0, -1.0)
+        } else {
+            (bd, bnx, bny)
         }
     };
 
-    let spec_mul: f32 = if style.pressed {
-        0.72
+    if flares && ear > 0.0 && uy >= 0.0 && uy <= ear {
+        if ux < left {
+            let dx = ux;
+            let dy = ear - uy;
+            let dist = dx.hypot(dy).max(1e-5);
+            let ear_d = ear - dist;
+            if ear_d < d {
+                d = ear_d;
+                unx = -dx / dist;
+                uny = dy / dist;
+            }
+        } else if ux > right {
+            let dx = clw - ux;
+            let dy = ear - uy;
+            let dist = dx.hypot(dy).max(1e-5);
+            let ear_d = ear - dist;
+            if ear_d < d {
+                d = ear_d;
+                unx = dx / dist;
+                uny = dy / dist;
+            }
+        }
+    }
+
+    let (nx, ny) = match edge {
+        EdgeSide::Top => (unx, uny),
+        EdgeSide::Bottom => (unx, -uny),
+        EdgeSide::Left => (uny, unx),
+        EdgeSide::Right => (-uny, unx),
+    };
+    (d, nx, ny)
+}
+
+#[inline]
+fn sample_bgra_bilinear(bgra: &[u8], w: u32, h: u32, x: f32, y: f32) -> [f32; 3] {
+    let wf = (w as i32 - 1).max(0) as f32;
+    let hf = (h as i32 - 1).max(0) as f32;
+    let cx = x.clamp(0.0, wf);
+    let cy = y.clamp(0.0, hf);
+    let x0 = cx.floor() as u32;
+    let y0 = cy.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = cx - x0 as f32;
+    let fy = cy - y0 as f32;
+
+    let idx = |px: u32, py: u32| ((py as usize) * (w as usize) + (px as usize)) * 4;
+    let i00 = idx(x0, y0);
+    let i10 = idx(x1, y0);
+    let i01 = idx(x0, y1);
+    let i11 = idx(x1, y1);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let inv255 = 1.0 / 255.0;
+    let r = (bgra[i00 + 2] as f32 * w00
+        + bgra[i10 + 2] as f32 * w10
+        + bgra[i01 + 2] as f32 * w01
+        + bgra[i11 + 2] as f32 * w11)
+        * inv255;
+    let g = (bgra[i00 + 1] as f32 * w00
+        + bgra[i10 + 1] as f32 * w10
+        + bgra[i01 + 1] as f32 * w01
+        + bgra[i11 + 1] as f32 * w11)
+        * inv255;
+    let b = (bgra[i00] as f32 * w00
+        + bgra[i10] as f32 * w10
+        + bgra[i01] as f32 * w01
+        + bgra[i11] as f32 * w11)
+        * inv255;
+    [r, g, b]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rasterize_liquid_glass(
+    bd: &BackdropState,
+    surf_w: u32,
+    surf_h: u32,
+    px_x: f32,
+    px_y: f32,
+    px_w: u32,
+    px_h: u32,
+    scale: f32,
+    style: LiquidGlassStyle,
+    polarity: ThemePolarity,
+    edge_params: Option<(f32, f32, EdgeSide, bool)>,
+) -> Vec<u8> {
+    let mut out = vec![0u8; (px_w as usize) * (px_h as usize) * 4];
+    let w = px_w as f32;
+    let h = px_h as f32;
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let r_px = (style.corner_radius * scale)
+        .max(0.0)
+        .min(hw)
+        .min(hh);
+    let depth = (w.min(h) * 0.34).min(22.0 * scale).max(2.0);
+    let soft = (depth * 0.35).max(3.0);
+
+    let (refract_reach, tone_mix) = match style.variant {
+        LiquidGlassVariant::Regular => (depth * 0.55, 0.66_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.52_f32),
+        LiquidGlassVariant::Elevated => (depth * 0.42, 0.74_f32),
+        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.58_f32),
+    };
+    let tone_target = match polarity {
+        ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
+        ThemePolarity::DarkGlass => [0.075_f32, 0.078_f32, 0.095_f32],
+    };
+
+    let inv_surf_w = 1.0 / surf_w.max(1) as f32;
+    let inv_surf_h = 1.0 / surf_h.max(1) as f32;
+    let bw_f = bd.blurred_w as f32;
+    let bh_f = bd.blurred_h as f32;
+    let rw_f = bd.raw.width as f32;
+    let rh_f = bd.raw.height as f32;
+
+    let tint_opt = match style.variant {
+        LiquidGlassVariant::Tinted(c) => Some(c),
+        _ => None,
+    };
+    let hover_lift = if style.pressed {
+        0.05_f32
     } else if style.hovered {
-        1.22
+        0.03_f32
     } else {
-        1.0
-    };
-    let spec_top = GLASS_SPECULAR_TOP.with_alpha((0.17 * spec_mul).clamp(0.06, 0.34));
-    let spec_bot = GLASS_SPECULAR_BOTTOM.with_alpha((0.05 * spec_mul).clamp(0.02, 0.12));
-
-    let (border_top, border_bot) = match style.variant {
-        LiquidGlassVariant::Tinted(tint) => (
-            tint.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.55)
-                .with_alpha(0.45),
-            tint.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.35)
-                .with_alpha(0.22),
-        ),
-        _ => (
-            Color::rgba(1.0, 1.0, 1.0, (0.34 * spec_mul).clamp(0.16, 0.48)),
-            Color::rgba(1.0, 1.0, 1.0, (0.18 * spec_mul).clamp(0.08, 0.28)),
-        ),
+        0.0
     };
 
-    (base_fill, spec_top, spec_bot, border_top, border_bot)
+    for iy in 0..px_h {
+        let ly = iy as f32 + 0.5;
+        let gy = (px_y + ly) * inv_surf_h;
+        for ix in 0..px_w {
+            let lx = ix as f32 + 0.5;
+            let (d, nx, ny) = if let Some((ear_w, er, edge, flares)) = edge_params {
+                sdg_edge_contour(
+                    lx,
+                    ly,
+                    w,
+                    h,
+                    ear_w * scale,
+                    er * scale,
+                    edge,
+                    flares,
+                )
+            } else {
+                sdg_rrect(lx - hw, ly - hh, hw, hh, r_px, soft)
+            };
+
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+
+            let gx = (px_x + lx) * inv_surf_w;
+            let t = (-d / depth).clamp(0.0, 1.0);
+
+            // Snell bevel refraction + subtle RGB dispersion along the outer curve (glass.wgsl)
+            let frosted = if t < 1.0 {
+                let u = 1.0 - t;
+                let u3 = u * u * u;
+                let slope = (u3 * (1.0 - u3 * u).max(1e-4).powf(-0.75)).min(36.0);
+                let theta = slope.atan();
+                let refr = (theta - (theta.sin() / 1.5).clamp(-1.0, 1.0).asin()).tan();
+                let off_uv_x = (refract_reach * refr * nx) * inv_surf_w;
+                let off_uv_y = (refract_reach * refr * ny) * inv_surf_h;
+
+                let sample_blur_uv = |ux: f32, uy: f32| {
+                    sample_bgra_bilinear(&bd.blurred_bgra, bd.blurred_w, bd.blurred_h, ux * bw_f, uy * bh_f)
+                };
+                let r_c = sample_blur_uv(gx - off_uv_x * 0.90, gy - off_uv_y * 0.90)[0];
+                let g_c = sample_blur_uv(gx - off_uv_x, gy - off_uv_y)[1];
+                let b_c = sample_blur_uv(gx - off_uv_x * 1.10, gy - off_uv_y * 1.10)[2];
+                let sharp = sample_bgra_bilinear(
+                    &bd.raw.bgra_premul,
+                    bd.raw.width,
+                    bd.raw.height,
+                    (gx - off_uv_x) * rw_f,
+                    (gy - off_uv_y) * rh_f,
+                );
+                let clarity = (1.0 - t) * 0.35;
+                [
+                    r_c * (1.0 - clarity) + sharp[0] * clarity,
+                    g_c * (1.0 - clarity) + sharp[1] * clarity,
+                    b_c * (1.0 - clarity) + sharp[2] * clarity,
+                ]
+            } else {
+                // Flat interior: pure Gaussian frosted backdrop (zero Windows 7 diagonal gradient!)
+                sample_bgra_bilinear(&bd.blurred_bgra, bd.blurred_w, bd.blurred_h, gx * bw_f, gy * bh_f)
+            };
+
+            // Adaptive tone mapping (Light Frosted White Glass vs Dark Smoked Glass)
+            let mut rgb = [
+                frosted[0] * (1.0 - tone_mix) + tone_target[0] * tone_mix,
+                frosted[1] * (1.0 - tone_mix) + tone_target[1] * tone_mix,
+                frosted[2] * (1.0 - tone_mix) + tone_target[2] * tone_mix,
+            ];
+
+            if let Some(tint) = tint_opt {
+                let ta = tint.a.clamp(0.25, 0.72);
+                rgb[0] = rgb[0] * (1.0 - ta) + tint.r * ta;
+                rgb[1] = rgb[1] * (1.0 - ta) + tint.g * ta;
+                rgb[2] = rgb[2] * (1.0 - ta) + tint.b * ta;
+            }
+
+            if hover_lift > 0.0 {
+                let dir = if polarity == ThemePolarity::LightGlass {
+                    1.0
+                } else {
+                    1.0
+                };
+                for c in &mut rgb {
+                    *c = (*c + hover_lift * dir * 0.6).min(1.0);
+                }
+            }
+
+            // Crisp 1px-1.5px optical edge specular rim only (does not wash across interior)
+            let rim_band = (-d.abs() / (1.35 * scale)).exp();
+            if rim_band > 0.02 {
+                let facing = nx * (-0.45) + ny * (-0.89);
+                let dir_w = if facing > 0.0 {
+                    0.22 + 0.78 * facing * facing
+                } else {
+                    0.12 + 0.22 * facing * facing
+                };
+                let rim_strength = match polarity {
+                    ThemePolarity::LightGlass => 0.42 * rim_band * dir_w,
+                    ThemePolarity::DarkGlass => 0.30 * rim_band * dir_w,
+                };
+                for c in &mut rgb {
+                    *c = (*c + rim_strength * (1.0 - *c * 0.35)).min(1.0);
+                }
+            }
+
+            // Subtle 1px outer contrast hairline for crisp definition on same-polarity surfaces
+            if d > -1.0 * scale {
+                let edge_t = ((d + 1.0 * scale) / (1.0 * scale)).clamp(0.0, 1.0);
+                if polarity == ThemePolarity::LightGlass {
+                    let darken = 0.10 * edge_t;
+                    for c in &mut rgb {
+                        *c = (*c * (1.0 - darken)).max(0.0);
+                    }
+                } else {
+                    let lift = 0.14 * edge_t;
+                    for c in &mut rgb {
+                        *c = (*c + lift).min(1.0);
+                    }
+                }
+            }
+
+            // Output premultiplied BGRA
+            let idx = ((iy as usize) * (px_w as usize) + (ix as usize)) * 4;
+            out[idx] = (rgb[2].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
+            out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
+            out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
+            out[idx + 3] = (cov * 255.0).round() as u8;
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn glass_cache_key(
+    backdrop_gen: u64,
+    polarity: ThemePolarity,
+    px_x: i32,
+    px_y: i32,
+    px_w: u32,
+    px_h: u32,
+    style: LiquidGlassStyle,
+    edge_params: Option<(f32, f32, EdgeSide, bool)>,
+) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    };
+    mix(backdrop_gen);
+    mix(match polarity {
+        ThemePolarity::DarkGlass => 1,
+        ThemePolarity::LightGlass => 2,
+    });
+    mix(px_x as u64);
+    mix(px_y as u64);
+    mix(px_w as u64);
+    mix(px_h as u64);
+    mix((style.corner_radius * 10.0).round() as u64);
+    mix(u64::from(style.hovered));
+    mix(u64::from(style.pressed));
+    match style.variant {
+        LiquidGlassVariant::Regular => mix(10),
+        LiquidGlassVariant::Clear => mix(20),
+        LiquidGlassVariant::Elevated => mix(30),
+        LiquidGlassVariant::Tinted(c) => {
+            mix(40);
+            mix(pack_color_rgba(c) as u64);
+        }
+    }
+    if let Some((ear_w, r, edge, flares)) = edge_params {
+        mix(100);
+        mix((ear_w * 10.0).round() as u64);
+        mix((r * 10.0).round() as u64);
+        mix(match edge {
+            EdgeSide::Top => 0,
+            EdgeSide::Bottom => 1,
+            EdgeSide::Left => 2,
+            EdgeSide::Right => 3,
+        });
+        mix(u64::from(flares));
+    }
+    h
 }
 
 /// Converts a Win32 HRESULT into a `windows::core::Result<()>`.
@@ -3495,5 +4514,200 @@ mod tests {
         assert_eq!(s1.bitmap_cache.borrow().entries.len(), MAX_BITMAP_CACHE_ENTRIES);
 
         trim_working_set();
+    }
+
+    #[test]
+    fn backdrop_blur_refraction_and_adaptive_polarity() {
+        let surface = match NativeSurface::new("HimeBackdropGlassTest", -2000, -2000, 240, 120) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // 1. Dark/black backdrop under Auto -> flips to Light Frosted White Glass + dark text
+        let mut dark_bg = vec![0u8; 240 * 120 * 4];
+        for px in dark_bg.chunks_exact_mut(4) {
+            px[0] = 0x10;
+            px[1] = 0x10;
+            px[2] = 0x12;
+            px[3] = 0xFF;
+        }
+        surface.set_backdrop_pixels(240, 120, &dark_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, theme::LIGHT_TEXT_PRIMARY);
+
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(
+                Rect::new(20.0, 20.0, 120.0, 60.0),
+                LiquidGlassStyle::regular(16.0).without_shadow(),
+            )
+            .unwrap();
+        surface
+            .draw_liquid_glass_edge_surface(
+                Rect::new(150.0, 0.0, 80.0, 36.0),
+                10.0,
+                14.0,
+                EdgeSide::Top,
+                true,
+                LiquidGlassStyle::clear(14.0).without_shadow(),
+            )
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+
+        unsafe {
+            let dib = surface.dib.borrow();
+            assert_eq!(dib.pixel_bgra(2, 2), Some([0, 0, 0, 0]));
+            let interior = dib.pixel_bgra(75, 50).unwrap();
+            assert!(
+                interior[0] > 140 && interior[1] > 140 && interior[2] > 140 && interior[3] > 220,
+                "expected light frosted white glass on dark backdrop, got {:?}",
+                interior
+            );
+        }
+
+        // 2. White/bright backdrop under Auto -> flips to Dark Smoked Glass + white text
+        let mut light_bg = vec![0u8; 240 * 120 * 4];
+        for px in light_bg.chunks_exact_mut(4) {
+            px[0] = 0xF5;
+            px[1] = 0xF5;
+            px[2] = 0xF8;
+            px[3] = 0xFF;
+        }
+        surface.set_backdrop_pixels(240, 120, &light_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        assert_eq!(surface.palette().text_primary, theme::TEXT_PRIMARY);
+
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(
+                Rect::new(20.0, 20.0, 120.0, 60.0),
+                LiquidGlassStyle::regular(16.0).without_shadow(),
+            )
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+
+        unsafe {
+            let dib = surface.dib.borrow();
+            let interior = dib.pixel_bgra(75, 50).unwrap();
+            assert!(
+                interior[0] < 130 && interior[1] < 130 && interior[2] < 130 && interior[3] > 220,
+                "expected dark smoked glass on bright backdrop, got {:?}",
+                interior
+            );
+        }
+
+        // 3. Explicit Light/Dark mode overrides backdrop luminance
+        surface.set_color_theme_mode(ColorThemeMode::Light);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface.set_color_theme_mode(ColorThemeMode::Dark);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+    }
+
+    #[test]
+    fn brightness_sun_rotation_and_windows_shortcut_icon() {
+        let surface = match NativeSurface::new("HimeSunTest", -2000, -2000, 160, 64) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        surface.begin_draw();
+        for (i, angle) in [0.0_f32, 0.75, 1.5, std::f32::consts::PI].iter().enumerate() {
+            surface
+                .draw_brightness_sun(
+                    Rect::new(8.0 + (i as f32) * 28.0, 16.0, 22.0, 22.0),
+                    *angle,
+                    theme::TEXT_PRIMARY,
+                    0.0,
+                )
+                .unwrap();
+        }
+        surface
+            .draw_sf_symbol(
+                Rect::new(128.0, 16.0, 22.0, 22.0),
+                SfSymbol::ShortcutKeys,
+                theme::TEXT_PRIMARY,
+                0.0,
+            )
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+    }
+
+    #[test]
+    fn wic_png_decode_and_uwp_assets_fallback() {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFF_u32;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        fn push_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let crc = crc32(&out[start..]);
+            out.extend_from_slice(&crc.to_be_bytes());
+        }
+        fn adler32(data: &[u8]) -> u32 {
+            let (mut s1, mut s2) = (1_u32, 0_u32);
+            for &b in data {
+                s1 = (s1 + b as u32) % 65521;
+                s2 = (s2 + s1) % 65521;
+            }
+            (s2 << 16) | s1
+        }
+
+        // Valid 2x2 RGBA PNG (blue/white pixels with full alpha)
+        let mut png = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let ihdr = [
+            0, 0, 0, 2, // width = 2
+            0, 0, 0, 2, // height = 2
+            8, 6, 0, 0, 0, // 8-bit RGBA
+        ];
+        push_chunk(&mut png, b"IHDR", &ihdr);
+        let raw_rows: [u8; 18] = [
+            0, 10, 132, 255, 255, 255, 255, 255, 255, // row 0
+            0, 255, 255, 255, 255, 10, 132, 255, 255, // row 1
+        ];
+        let mut idat = vec![0x78, 0x01, 0x01, 18, 0, !18_u8, 0xFF];
+        idat.extend_from_slice(&raw_rows);
+        idat.extend_from_slice(&adler32(&raw_rows).to_be_bytes());
+        push_chunk(&mut png, b"IDAT", &idat);
+        push_chunk(&mut png, b"IEND", &[]);
+
+        let tmp_dir = std::env::temp_dir().join("hime_uwp_icon_test");
+        let assets_dir = tmp_dir.join("Assets");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        let png_path = assets_dir.join("CalculatorSquare44x44Logo.altform-unplated_targetsize-48.png");
+        std::fs::write(&png_path, &png).unwrap();
+        let fake_exe = tmp_dir.join("CalculatorApp.exe");
+        std::fs::write(&fake_exe, b"").unwrap();
+
+        let extracted = extract_window_or_exe_icon(0, fake_exe.to_str().unwrap(), 48)
+            .expect("UWP Assets PNG fallback should decode via WIC");
+        assert_eq!(extracted.width, 48);
+        assert_eq!(extracted.height, 48);
+        assert_eq!(extracted.bgra_premul.len(), 48 * 48 * 4);
+        assert!(extracted.bgra_premul.chunks_exact(4).any(|px| px[3] > 200));
+
+        // Verify WIC decoding also works on a COINIT_MULTITHREADED (MTA) thread.
+        let exe_str = fake_exe.to_string_lossy().to_string();
+        let mta_extracted = std::thread::spawn(move || {
+            unsafe {
+                let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            }
+            extract_window_or_exe_icon(0, &exe_str, 48)
+        })
+        .join()
+        .unwrap()
+        .expect("UWP Assets PNG decode should succeed under MTA");
+        assert_eq!(mta_extracted.width, 48);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

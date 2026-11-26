@@ -22,10 +22,7 @@ use crate::d2d::{
     SfSymbol, TextAlign,
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
-use crate::theme::{
-    CORNER_RADIUS, DIVIDER_HAIRLINE, STATUS_LIVE_RED, SYSTEM_BLUE, TEXT_PRIMARY, TEXT_SECONDARY,
-    TEXT_TERTIARY,
-};
+use crate::theme::{AdaptivePalette, CORNER_RADIUS};
 
 const DOCK_HEIGHT: f32 = 54.0;
 const ICON_BASE_SIZE: f32 = 36.0;
@@ -1515,6 +1512,7 @@ impl DockBar {
 
         let (sw, sh) = surface.dip_size();
         let surface_rect = Rect::new(0.0, 0.0, sw, sh);
+        let palette = surface.palette();
 
         let dock = self.dock_rect(surface_rect);
         let rects = self.item_rects(surface_rect);
@@ -1543,10 +1541,11 @@ impl DockBar {
         }
         set_dock_regions(surface, &regions);
 
-        // Apple Liquid Glass Dock capsule (clear smoked glass + diagonal specular rim + soft outer shadow)
+        // Real blurred/refracted Liquid Glass Dock capsule (auto-adapts LightGlass <-> DarkGlass)
         surface.draw_liquid_glass_panel(
             dock,
-            LiquidGlassStyle::clear(CORNER_RADIUS).with_shadow(12.0, 3.0, 0.24 * alpha * show_t),
+            LiquidGlassStyle::clear(CORNER_RADIUS)
+                .with_shadow(12.0, 3.0, palette.shadow_color.a * alpha * show_t),
         )?;
 
         // Application items (crystal-clear BGRA icons + soft clean shadow, zero dark hover borders)
@@ -1593,35 +1592,55 @@ impl DockBar {
                     &initial,
                     *rect,
                     (15.0 * scale.clamp(1.0, 1.35)).round(),
-                    TEXT_PRIMARY.with_alpha(alpha),
+                    palette.text_primary.with_alpha_mul(alpha),
                     TextAlign::Center,
                 )?;
             }
 
-            // macOS-style active indicator dot centered underneath running apps
+            // Unified monochrome macOS-style running indicator beneath active apps
             if item.running {
                 let multi = item.hwnds.len() > 1;
                 let dot_w = if multi { 10.0 } else { 4.5 };
-                let dot_h = if multi { 2.8 } else { 4.5 };
+                let dot_h = if multi { 3.0 } else { 4.5 };
                 let dot_r = dot_h * 0.5;
-                let dot_color = if multi {
-                    SYSTEM_BLUE.with_alpha(alpha)
-                } else {
-                    TEXT_PRIMARY.with_alpha(0.92 * alpha)
-                };
+                let dot_color = palette
+                    .text_primary
+                    .with_alpha_mul(if multi { 0.92 } else { 0.84 } * alpha);
                 let dot = Rect::new(
                     rect.x + rect.width * 0.5 - dot_w * 0.5,
-                    dock.y + dock.height - 6.5 - (dot_h - 2.8) * 0.5,
+                    dock.y + dock.height - 6.5 - (dot_h - 3.0) * 0.5,
                     dot_w,
                     dot_h,
                 );
                 surface.fill_rounded_rect(dot, dot_r, dot_color)?;
             }
 
-            // Multi-window / notification count badge
+            // Cohesive monochrome frosted count badge (replaces jarring red badge circle)
             if item.badge_count > 0 {
-                let badge = Rect::new(rect.x + rect.width - 12.0, rect.y - 2.0, 15.0, 15.0);
-                surface.fill_rounded_rect(badge, 7.5, STATUS_LIVE_RED.with_alpha(alpha))?;
+                let badge_w = if item.badge_count > 99 {
+                    22.0
+                } else if item.badge_count > 9 {
+                    18.0
+                } else {
+                    15.0
+                };
+                let badge = Rect::new(
+                    rect.x + rect.width - badge_w * 0.78,
+                    rect.y - 2.0,
+                    badge_w,
+                    15.0,
+                );
+                surface.fill_rounded_rect(
+                    badge,
+                    7.5,
+                    palette.glass_elevated.with_alpha(0.94 * alpha),
+                )?;
+                surface.stroke_rounded_rect(
+                    badge,
+                    7.5,
+                    palette.hairline_border.with_alpha_mul(alpha),
+                    1.0,
+                )?;
                 let txt = if item.badge_count > 99 {
                     "99+".to_string()
                 } else {
@@ -1631,7 +1650,7 @@ impl DockBar {
                     &txt,
                     badge,
                     8.5,
-                    TEXT_PRIMARY.with_alpha(alpha),
+                    palette.text_primary.with_alpha_mul(alpha),
                     TextAlign::Center,
                 )?;
             }
@@ -1642,14 +1661,14 @@ impl DockBar {
             self.utility_rects(dock);
         if let Some(px) = pinned_div_x {
             let div_rect = Rect::new(px, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
-            surface.fill_rounded_rect(div_rect, 0.5, DIVIDER_HAIRLINE.with_alpha_mul(alpha))?;
+            surface.fill_rounded_rect(div_rect, 0.5, palette.divider.with_alpha_mul(alpha))?;
         }
         if let Some(dx) = utils_div_x {
             let div_rect = Rect::new(dx, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
-            surface.fill_rounded_rect(div_rect, 0.5, DIVIDER_HAIRLINE.with_alpha_mul(alpha))?;
+            surface.fill_rounded_rect(div_rect, 0.5, palette.divider.with_alpha_mul(alpha))?;
         }
 
-        self.render_utility_buttons(surface, ai_rect, spaces_rect, tray_rect, alpha)?;
+        self.render_utility_buttons(surface, &palette, ai_rect, spaces_rect, tray_rect, alpha)?;
 
         // Expanded Virtual Desktops ("Spaces") Liquid Glass flyout
         if let Some(flyout) = spaces_flyout {
@@ -1658,32 +1677,28 @@ impl DockBar {
             if fly_alpha > 0.02 {
                 surface.draw_liquid_glass_panel(
                     flyout,
-                    LiquidGlassStyle::regular(12.0).with_shadow(10.0, 3.0, 0.24 * fly_alpha),
+                    LiquidGlassStyle::regular(12.0)
+                        .with_shadow(10.0, 3.0, palette.shadow_color.a * fly_alpha),
                 )?;
                 let space_rects = self.space_item_rects(surface_rect, dock);
                 for (idx, (entry, r)) in self.spaces.iter().zip(space_rects.iter()).enumerate() {
                     let hovered = self.hovered_target == Some(DockHoverTarget::SpaceItem(idx));
-                    let tint = if entry.active {
-                        Some(SYSTEM_BLUE.with_alpha_mul(fly_alpha))
-                    } else {
-                        None
-                    };
-                    surface.draw_liquid_glass_button(*r, 7.0, tint, hovered, false)?;
+                    surface.draw_liquid_glass_button(*r, 7.0, None, hovered, entry.active)?;
 
                     let dot_r = Rect::new(r.x + 8.0, r.y + (r.height - 5.0) * 0.5, 5.0, 5.0);
                     let dot_color = if entry.active {
-                        SYSTEM_BLUE.with_alpha(fly_alpha)
+                        palette.accent.with_alpha_mul(fly_alpha)
                     } else {
-                        TEXT_TERTIARY.with_alpha(0.55 * fly_alpha)
+                        palette.text_tertiary.with_alpha_mul(0.55 * fly_alpha)
                     };
                     surface.fill_rounded_rect(dot_r, 2.5, dot_color)?;
 
                     let label_rect =
                         Rect::new(r.x + 15.0, r.y, (r.width - 20.0).max(12.0), r.height);
                     let text_color = if entry.active || hovered {
-                        TEXT_PRIMARY.with_alpha(fly_alpha)
+                        palette.text_primary.with_alpha_mul(fly_alpha)
                     } else {
-                        TEXT_SECONDARY.with_alpha(fly_alpha)
+                        palette.text_secondary.with_alpha_mul(fly_alpha)
                     };
                     surface.draw_text(&entry.name, label_rect, 11.0, text_color, TextAlign::Leading)?;
                 }
@@ -1693,7 +1708,7 @@ impl DockBar {
                     surface.fill_rounded_rect(
                         Rect::new(div_x, flyout.y + 8.0, DIVIDER_WIDTH, flyout.height - 16.0),
                         0.5,
-                        DIVIDER_HAIRLINE.with_alpha_mul(fly_alpha),
+                        palette.divider.with_alpha_mul(fly_alpha),
                     )?;
                     let new_hovered = self.hovered_target == Some(DockHoverTarget::NewSpace);
                     surface.draw_liquid_glass_button(new_r, 7.0, None, new_hovered, false)?;
@@ -1706,7 +1721,9 @@ impl DockBar {
                     surface.draw_sf_symbol(
                         plus_rect,
                         SfSymbol::Plus,
-                        TEXT_PRIMARY.with_alpha(if new_hovered { 1.0 } else { 0.90 } * fly_alpha),
+                        palette
+                            .text_primary
+                            .with_alpha_mul(if new_hovered { 1.0 } else { 0.90 } * fly_alpha),
                         1.6,
                     )?;
                 }
@@ -1720,7 +1737,8 @@ impl DockBar {
             if tray_alpha > 0.02 {
                 surface.draw_liquid_glass_panel(
                     flyout,
-                    LiquidGlassStyle::regular(10.0).with_shadow(8.0, 2.5, 0.24 * tray_alpha),
+                    LiquidGlassStyle::regular(10.0)
+                        .with_shadow(8.0, 2.5, palette.shadow_color.a * tray_alpha),
                 )?;
                 let tray_rects = self.tray_item_rects(surface_rect, dock);
                 for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
@@ -1751,7 +1769,7 @@ impl DockBar {
                             &initial,
                             *r,
                             11.0,
-                            TEXT_PRIMARY.with_alpha(tray_alpha),
+                            palette.text_primary.with_alpha_mul(tray_alpha),
                             TextAlign::Center,
                         )?;
                     }
@@ -1766,13 +1784,14 @@ impl DockBar {
                 tip_rect.y += (1.0 - tip_t) * 4.0;
                 surface.draw_liquid_glass_panel(
                     tip_rect,
-                    LiquidGlassStyle::regular(7.0).with_shadow(6.0, 2.0, 0.22 * alpha * tip_t),
+                    LiquidGlassStyle::regular(7.0)
+                        .with_shadow(6.0, 2.0, palette.shadow_color.a * alpha * tip_t),
                 )?;
                 surface.draw_text(
                     &label,
                     tip_rect,
                     11.5,
-                    TEXT_PRIMARY.with_alpha(alpha * tip_t),
+                    palette.text_primary.with_alpha_mul(alpha * tip_t),
                     TextAlign::Center,
                 )?;
             }
@@ -1784,6 +1803,7 @@ impl DockBar {
     fn render_utility_buttons(
         &self,
         surface: &NativeSurface,
+        palette: &AdaptivePalette,
         ai_rect: Option<Rect>,
         spaces_rect: Rect,
         tray_rect: Rect,
@@ -1806,15 +1826,10 @@ impl DockBar {
         }
 
         // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`)
-        let spaces_tint = if self.spaces_open {
-            Some(SYSTEM_BLUE.with_alpha_mul(alpha))
-        } else {
-            None
-        };
         surface.draw_liquid_glass_button(
             spaces_rect,
             10.0,
-            spaces_tint,
+            None,
             spaces_hovered,
             self.spaces_open,
         )?;
@@ -1827,25 +1842,23 @@ impl DockBar {
         surface.draw_sf_symbol(
             spaces_icon,
             SfSymbol::Desktops,
-            TEXT_PRIMARY.with_alpha(if spaces_hovered || self.spaces_open { 1.0 } else { 0.88 } * alpha),
+            palette
+                .text_primary
+                .with_alpha_mul(if spaces_hovered || self.spaces_open { 1.0 } else { 0.88 } * alpha),
             1.5,
         )?;
 
         // 3. System Tray button (`SfSymbol::TrayGrid` + optional `+N` count)
-        let tray_tint = if self.tray_open {
-            Some(SYSTEM_BLUE.with_alpha_mul(alpha))
-        } else {
-            None
-        };
         surface.draw_liquid_glass_button(
             tray_rect,
             10.0,
-            tray_tint,
+            None,
             tray_hovered,
             self.tray_open,
         )?;
-        let tray_fg =
-            TEXT_PRIMARY.with_alpha(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
+        let tray_fg = palette
+            .text_primary
+            .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
         if self.system_tray_count > 0 {
             let icon_r = Rect::new(tray_rect.x + 6.0, tray_rect.y + 10.0, 14.0, 14.0);
             surface.draw_sf_symbol(icon_r, SfSymbol::TrayGrid, tray_fg, 1.4)?;
@@ -2511,5 +2524,57 @@ mod tests {
         let end_y = dock.item_rects(surface_rect)[0].y;
         assert!((end_y - base_y).abs() < 0.01);
         assert!(!dock.is_animating());
+    }
+
+    #[test]
+    fn adaptive_palette_flips_light_and_dark_glass_and_renders_cleanly() {
+        use crate::theme::{ColorThemeMode, ThemePolarity, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
+
+        let surface = match NativeSurface::new("HimeDockAdaptiveTest", -2000, -2000, 1080, 136) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut dock = sample_dock();
+        dock.add_item({
+            let mut multi = DockItem::new("multi", "Explorer", "explorer.exe", false);
+            multi.running = true;
+            multi.badge_count = 3;
+            multi.hwnds = vec![101, 102, 103];
+            multi
+        });
+        dock.set_spaces(vec![
+            SpaceEntry::new("d0", "Desktop 1", 0, true),
+            SpaceEntry::new("d1", "Desktop 2", 1, false),
+        ]);
+        dock.toggle_spaces();
+        dock.set_hovered(Some(1));
+        for _ in 0..60 {
+            dock.tick(1.0 / 60.0);
+        }
+
+        // Dark backdrop under Auto mode -> Light Frosted White Glass with near-black text/icons.
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        let dark_bgra = vec![0x14, 0x14, 0x16, 0xFF].repeat(32 * 32);
+        surface.set_backdrop_pixels(32, 32, &dark_bgra);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
+        surface.begin_draw();
+        dock.render(&surface)
+            .expect("DockBar LightGlass over dark backdrop render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar LightGlass present");
+
+        // Bright backdrop under Auto mode -> Dark Smoked Glass with crisp white text/icons.
+        let light_bgra = vec![0xF2, 0xF2, 0xF4, 0xFF].repeat(32 * 32);
+        surface.set_backdrop_pixels(32, 32, &light_bgra);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
+        surface.begin_draw();
+        dock.render(&surface)
+            .expect("DockBar DarkGlass over bright backdrop render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar DarkGlass present");
     }
 }

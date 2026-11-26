@@ -58,9 +58,9 @@ use windows::Win32::System::Threading::{
 use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, GetClassNameA, GetWindow, GetWindowLongW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, HWND_MESSAGE,
-    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumChildWindows, EnumWindows, FindWindowExW, GetClassNameA, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE,
+    GW_OWNER, HWND_MESSAGE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::dock::DockItem;
@@ -130,7 +130,7 @@ impl RunningWindow {
     }
 }
 
-/// Formats a human-friendly Dock label from an executable filename (e.g. `"msedge.exe"` -> `"Edge"`).
+/// Formats a human-friendly Dock label from an executable filename (e.g. `"msedge.exe"` -> `"Microsoft Edge"`).
 pub fn friendly_app_name(executable: &str) -> String {
     let stem = executable
         .strip_suffix(".exe")
@@ -142,9 +142,17 @@ pub fn friendly_app_name(executable: &str) -> String {
     }
     match stem.to_ascii_lowercase().as_str() {
         "msedge" => "Microsoft Edge".to_string(),
-        "wt" => "Terminal".to_string(),
+        "wt" | "windowsterminal" => "Terminal".to_string(),
         "explorer" => "Explorer".to_string(),
-        "applicationframehost" => "App".to_string(),
+        "calculatorapp" | "calc" => "Calculator".to_string(),
+        "systemsettings" => "Windows Settings".to_string(),
+        "microsoft.photos" | "photosapp" => "Photos".to_string(),
+        "windowsnotepad" | "notepad" => "Notepad".to_string(),
+        "mspaint" => "Paint".to_string(),
+        "snippingtool" | "screenclippinghost" => "Snipping Tool".to_string(),
+        "soundrec" | "windowssoundrecorder" => "Sound Recorder".to_string(),
+        "time" | "windowsalarms" => "Clock".to_string(),
+        "applicationframehost" => "Windows App".to_string(),
         _ => {
             let mut chars = stem.chars();
             match chars.next() {
@@ -1765,6 +1773,135 @@ unsafe fn has_visible_owner(hwnd: HWND) -> bool {
     !owner.0.is_null() && IsWindowVisible(owner).as_bool()
 }
 
+unsafe fn query_process_image_path(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let Ok(process_handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+        return None;
+    };
+    let mut path_buf = [0u16; 1024];
+    let mut path_len = path_buf.len() as u32;
+    let got_path = QueryFullProcessImageNameW(
+        process_handle,
+        PROCESS_NAME_WIN32,
+        windows::core::PWSTR(path_buf.as_mut_ptr()),
+        &mut path_len,
+    )
+    .is_ok();
+    let _ = CloseHandle(process_handle);
+    got_path.then(|| String::from_utf16_lossy(&path_buf[..path_len as usize]))
+}
+
+struct UwpChildSearch {
+    host_pid: u32,
+    core_match: Option<(HWND, String)>,
+    fallback_match: Option<(HWND, String)>,
+}
+
+unsafe extern "system" fn enum_uwp_child_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let state = &mut *(lparam.0 as *mut UwpChildSearch);
+    let mut child_pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut child_pid));
+    if child_pid == 0 || child_pid == state.host_pid {
+        return true.into();
+    }
+    let Some(child_path) = query_process_image_path(child_pid) else {
+        return true.into();
+    };
+
+    let mut class_buf = [0u8; 128];
+    let class_len = GetClassNameA(hwnd, &mut class_buf);
+    let class_name = std::str::from_utf8(&class_buf[..class_len.max(0) as usize]).unwrap_or("");
+    if class_name == "Windows.UI.Core.CoreWindow" {
+        state.core_match = Some((hwnd, child_path));
+        return false.into();
+    }
+    if state.fallback_match.is_none() {
+        state.fallback_match = Some((hwnd, child_path));
+    }
+    true.into()
+}
+
+unsafe fn resolve_uwp_child_target(host_hwnd: HWND, host_pid: u32) -> Option<(HWND, String)> {
+    let mut search = UwpChildSearch {
+        host_pid,
+        core_match: None,
+        fallback_match: None,
+    };
+    let _ = EnumChildWindows(
+        Some(host_hwnd),
+        Some(enum_uwp_child_proc),
+        LPARAM(&mut search as *mut UwpChildSearch as isize),
+    );
+    search.core_match.or(search.fallback_match)
+}
+
+fn find_windowsapps_exe(package_prefix: &str, exe_candidates: &[&str]) -> Option<String> {
+    let root = Path::new(r"C:\Program Files\WindowsApps");
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut dirs: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|ent| ent.path()))
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_ascii_lowercase().starts_with(package_prefix))
+        })
+        .collect();
+    dirs.sort();
+    for dir in dirs.into_iter().rev() {
+        for exe in exe_candidates {
+            let candidate = dir.join(exe);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+fn fallback_uwp_package_exe(title: &str) -> Option<String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Option<String>>>> =
+        std::sync::OnceLock::new();
+    let key = title.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    let map = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = map.lock() {
+        if let Some(cached) = guard.get(&key) {
+            return cached.clone();
+        }
+    }
+
+    let resolved = match key.as_str() {
+        "calculator" | "kalkulator" => {
+            find_windowsapps_exe("microsoft.windowscalculator_", &["CalculatorApp.exe"])
+        }
+        "settings" | "pengaturan" => {
+            let sys = Path::new(r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe");
+            sys.is_file().then(|| sys.to_string_lossy().into_owned())
+        }
+        "photos" | "foto" => {
+            find_windowsapps_exe("microsoft.windows.photos_", &["Photos.exe", "Microsoft.Photos.exe"])
+        }
+        "terminal" => {
+            find_windowsapps_exe("microsoft.windowsterminal_", &["WindowsTerminal.exe"])
+        }
+        "clock" => find_windowsapps_exe("microsoft.windowsalarms_", &["Time.exe"]),
+        "microsoft store" => {
+            find_windowsapps_exe("microsoft.windowsstore_", &["WinStore.App.exe"])
+        }
+        _ => None,
+    };
+
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(key, resolved.clone());
+    }
+    resolved
+}
+
 unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let out = &mut *(lparam.0 as *mut Vec<RunningWindow>);
 
@@ -1776,6 +1913,16 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
     let size = std::mem::size_of::<u32>() as u32;
     if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, size).is_ok()
         && cloaked != 0
+    {
+        return true.into();
+    }
+
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_ok()
+        && (rect.right - rect.left <= 1
+            || rect.bottom - rect.top <= 1
+            || rect.left <= -9000
+            || rect.top <= -9000)
     {
         return true.into();
     }
@@ -1804,31 +1951,10 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
 
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid == 0 {
-        return true.into();
-    }
-
-    let Ok(process_handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+    let Some(mut exe_path) = query_process_image_path(pid) else {
         return true.into();
     };
-
-    let mut path_buf = [0u16; 1024];
-    let mut path_len = path_buf.len() as u32;
-    let got_path = QueryFullProcessImageNameW(
-        process_handle,
-        PROCESS_NAME_WIN32,
-        windows::core::PWSTR(path_buf.as_mut_ptr()),
-        &mut path_len,
-    )
-    .is_ok();
-    let _ = CloseHandle(process_handle);
-
-    if !got_path {
-        return true.into();
-    }
-
-    let exe_path = String::from_utf16_lossy(&path_buf[..path_len as usize]);
-    let lower = exe_path.to_lowercase();
+    let mut lower = exe_path.to_lowercase();
 
     let mut class_buf = [0u8; 256];
     let class_len = GetClassNameA(hwnd, &mut class_buf);
@@ -1839,23 +1965,57 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
         || lower.contains("conhost.exe")
         || (lower.contains("explorer.exe") && !is_explorer_window)
         || lower.contains("shellexperiencehost.exe")
+        || lower.contains("startmenuexperiencehost.exe")
         || lower.contains("searchhost.exe")
         || lower.contains("textinputhost.exe")
+        || lower.contains("lockapp.exe")
+        || lower.contains("widgets.exe")
+        || window_class == "ApplicationFrameInputSinkWindow"
+        || (window_class == "Windows.UI.Core.CoreWindow"
+            && (lower.contains("windowsapps") || lower.contains("immersivecontrolpanel")))
         || (lower.contains("applicationframehost.exe")
             && window_class != "ApplicationFrameWindow")
     {
         return true.into();
     }
 
-    let executable = Path::new(&exe_path)
+    let mut target_hwnd = hwnd;
+    let is_uwp_frame =
+        lower.contains("applicationframehost.exe") && window_class == "ApplicationFrameWindow";
+    if is_uwp_frame {
+        if let Some((child_hwnd, child_path)) = resolve_uwp_child_target(hwnd, pid) {
+            target_hwnd = child_hwnd;
+            exe_path = child_path;
+            lower = exe_path.to_lowercase();
+            if lower.contains("searchhost.exe")
+                || lower.contains("shellexperiencehost.exe")
+                || lower.contains("textinputhost.exe")
+            {
+                return true.into();
+            }
+        } else if let Some(pkg_exe) = fallback_uwp_package_exe(&title) {
+            exe_path = pkg_exe;
+        }
+    }
+
+    let mut executable = Path::new(&exe_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("app.exe")
         .to_string();
-    let app_name = friendly_app_name(&executable);
+    let mut app_name = friendly_app_name(&executable);
+    if is_uwp_frame && executable.eq_ignore_ascii_case("applicationframehost.exe") {
+        let trimmed_title = title.trim();
+        if !trimmed_title.is_empty() {
+            app_name = trimmed_title.to_string();
+            executable = format!("uwp:{}", trimmed_title.to_ascii_lowercase());
+        }
+    } else if app_name == "Windows App" && !title.trim().is_empty() {
+        app_name = title.trim().to_string();
+    }
 
     out.push(RunningWindow {
-        hwnd: hwnd.0 as isize,
+        hwnd: target_hwnd.0 as isize,
         title,
         app_name,
         executable,
@@ -2087,5 +2247,41 @@ mod tests {
         assert!(sorted[0].connected);
         assert!(sorted[0].saved);
         assert_eq!(sorted[1].ssid, "CafeGuest");
+    }
+
+    #[test]
+    fn uwp_friendly_names_and_grouping_separate_apps() {
+        assert_eq!(friendly_app_name("CalculatorApp.exe"), "Calculator");
+        assert_eq!(friendly_app_name("SystemSettings.exe"), "Windows Settings");
+        assert_eq!(friendly_app_name("Microsoft.Photos.exe"), "Photos");
+        assert_eq!(friendly_app_name("WindowsTerminal.exe"), "Terminal");
+
+        let windows = vec![
+            RunningWindow {
+                hwnd: 11,
+                title: "Calculator".to_string(),
+                app_name: friendly_app_name("CalculatorApp.exe"),
+                executable: "CalculatorApp.exe".to_string(),
+                exe_path: r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe".to_string(),
+            },
+            RunningWindow {
+                hwnd: 22,
+                title: "Settings".to_string(),
+                app_name: friendly_app_name("SystemSettings.exe"),
+                executable: "SystemSettings.exe".to_string(),
+                exe_path: r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe".to_string(),
+            },
+        ];
+        let grouped = group_running_windows(&windows);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].label, "Calculator");
+        assert_eq!(grouped[0].badge_count, 0);
+        assert_eq!(grouped[1].label, "Windows Settings");
+        assert_eq!(grouped[1].badge_count, 0);
+
+        if Path::new(r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe").is_file() {
+            assert!(fallback_uwp_package_exe("Settings")
+                .is_some_and(|p| p.ends_with("SystemSettings.exe")));
+        }
     }
 }

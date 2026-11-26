@@ -22,9 +22,7 @@ use crate::notch_workspace::{
     TasksWorkspaceState, TranslateBannerAction, TranslateBannerState,
 };
 use crate::theme::{
-    CORNER_RADIUS, DIVIDER_HAIRLINE, GLASS_CONTROL, GLASS_CONTROL_ACTIVE, GLASS_CONTROL_HOVER,
-    GLASS_HAIRLINE, SAFE_PADDING, SLIDER_FILL, SLIDER_TRACK, STATUS_LIVE_GREEN, STATUS_LIVE_RED,
-    SYSTEM_BLUE, SYSTEM_BLUE_TINT, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
+    AdaptivePalette, CORNER_RADIUS, SAFE_PADDING, TEXT_PRIMARY,
 };
 
 const HIDDEN_BAR_THICKNESS: f32 = 3.0;
@@ -1166,7 +1164,7 @@ impl NotchView {
         }
     }
 
-    /// Renders the notch onto `surface`.
+    /// Renders the notch onto `surface` using its adaptive Liquid Glass palette (`LightGlass` / `DarkGlass`).
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let (sw, sh) = surface.dip_size();
         let rect = self.computed_rect(sw, sh);
@@ -1181,12 +1179,13 @@ impl NotchView {
             return Ok(());
         }
 
+        let p = surface.palette();
         let radius = if self.is_hidden { 1.5 } else { CORNER_RADIUS };
         let flares = !self.is_hidden;
         surface.set_edge_surface_region(rect, EAR_WIDTH, radius, edge_side, flares);
 
         let glass_style = if self.drag_hover {
-            LiquidGlassStyle::tinted(SYSTEM_BLUE, radius)
+            LiquidGlassStyle::tinted(p.accent, radius)
         } else if self.is_expanded {
             LiquidGlassStyle::regular(radius)
         } else {
@@ -1206,7 +1205,7 @@ impl NotchView {
         }
 
         if self.is_expanded || self.expand_spring.value > 0.25 {
-            return self.render_expanded_contents(surface, rect);
+            return self.render_expanded_contents(surface, rect, &p);
         }
 
         if self.has_active_banner() && !self.drag_hover {
@@ -1220,12 +1219,98 @@ impl NotchView {
         }
 
         match self.edge {
-            NotchEdge::Top => self.render_top_collapsed(surface, rect),
-            NotchEdge::Left | NotchEdge::Right => self.render_side_collapsed(surface, rect),
+            NotchEdge::Top => self.render_top_collapsed(surface, rect, &p),
+            NotchEdge::Left | NotchEdge::Right => self.render_side_collapsed(surface, rect, &p),
         }
     }
 
-    fn render_top_collapsed(&self, surface: &NativeSurface, outer: Rect) -> Result<()> {
+    fn render_adaptive_card(
+        &self,
+        surface: &NativeSurface,
+        rect: Rect,
+        radius: f32,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        surface.fill_rounded_rect(rect, radius, p.glass_elevated)?;
+        surface.stroke_rounded_rect(rect, radius, p.hairline_border, 0.85)?;
+        Ok(())
+    }
+
+    fn render_adaptive_visualizer(
+        &self,
+        surface: &NativeSurface,
+        x: f32,
+        y: f32,
+        h: f32,
+        bars: &[f32],
+        is_playing: bool,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        let bar_w = 2.5_f32;
+        let gap = 2.0_f32;
+        let color = if is_playing { p.accent } else { p.status_muted };
+        for (i, &level) in bars.iter().enumerate() {
+            let norm = if is_playing {
+                level.clamp(0.18, 1.0)
+            } else {
+                0.22
+            };
+            let bh = (h * norm).max(3.0);
+            let bx = x + (i as f32) * (bar_w + gap);
+            let by = y + (h - bh) * 0.5;
+            surface.fill_rounded_rect(Rect::new(bx, by, bar_w, bh), bar_w * 0.5, color)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_adaptive_battery_icon(
+        &self,
+        surface: &NativeSurface,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        percent: u8,
+        charging: bool,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        let bw = (w - 2.5).max(8.0);
+        let bh = h.max(6.0);
+        let pct = (percent.min(100) as f32) / 100.0;
+        let fill_color = if charging {
+            p.status_green
+        } else if percent <= 20 {
+            p.status_amber
+        } else {
+            p.text_primary
+        };
+        surface.stroke_rounded_rect(Rect::new(x, y, bw, bh), 2.5, p.text_secondary, 1.2)?;
+        let nub_h = (bh * 0.45).max(3.0);
+        surface.fill_rounded_rect(
+            Rect::new(x + bw + 0.5, y + (bh - nub_h) * 0.5, 2.0, nub_h),
+            0.8,
+            p.text_secondary,
+        )?;
+        let pad = 2.0;
+        let max_fill_w = (bw - pad * 2.0).max(1.0);
+        let fill_w = (max_fill_w * pct).max(if percent > 0 { 2.0 } else { 0.0 });
+        if fill_w > 0.0 {
+            surface.fill_rounded_rect(
+                Rect::new(x + pad, y + pad, fill_w, (bh - pad * 2.0).max(2.0)),
+                1.2,
+                fill_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn render_top_collapsed(
+        &self,
+        surface: &NativeSurface,
+        outer: Rect,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         if self.drag_hover {
             let pill = Rect::new(
                 outer.x + 22.0,
@@ -1233,19 +1318,19 @@ impl NotchView {
                 (outer.width - 44.0).max(80.0),
                 outer.height - 10.0,
             );
-            surface.fill_rounded_rect(pill, 10.0, SYSTEM_BLUE_TINT)?;
-            surface.stroke_rounded_rect(pill, 10.0, SYSTEM_BLUE, 1.0)?;
+            surface.fill_rounded_rect(pill, 10.0, p.accent_tint)?;
+            surface.stroke_rounded_rect(pill, 10.0, p.accent, 1.0)?;
             surface.draw_sf_symbol(
                 Rect::new(pill.x + 14.0, pill.y + 5.0, 16.0, 16.0),
                 SfSymbol::FolderDrop,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.5,
             )?;
             surface.draw_text_bold(
                 "Drop files to Shelf",
                 Rect::new(pill.x + 34.0, pill.y, (pill.width - 44.0).max(40.0), pill.height),
                 11.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
             return Ok(());
@@ -1260,14 +1345,14 @@ impl NotchView {
         // Left slot: Music visualizer when active, else SfSymbol::Wifi + monochrome speed
         if is_playing {
             let bars = animated_visualizer_bars(self.visualizer_phase);
-            surface.draw_music_visualizer(outer.x + 22.0, outer.y + 10.0, 16.0, &bars, true)?;
+            self.render_adaptive_visualizer(surface, outer.x + 22.0, outer.y + 10.0, 16.0, &bars, true, p)?;
         } else {
             let (wifi_sym, wifi_color) = if self.net.is_internet_down {
-                (SfSymbol::WifiOff, STATUS_LIVE_RED)
+                (SfSymbol::WifiOff, p.status_red)
             } else if !self.wifi_enabled {
-                (SfSymbol::WifiOff, TEXT_TERTIARY)
+                (SfSymbol::WifiOff, p.text_tertiary)
             } else {
-                (SfSymbol::Wifi, TEXT_PRIMARY)
+                (SfSymbol::Wifi, p.text_primary)
             };
             surface.draw_sf_symbol(
                 Rect::new(outer.x + 20.0, outer.y + 11.5, 13.0, 13.0),
@@ -1280,14 +1365,14 @@ impl NotchView {
                     "Offline",
                     Rect::new(outer.x + 37.0, outer.y + 6.0, 68.0, 24.0),
                     10.5,
-                    STATUS_LIVE_RED,
+                    p.status_red,
                     TextAlign::Leading,
                 )?;
             } else {
                 surface.draw_sf_symbol(
                     Rect::new(outer.x + 36.0, outer.y + 13.5, 9.0, 9.0),
                     SfSymbol::ChevronDown,
-                    TEXT_SECONDARY,
+                    p.text_secondary,
                     1.2,
                 )?;
                 let speed_rect = Rect::new(outer.x + 47.0, outer.y + 6.0, 62.0, 24.0);
@@ -1295,7 +1380,7 @@ impl NotchView {
                     &format_net_speed(self.net.down_kbps),
                     speed_rect,
                     10.5,
-                    TEXT_SECONDARY,
+                    p.text_secondary,
                     TextAlign::Leading,
                 )?;
             }
@@ -1310,9 +1395,9 @@ impl NotchView {
         );
         if self.pomodoro.running || self.pomodoro.finished {
             let timer_color = if self.pomodoro.finished {
-                STATUS_LIVE_RED
+                p.status_red
             } else {
-                TEXT_PRIMARY
+                p.text_primary
             };
             surface.draw_text_bold(
                 &self.pomodoro.formatted(),
@@ -1335,14 +1420,14 @@ impl NotchView {
                     (center_rect.width - 34.0).max(40.0),
                     24.0,
                 );
-                surface.draw_text(alert, msg_rect, 11.0, TEXT_PRIMARY, TextAlign::Leading)?;
+                surface.draw_text(alert, msg_rect, 11.0, p.text_primary, TextAlign::Leading)?;
             }
         } else {
             surface.draw_text_bold(
                 &self.formatted_clock(),
                 center_rect,
                 14.0,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
         }
@@ -1350,12 +1435,12 @@ impl NotchView {
         // Right slot: Album badge if music active, else Battery % + Battery icon
         if has_music && is_playing {
             let badge = Rect::new(outer.x + outer.width - 42.0, outer.y + 7.0, 22.0, 22.0);
-            surface.fill_rounded_rect(badge, 7.0, GLASS_CONTROL_ACTIVE)?;
-            surface.stroke_rounded_rect(badge, 7.0, GLASS_HAIRLINE, 0.8)?;
+            surface.fill_rounded_rect(badge, 7.0, p.control_active)?;
+            surface.stroke_rounded_rect(badge, 7.0, p.hairline_border, 0.8)?;
             surface.draw_sf_symbol(
                 Rect::new(badge.x + 4.5, badge.y + 4.5, 13.0, 13.0),
                 SfSymbol::MusicNote,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.3,
             )?;
         } else if self.battery.present {
@@ -1364,34 +1449,41 @@ impl NotchView {
                 &format!("{}%", self.battery.percent),
                 bat_text_rect,
                 11.0,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Trailing,
             )?;
-            surface.draw_battery_icon(
+            self.render_adaptive_battery_icon(
+                surface,
                 outer.x + outer.width - 42.0,
                 outer.y + 12.5,
                 20.0,
                 11.0,
                 self.battery.percent,
                 self.battery.charging,
+                p,
             )?;
         }
 
         Ok(())
     }
 
-    fn render_side_collapsed(&self, surface: &NativeSurface, outer: Rect) -> Result<()> {
+    fn render_side_collapsed(
+        &self,
+        surface: &NativeSurface,
+        outer: Rect,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         let cx = outer.x + outer.width * 0.5;
         if self.drag_hover {
             surface.fill_rounded_rect(
                 Rect::new(cx - 16.0, outer.y + outer.height * 0.5 - 24.0, 32.0, 48.0),
                 10.0,
-                SYSTEM_BLUE_TINT,
+                p.accent_tint,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(cx - 10.0, outer.y + outer.height * 0.5 - 10.0, 20.0, 20.0),
                 SfSymbol::FolderDrop,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.5,
             )?;
             return Ok(());
@@ -1402,11 +1494,11 @@ impl NotchView {
             || self.expression != HimeExpression::Netral;
 
         let (wifi_sym, wifi_color) = if self.net.is_internet_down {
-            (SfSymbol::WifiOff, STATUS_LIVE_RED)
+            (SfSymbol::WifiOff, p.status_red)
         } else if !self.wifi_enabled {
-            (SfSymbol::WifiOff, TEXT_TERTIARY)
+            (SfSymbol::WifiOff, p.text_tertiary)
         } else {
-            (SfSymbol::Wifi, TEXT_PRIMARY)
+            (SfSymbol::Wifi, p.text_primary)
         };
         surface.draw_sf_symbol(
             Rect::new(cx - 6.0, outer.y + 18.0, 12.0, 12.0),
@@ -1420,7 +1512,7 @@ impl NotchView {
                 &format_net_speed(self.net.down_kbps),
                 net_rect,
                 8.5,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Center,
             )?;
         }
@@ -1444,19 +1536,21 @@ impl NotchView {
                 &self.formatted_clock(),
                 clock_rect,
                 13.0,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
         }
 
         if self.battery.present {
-            surface.draw_battery_icon(
+            self.render_adaptive_battery_icon(
+                surface,
                 cx - 10.0,
                 outer.y + outer.height - 46.0,
                 20.0,
                 10.0,
                 self.battery.percent,
                 self.battery.charging,
+                p,
             )?;
             let bat_rect = Rect::new(
                 outer.x + 2.0,
@@ -1468,14 +1562,19 @@ impl NotchView {
                 &format!("{}%", self.battery.percent),
                 bat_rect,
                 10.0,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Center,
             )?;
         }
         Ok(())
     }
 
-    fn render_expanded_contents(&self, surface: &NativeSurface, outer: Rect) -> Result<()> {
+    fn render_expanded_contents(
+        &self,
+        surface: &NativeSurface,
+        outer: Rect,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         let layout = self.compute_expanded_layout(outer);
 
         // Header bar: [Prev] [Clock] [Next]  [Segmented Tabs] [Close]
@@ -1490,7 +1589,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(prev_r.x + 5.0, prev_r.y + 5.0, 12.0, 12.0),
             SfSymbol::ChevronLeft,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
 
@@ -1499,7 +1598,7 @@ impl NotchView {
             &clock_display,
             layout.header_clock,
             13.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -1514,11 +1613,11 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(next_r.x + 5.0, next_r.y + 5.0, 12.0, 12.0),
             SfSymbol::ChevronRight,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
 
-        // Segmented Liquid Glass tab strip + smooth spring-gliding active pill
+        // Segmented tab strip + smooth spring-gliding active pill (single accent)
         if let (Some(first), Some(last)) = (layout.tabs.first(), layout.tabs.last()) {
             let strip = Rect::new(
                 first.1.x - 2.0,
@@ -1526,8 +1625,8 @@ impl NotchView {
                 (last.1.x + last.1.width) - first.1.x + 4.0,
                 first.1.height + 2.0,
             );
-            surface.fill_rounded_rect(strip, 8.0, GLASS_CONTROL)?;
-            surface.stroke_rounded_rect(strip, 8.0, GLASS_HAIRLINE, 0.7)?;
+            surface.fill_rounded_rect(strip, 8.0, p.control_fill)?;
+            surface.stroke_rounded_rect(strip, 8.0, p.hairline_border, 0.7)?;
 
             let max_idx = layout.tabs.len().saturating_sub(1);
             let slide = self.tab_spring.value.clamp(0.0, max_idx as f32);
@@ -1542,22 +1641,21 @@ impl NotchView {
                 r_lo.width,
                 r_lo.height,
             );
-            surface.draw_liquid_glass_panel(
-                pill,
-                LiquidGlassStyle::tinted(SYSTEM_BLUE, 7.0).without_shadow(),
-            )?;
+            surface.fill_rounded_rect(pill, 7.0, p.accent)?;
         }
 
         for (panel, tab_rect) in &layout.tabs {
             let active = *panel == self.active_panel;
             let hovered = !active && self.is_hovered(*tab_rect);
             if hovered {
-                surface.fill_rounded_rect(*tab_rect, 7.0, GLASS_CONTROL_HOVER.with_alpha_mul(0.5))?;
+                surface.fill_rounded_rect(*tab_rect, 7.0, p.control_hover)?;
             }
-            let icon_color = if active || hovered {
+            let icon_color = if active {
                 TEXT_PRIMARY
+            } else if hovered {
+                p.text_primary
             } else {
-                TEXT_SECONDARY
+                p.text_secondary
             };
             let symbol = match panel {
                 NotchPanel::CommandCenter => SfSymbol::SettingsSliders,
@@ -1599,7 +1697,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(close_r.x + 5.0, close_r.y + 5.0, 12.0, 12.0),
             SfSymbol::CloseX,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.4,
         )?;
 
@@ -1610,42 +1708,44 @@ impl NotchView {
             div_y,
             outer.x + outer.width - SAFE_PADDING,
             div_y,
-            DIVIDER_HAIRLINE,
+            p.divider,
             1.0,
         )?;
 
         // Body
         match &layout.body {
-            BodyLayout::CommandCenter(cc) => self.render_command_center(surface, cc),
-            BodyLayout::Calendar(cal) => self.render_calendar(surface, cal),
-            BodyLayout::Music(mus) => self.render_music(surface, mus),
-            BodyLayout::Wifi(wf) => self.render_wifi(surface, wf),
-            BodyLayout::Shortcuts(sc) => self.render_shortcuts(surface, sc),
-            BodyLayout::Shelf(sh) => self.render_shelf(surface, sh),
+            BodyLayout::CommandCenter(cc) => self.render_command_center(surface, cc, p),
+            BodyLayout::Calendar(cal) => self.render_calendar(surface, cal, p),
+            BodyLayout::Music(mus) => self.render_music(surface, mus, p),
+            BodyLayout::Wifi(wf) => self.render_wifi(surface, wf, p),
+            BodyLayout::Shortcuts(sc) => self.render_shortcuts(surface, sc, p),
+            BodyLayout::Shelf(sh) => self.render_shelf(surface, sh, p),
             BodyLayout::Tasks(body_rect) => self.tasks_ws.render(surface, *body_rect),
             BodyLayout::Focus(body_rect) => self.focus_ws.render(surface, *body_rect),
-            BodyLayout::HimeAi(ai) => self.render_hime_ai(surface, ai),
+            BodyLayout::HimeAi(ai) => self.render_hime_ai(surface, ai, p),
         }
     }
 
-    fn render_command_center(&self, surface: &NativeSurface, cc: &CommandCenterLayout) -> Result<()> {
-        // 1. Wi-Fi Card Tile (monochrome card + single SYSTEM_BLUE icon badge when active)
-        surface.draw_liquid_glass_panel(
-            cc.wifi_tile,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+    fn render_command_center(
+        &self,
+        surface: &NativeSurface,
+        cc: &CommandCenterLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        // 1. Wi-Fi Card Tile
+        self.render_adaptive_card(surface, cc.wifi_tile, 12.0, p)?;
         let wifi_badge_cx = cc.wifi_tile.x + 17.0;
         let wifi_badge_cy = cc.wifi_tile.y + cc.wifi_tile.height * 0.5;
         surface.fill_circle(
             wifi_badge_cx,
             wifi_badge_cy,
             11.0,
-            if self.wifi_enabled { SYSTEM_BLUE } else { GLASS_CONTROL },
+            if self.wifi_enabled { p.accent } else { p.control_fill },
         )?;
         surface.draw_sf_symbol(
             Rect::new(wifi_badge_cx - 6.5, wifi_badge_cy - 6.5, 13.0, 13.0),
             if self.wifi_enabled { SfSymbol::Wifi } else { SfSymbol::WifiOff },
-            if self.wifi_enabled { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            if self.wifi_enabled { TEXT_PRIMARY } else { p.text_secondary },
             1.35,
         )?;
         let wifi_sub = if !self.wifi_enabled {
@@ -1661,14 +1761,14 @@ impl NotchView {
             "Wi-Fi",
             Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 4.0, cc.wifi_tile.width - 60.0, 16.0),
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         surface.draw_text(
             wifi_sub,
             Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 19.0, cc.wifi_tile.width - 60.0, 14.0),
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
         let wifi_more = self.press_rect(cc.wifi_more_btn);
@@ -1682,27 +1782,24 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(wifi_more.x + 3.5, wifi_more.y + 5.5, 11.0, 11.0),
             SfSymbol::ChevronRight,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.3,
         )?;
 
         // 2. Bluetooth Card Tile
-        surface.draw_liquid_glass_panel(
-            cc.bluetooth_tile,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, cc.bluetooth_tile, 12.0, p)?;
         let bt_cx = cc.bluetooth_tile.x + 17.0;
         let bt_cy = cc.bluetooth_tile.y + cc.bluetooth_tile.height * 0.5;
         surface.fill_circle(
             bt_cx,
             bt_cy,
             11.0,
-            if self.bluetooth_enabled { SYSTEM_BLUE } else { GLASS_CONTROL },
+            if self.bluetooth_enabled { p.accent } else { p.control_fill },
         )?;
         surface.draw_sf_symbol(
             Rect::new(bt_cx - 6.5, bt_cy - 6.5, 13.0, 13.0),
             SfSymbol::Bluetooth,
-            if self.bluetooth_enabled { TEXT_PRIMARY } else { TEXT_SECONDARY },
+            if self.bluetooth_enabled { TEXT_PRIMARY } else { p.text_secondary },
             1.35,
         )?;
         let bt_sub = if !self.bluetooth_enabled {
@@ -1716,22 +1813,19 @@ impl NotchView {
             "Bluetooth",
             Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 4.0, cc.bluetooth_tile.width - 42.0, 16.0),
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         surface.draw_text(
             bt_sub,
             Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 19.0, cc.bluetooth_tile.width - 42.0, 14.0),
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
 
         // 3. Notch Mode / Free Drag Tile
-        surface.draw_liquid_glass_panel(
-            cc.notch_mode_tile,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, cc.notch_mode_tile, 12.0, p)?;
         let mode_active = self.notch_mode_label == "Fixed";
         let nm_cx = cc.notch_mode_tile.x + 17.0;
         let nm_cy = cc.notch_mode_tile.y + cc.notch_mode_tile.height * 0.5;
@@ -1739,33 +1833,33 @@ impl NotchView {
             nm_cx,
             nm_cy,
             11.0,
-            if mode_active { GLASS_CONTROL_ACTIVE } else { GLASS_CONTROL },
+            if mode_active { p.control_active } else { p.control_fill },
         )?;
         surface.draw_sf_symbol(
             Rect::new(nm_cx - 6.5, nm_cy - 6.5, 13.0, 13.0),
             SfSymbol::Desktops,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text_bold(
             "Notch Mode",
             Rect::new(cc.notch_mode_tile.x + 34.0, cc.notch_mode_tile.y + 4.0, 84.0, 16.0),
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         surface.draw_text(
             &self.notch_mode_label,
             Rect::new(cc.notch_mode_tile.x + 34.0, cc.notch_mode_tile.y + 19.0, 74.0, 14.0),
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
         let drag_r = self.press_rect(cc.drag_badge);
         surface.draw_liquid_glass_button(
             drag_r,
             7.0,
-            if self.free_drag_enabled { Some(SYSTEM_BLUE) } else { None },
+            if self.free_drag_enabled { Some(p.accent) } else { None },
             self.is_hovered(cc.drag_badge),
             self.is_pressed(cc.drag_badge),
         )?;
@@ -1773,36 +1867,33 @@ impl NotchView {
             if self.free_drag_enabled { "Drag" } else { "Lock" },
             drag_r,
             8.5,
-            TEXT_PRIMARY,
+            if self.free_drag_enabled { TEXT_PRIMARY } else { p.text_secondary },
             TextAlign::Center,
         )?;
 
         // 4. Shortcuts / Settings Tile
-        surface.draw_liquid_glass_panel(
-            cc.shortcuts_tile,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, cc.shortcuts_tile, 12.0, p)?;
         let sc_cx = cc.shortcuts_tile.x + 17.0;
         let sc_cy = cc.shortcuts_tile.y + cc.shortcuts_tile.height * 0.5;
-        surface.fill_circle(sc_cx, sc_cy, 11.0, GLASS_CONTROL)?;
+        surface.fill_circle(sc_cx, sc_cy, 11.0, p.control_fill)?;
         surface.draw_sf_symbol(
             Rect::new(sc_cx - 6.5, sc_cy - 6.5, 13.0, 13.0),
             SfSymbol::ShortcutKeys,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text_bold(
             "Shortcuts",
             Rect::new(cc.shortcuts_tile.x + 34.0, cc.shortcuts_tile.y + 4.0, cc.shortcuts_tile.width - 64.0, 16.0),
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         surface.draw_text(
             "F1 • Settings",
             Rect::new(cc.shortcuts_tile.x + 34.0, cc.shortcuts_tile.y + 19.0, cc.shortcuts_tile.width - 64.0, 14.0),
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
         let gear_r = self.press_rect(cc.settings_gear_btn);
@@ -1816,11 +1907,11 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(gear_r.x + 4.0, gear_r.y + 6.0, 12.0, 12.0),
             SfSymbol::Gear,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
 
-        // 5. Circular Quick Toggles Row (Monochrome when off, single SYSTEM_BLUE when active)
+        // 5. Circular Quick Toggles Row (Monochrome when off, single p.accent when active)
         let toggle_defs = [
             (
                 if self.dock_fixed { "Dock Fix" } else { "Auto-Hide" },
@@ -1847,35 +1938,31 @@ impl NotchView {
             let r = if self.is_pressed(*rect) { 15.8 } else { 16.5 };
             let hovered = self.is_hovered(*rect);
             let bg = if active {
-                SYSTEM_BLUE
+                p.accent
             } else if hovered {
-                GLASS_CONTROL_HOVER
+                p.control_hover
             } else {
-                GLASS_CONTROL
+                p.control_fill
             };
             surface.fill_circle(cx, cy, r, bg)?;
             surface.stroke_circle(
                 cx,
                 cy,
                 r,
-                if active {
-                    SYSTEM_BLUE
-                } else {
-                    GLASS_HAIRLINE
-                },
+                if active { p.accent } else { p.hairline_border },
                 1.0,
             )?;
             surface.draw_sf_symbol(
                 Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0),
                 symbol,
-                if active { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                if active { TEXT_PRIMARY } else { p.text_secondary },
                 1.35,
             )?;
             surface.draw_text(
                 label,
                 Rect::new(rect.x - 6.0, rect.y + 35.0, rect.width + 12.0, 14.0),
                 8.5,
-                if active { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                if active { p.text_primary } else { p.text_secondary },
                 TextAlign::Center,
             )?;
         }
@@ -1894,6 +1981,7 @@ impl NotchView {
             "Volume",
             vol_ratio,
             true,
+            p,
         )?;
         self.render_slider_row(
             surface,
@@ -1903,6 +1991,7 @@ impl NotchView {
             "Brightness",
             self.brightness_level as f32 / 100.0,
             false,
+            p,
         )?;
 
         Ok(())
@@ -1918,6 +2007,7 @@ impl NotchView {
         label: &str,
         ratio: f32,
         is_volume: bool,
+        p: &AdaptivePalette,
     ) -> Result<()> {
         let clamped = ratio.clamp(0.0, 1.0);
         let sym = if is_volume {
@@ -1935,12 +2025,12 @@ impl NotchView {
             13.0,
             13.0,
         );
-        surface.draw_sf_symbol(sym_rect, sym, TEXT_PRIMARY, 1.35)?;
+        surface.draw_sf_symbol(sym_rect, sym, p.text_primary, 1.35)?;
         surface.draw_text(
             label,
             Rect::new(icon_rect.x + 20.0, icon_rect.y, 60.0, icon_rect.height),
             9.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
@@ -1948,18 +2038,18 @@ impl NotchView {
         let bar_h = 8.0;
         let bar_y = track_rect.y + (track_rect.height - bar_h) * 0.5;
         let bar_rect = Rect::new(track_rect.x, bar_y, track_rect.width, bar_h);
-        surface.fill_rounded_rect(bar_rect, 4.0, SLIDER_TRACK)?;
-        surface.stroke_rounded_rect(bar_rect, 4.0, GLASS_HAIRLINE, 0.7)?;
+        surface.fill_rounded_rect(bar_rect, 4.0, p.slider_track)?;
+        surface.stroke_rounded_rect(bar_rect, 4.0, p.hairline_border, 0.7)?;
 
         let fill_w = (bar_rect.width * clamped).max(if clamped > 0.0 { 8.0 } else { 0.0 });
         if fill_w > 0.0 {
             surface.fill_rounded_rect(
                 Rect::new(bar_rect.x, bar_rect.y, fill_w, bar_h),
                 4.0,
-                SLIDER_FILL,
+                p.slider_fill,
             )?;
             let knob_x = (bar_rect.x + fill_w).min(bar_rect.x + bar_rect.width - 4.5);
-            surface.fill_circle(knob_x, bar_rect.y + bar_h * 0.5, 4.5, TEXT_PRIMARY)?;
+            surface.fill_circle(knob_x, bar_rect.y + bar_h * 0.5, 4.5, p.text_primary)?;
         }
 
         let pct = (clamped * 100.0).round() as u8;
@@ -1967,16 +2057,21 @@ impl NotchView {
             &format!("{}%", pct),
             pct_rect,
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Trailing,
         )?;
         Ok(())
     }
 
-    fn render_calendar(&self, surface: &NativeSurface, cal: &CalendarLayout) -> Result<()> {
+    fn render_calendar(
+        &self,
+        surface: &NativeSurface,
+        cal: &CalendarLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         // Left column: Real month calendar grid
         let title = format!("{} {}", month_name(self.calendar_month), self.calendar_year);
-        surface.draw_text_bold(&title, cal.month_title, 12.0, TEXT_PRIMARY, TextAlign::Leading)?;
+        surface.draw_text_bold(&title, cal.month_title, 12.0, p.text_primary, TextAlign::Leading)?;
 
         let prev_m = self.press_rect(cal.prev_month_btn);
         surface.draw_liquid_glass_button(
@@ -1989,7 +2084,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(prev_m.x + 4.0, prev_m.y + 4.0, 10.0, 10.0),
             SfSymbol::ChevronLeft,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         let next_m = self.press_rect(cal.next_month_btn);
@@ -2003,7 +2098,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(next_m.x + 4.0, next_m.y + 4.0, 10.0, 10.0),
             SfSymbol::ChevronRight,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         let today_r = self.press_rect(cal.today_btn);
@@ -2014,7 +2109,7 @@ impl NotchView {
             self.is_hovered(cal.today_btn),
             self.is_pressed(cal.today_btn),
         )?;
-        surface.draw_text("Today", today_r, 9.0, TEXT_PRIMARY, TextAlign::Center)?;
+        surface.draw_text("Today", today_r, 9.0, p.text_primary, TextAlign::Center)?;
 
         let weekdays = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
         let cell_w = cal.grid_rect.width / 7.0;
@@ -2024,7 +2119,7 @@ impl NotchView {
                 wd,
                 Rect::new(cal.grid_rect.x + i as f32 * cell_w, cal.grid_rect.y, cell_w, 16.0),
                 9.0,
-                TEXT_TERTIARY,
+                p.text_tertiary,
                 TextAlign::Center,
             )?;
         }
@@ -2051,10 +2146,10 @@ impl NotchView {
             );
             let is_today = is_current_month && day == self.calendar_today_day;
             if is_today {
-                surface.fill_circle(cx, cy, (row_h * 0.45).min(11.0), SYSTEM_BLUE)?;
+                surface.fill_circle(cx, cy, (row_h * 0.45).min(11.0), p.accent)?;
                 surface.draw_text_bold(&day.to_string(), cell_rect, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
             } else {
-                surface.draw_text(&day.to_string(), cell_rect, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
+                surface.draw_text(&day.to_string(), cell_rect, 10.0, p.text_primary, TextAlign::Center)?;
             }
         }
 
@@ -2065,7 +2160,7 @@ impl NotchView {
             cal.grid_rect.y - 18.0,
             sep_x,
             cal.grid_rect.y + cal.grid_rect.height,
-            DIVIDER_HAIRLINE,
+            p.divider,
             1.0,
         )?;
 
@@ -2083,37 +2178,39 @@ impl NotchView {
             status_label,
             Rect::new(cal.pomo_panel.x, cal.pomo_panel.y + 4.0, cal.pomo_panel.width, 16.0),
             10.0,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Center,
         )?;
         surface.draw_text_bold(
             &self.pomodoro.formatted(),
             Rect::new(cal.pomo_panel.x, cal.pomo_panel.y + 26.0, cal.pomo_panel.width, 40.0),
             26.0,
-            if self.pomodoro.finished { STATUS_LIVE_RED } else { TEXT_PRIMARY },
+            if self.pomodoro.finished { p.status_red } else { p.text_primary },
             TextAlign::Center,
         )?;
 
         // Primary Start/Pause Liquid Glass button + Reset (`SfSymbol::Refresh`)
         let play_r = self.press_rect(cal.pomo_play_btn);
+        let play_primary = !self.pomodoro.running;
         surface.draw_liquid_glass_button(
             play_r,
             14.0,
-            if self.pomodoro.running { None } else { Some(SYSTEM_BLUE) },
+            if play_primary { Some(p.accent) } else { None },
             self.is_hovered(cal.pomo_play_btn),
             self.is_pressed(cal.pomo_play_btn),
         )?;
+        let play_fg = if play_primary { TEXT_PRIMARY } else { p.text_primary };
         surface.draw_sf_symbol(
             Rect::new(play_r.x + 12.0, play_r.y + 9.0, 12.0, 12.0),
             if self.pomodoro.running { SfSymbol::Pause } else { SfSymbol::Play },
-            TEXT_PRIMARY,
+            play_fg,
             1.3,
         )?;
         surface.draw_text_bold(
             if self.pomodoro.running { "Pause" } else { "Start" },
             Rect::new(play_r.x + 22.0, play_r.y, (play_r.width - 26.0).max(24.0), play_r.height),
             11.0,
-            TEXT_PRIMARY,
+            play_fg,
             TextAlign::Center,
         )?;
 
@@ -2128,7 +2225,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(reset_r.x + 8.0, reset_r.y + 8.0, 14.0, 14.0),
             SfSymbol::Refresh,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.4,
         )?;
 
@@ -2139,7 +2236,7 @@ impl NotchView {
             surface.draw_liquid_glass_button(
                 btn_r,
                 6.0,
-                if active { Some(SYSTEM_BLUE) } else { None },
+                if active { Some(p.accent) } else { None },
                 self.is_hovered(*rect),
                 self.is_pressed(*rect),
             )?;
@@ -2147,7 +2244,7 @@ impl NotchView {
                 &format!("{}m", mins),
                 btn_r,
                 9.5,
-                if active { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                if active { TEXT_PRIMARY } else { p.text_secondary },
                 TextAlign::Center,
             )?;
         }
@@ -2155,7 +2252,12 @@ impl NotchView {
         Ok(())
     }
 
-    fn render_music(&self, surface: &NativeSurface, mus: &MusicLayout) -> Result<()> {
+    fn render_music(
+        &self,
+        surface: &NativeSurface,
+        mus: &MusicLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         let title = self
             .music
             .as_ref()
@@ -2171,14 +2273,11 @@ impl NotchView {
         let is_playing = self.music.as_ref().is_some_and(|m| m.is_playing);
 
         // Album badge
-        surface.draw_liquid_glass_panel(
-            mus.album_badge,
-            LiquidGlassStyle::elevated(11.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, mus.album_badge, 11.0, p)?;
         surface.draw_sf_symbol(
             Rect::new(mus.album_badge.x + 13.0, mus.album_badge.y + 13.0, 20.0, 20.0),
             SfSymbol::MusicNote,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.5,
         )?;
         if is_playing {
@@ -2186,7 +2285,7 @@ impl NotchView {
                 mus.album_badge.x + mus.album_badge.width - 7.0,
                 mus.album_badge.y + 7.0,
                 3.0,
-                STATUS_LIVE_GREEN,
+                p.status_green,
             )?;
         }
 
@@ -2195,7 +2294,7 @@ impl NotchView {
             title,
             Rect::new(mus.title_rect.x, mus.title_rect.y, mus.title_rect.width, 18.0),
             13.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         let sub_text = if let Some(alb) = &self.music_album {
@@ -2211,28 +2310,36 @@ impl NotchView {
             &sub_text,
             Rect::new(mus.title_rect.x, mus.title_rect.y + 18.0, mus.title_rect.width, 16.0),
             10.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
 
         // Visualizer + Lyrics toggle button
         let bars = animated_visualizer_bars(self.visualizer_phase);
-        surface.draw_music_visualizer(
+        self.render_adaptive_visualizer(
+            surface,
             mus.lyrics_btn.x - 26.0,
             mus.lyrics_btn.y + 4.0,
             16.0,
             &bars,
             is_playing,
+            p,
         )?;
         let lyr_r = self.press_rect(mus.lyrics_btn);
         surface.draw_liquid_glass_button(
             lyr_r,
             9.0,
-            if self.music_show_lyrics { Some(SYSTEM_BLUE) } else { None },
+            if self.music_show_lyrics { Some(p.accent) } else { None },
             self.is_hovered(mus.lyrics_btn),
             self.is_pressed(mus.lyrics_btn),
         )?;
-        surface.draw_text_bold("Lyrics", lyr_r, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
+        surface.draw_text_bold(
+            "Lyrics",
+            lyr_r,
+            10.0,
+            if self.music_show_lyrics { TEXT_PRIMARY } else { p.text_primary },
+            TextAlign::Center,
+        )?;
 
         // Monochrome Liquid Glass Progress bar
         let ratio = if self.music_duration_ms > 0 {
@@ -2244,25 +2351,25 @@ impl NotchView {
             &format_ms(self.music_position_ms),
             mus.elapsed_rect,
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
         let bar_h = 5.0;
         let bar_y = mus.progress_track.y + (mus.progress_track.height - bar_h) * 0.5;
         let bar_rect = Rect::new(mus.progress_track.x, bar_y, mus.progress_track.width, bar_h);
-        surface.fill_rounded_rect(bar_rect, 2.5, SLIDER_TRACK)?;
+        surface.fill_rounded_rect(bar_rect, 2.5, p.slider_track)?;
         if ratio > 0.0 {
             surface.fill_rounded_rect(
                 Rect::new(bar_rect.x, bar_rect.y, (bar_rect.width * ratio).max(4.0), bar_h),
                 2.5,
-                SLIDER_FILL,
+                p.slider_fill,
             )?;
         }
         surface.draw_text(
             &format_remaining_ms(self.music_position_ms, self.music_duration_ms),
             mus.remaining_rect,
             9.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Trailing,
         )?;
 
@@ -2278,7 +2385,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(prev_r.x + 7.5, prev_r.y + 7.5, 13.0, 13.0),
             SfSymbol::SkipBack,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
 
@@ -2293,7 +2400,7 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(pp_r.x + 10.5, pp_r.y + 10.5, 15.0, 15.0),
             if is_playing { SfSymbol::Pause } else { SfSymbol::Play },
-            TEXT_PRIMARY,
+            p.text_primary,
             1.5,
         )?;
 
@@ -2308,15 +2415,12 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(next_r.x + 7.5, next_r.y + 7.5, 13.0, 13.0),
             SfSymbol::SkipForward,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
 
         // LRC Lyrics Area
-        surface.draw_liquid_glass_panel(
-            mus.lyrics_box,
-            LiquidGlassStyle::elevated(10.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, mus.lyrics_box, 10.0, p)?;
 
         let active_line = self
             .music_active_lyric_idx
@@ -2341,9 +2445,9 @@ impl NotchView {
                     line_h,
                 );
                 if is_curr {
-                    surface.draw_text_bold(line, rect, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
+                    surface.draw_text_bold(line, rect, 11.0, p.text_primary, TextAlign::Center)?;
                 } else {
-                    surface.draw_text(line, rect, 9.5, TEXT_TERTIARY, TextAlign::Center)?;
+                    surface.draw_text(line, rect, 9.5, p.text_tertiary, TextAlign::Center)?;
                 }
             }
         } else if let Some(line) = active_line {
@@ -2356,18 +2460,18 @@ impl NotchView {
                     &line,
                     Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0, mus.lyrics_text_box.width - 20.0, half_h),
                     11.0,
-                    TEXT_PRIMARY,
+                    p.text_primary,
                     TextAlign::Center,
                 )?;
                 surface.draw_text(
                     &upcoming,
                     Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0 + half_h, mus.lyrics_text_box.width - 20.0, half_h),
                     9.5,
-                    TEXT_SECONDARY,
+                    p.text_secondary,
                     TextAlign::Center,
                 )?;
             } else {
-                surface.draw_text_bold(&line, mus.lyrics_text_box, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
+                surface.draw_text_bold(&line, mus.lyrics_text_box, 11.0, p.text_primary, TextAlign::Center)?;
             }
         } else {
             let fallback = if self.music_show_lyrics {
@@ -2375,7 +2479,7 @@ impl NotchView {
             } else {
                 "Tap Lyrics for synced LRC lyrics"
             };
-            surface.draw_text(fallback, mus.lyrics_text_box, 10.0, TEXT_SECONDARY, TextAlign::Center)?;
+            surface.draw_text(fallback, mus.lyrics_text_box, 10.0, p.text_secondary, TextAlign::Center)?;
         }
 
         if self.music_show_lyrics {
@@ -2388,7 +2492,7 @@ impl NotchView {
                 &offset_label,
                 mus.offset_label_rect,
                 8.5,
-                if self.music_lyric_offset_ms != 0 { SYSTEM_BLUE } else { TEXT_SECONDARY },
+                if self.music_lyric_offset_ms != 0 { p.accent } else { p.text_secondary },
                 TextAlign::Leading,
             )?;
 
@@ -2403,14 +2507,14 @@ impl NotchView {
             surface.draw_sf_symbol(
                 Rect::new(minus_r.x + 4.0, minus_r.y + 4.0, 8.0, 8.0),
                 SfSymbol::Minus,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.2,
             )?;
             surface.draw_text(
                 "0.2s",
                 Rect::new(minus_r.x + 12.0, minus_r.y, (minus_r.width - 13.0).max(12.0), minus_r.height),
                 8.0,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
 
@@ -2425,29 +2529,30 @@ impl NotchView {
             surface.draw_sf_symbol(
                 Rect::new(plus_r.x + 4.0, plus_r.y + 4.0, 8.0, 8.0),
                 SfSymbol::Plus,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.2,
             )?;
             surface.draw_text(
                 "0.2s",
                 Rect::new(plus_r.x + 12.0, plus_r.y, (plus_r.width - 13.0).max(12.0), plus_r.height),
                 8.0,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Center,
             )?;
 
             let rst_r = self.press_rect(mus.offset_reset_btn);
+            let rst_active = self.music_lyric_offset_ms != 0;
             surface.draw_liquid_glass_button(
                 rst_r,
                 5.0,
-                if self.music_lyric_offset_ms != 0 { Some(SYSTEM_BLUE) } else { None },
+                if rst_active { Some(p.accent) } else { None },
                 self.is_hovered(mus.offset_reset_btn),
                 self.is_pressed(mus.offset_reset_btn),
             )?;
             surface.draw_sf_symbol(
                 Rect::new(rst_r.x + (rst_r.width - 10.0) * 0.5, rst_r.y + 3.0, 10.0, 10.0),
                 SfSymbol::Refresh,
-                TEXT_PRIMARY,
+                if rst_active { TEXT_PRIMARY } else { p.text_primary },
                 1.2,
             )?;
         }
@@ -2455,7 +2560,12 @@ impl NotchView {
         Ok(())
     }
 
-    fn render_wifi(&self, surface: &NativeSurface, wf: &WifiLayout) -> Result<()> {
+    fn render_wifi(
+        &self,
+        surface: &NativeSurface,
+        wf: &WifiLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         let back_r = self.press_rect(wf.back_btn);
         surface.draw_liquid_glass_button(
             back_r,
@@ -2467,14 +2577,14 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(back_r.x + 6.0, back_r.y + 6.0, 10.0, 10.0),
             SfSymbol::ChevronLeft,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text(
             "Back",
             Rect::new(back_r.x + 16.0, back_r.y, back_r.width - 18.0, back_r.height),
             9.5,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -2482,7 +2592,7 @@ impl NotchView {
             "Wi-Fi Networks",
             wf.title_rect,
             12.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
 
@@ -2490,7 +2600,7 @@ impl NotchView {
         surface.draw_liquid_glass_button(
             toggle_r,
             8.0,
-            if self.wifi_enabled { Some(SYSTEM_BLUE) } else { None },
+            if self.wifi_enabled { Some(p.accent) } else { None },
             self.is_hovered(wf.toggle_btn),
             self.is_pressed(wf.toggle_btn),
         )?;
@@ -2498,7 +2608,7 @@ impl NotchView {
             if self.wifi_enabled { "On" } else { "Off" },
             toggle_r,
             9.5,
-            TEXT_PRIMARY,
+            if self.wifi_enabled { TEXT_PRIMARY } else { p.text_secondary },
             TextAlign::Center,
         )?;
 
@@ -2513,53 +2623,44 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(ref_r.x + (ref_r.width - 12.0) * 0.5, ref_r.y + 5.0, 12.0, 12.0),
             SfSymbol::Refresh,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.35,
         )?;
 
         if !self.wifi_enabled {
-            surface.draw_liquid_glass_panel(
-                wf.list_box,
-                LiquidGlassStyle::elevated(10.0).without_shadow(),
-            )?;
-            surface.draw_text("Wi-Fi is turned off", wf.list_box, 11.0, TEXT_SECONDARY, TextAlign::Center)?;
+            self.render_adaptive_card(surface, wf.list_box, 10.0, p)?;
+            surface.draw_text("Wi-Fi is turned off", wf.list_box, 11.0, p.text_secondary, TextAlign::Center)?;
             return Ok(());
         }
 
         if self.wifi_networks.is_empty() {
-            surface.draw_liquid_glass_panel(
-                wf.list_box,
-                LiquidGlassStyle::elevated(10.0).without_shadow(),
-            )?;
+            self.render_adaptive_card(surface, wf.list_box, 10.0, p)?;
             let msg = if let Some(ssid) = &self.wifi_ssid {
                 format!("Connected to {}", ssid)
             } else {
                 "No nearby Wi-Fi networks found".to_string()
             };
-            surface.draw_text(&msg, wf.list_box, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
+            surface.draw_text(&msg, wf.list_box, 11.0, p.text_primary, TextAlign::Center)?;
             return Ok(());
         }
 
         for (idx, (ssid, row_rect)) in wf.network_rows.iter().enumerate() {
             let item = &self.wifi_networks[idx];
-            surface.draw_liquid_glass_panel(
-                *row_rect,
-                LiquidGlassStyle::elevated(9.0).without_shadow(),
-            )?;
+            self.render_adaptive_card(surface, *row_rect, 9.0, p)?;
             if item.connected {
-                surface.stroke_rounded_rect(*row_rect, 9.0, SYSTEM_BLUE.with_alpha(0.65), 1.0)?;
+                surface.stroke_rounded_rect(*row_rect, 9.0, p.accent.with_alpha(0.70), 1.0)?;
             }
             surface.draw_sf_symbol(
                 Rect::new(row_rect.x + 10.0, row_rect.y + (row_rect.height - 12.0) * 0.5, 12.0, 12.0),
                 if item.signal > 0 { SfSymbol::Wifi } else { SfSymbol::WifiOff },
-                if item.connected { SYSTEM_BLUE } else { TEXT_PRIMARY },
+                if item.connected { p.accent } else { p.text_primary },
                 1.3,
             )?;
             surface.draw_text_bold(
                 ssid,
                 Rect::new(row_rect.x + 30.0, row_rect.y, row_rect.width - 116.0, row_rect.height),
                 10.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Leading,
             )?;
             let action_rect = Rect::new(
@@ -2571,20 +2672,20 @@ impl NotchView {
             surface.fill_rounded_rect(
                 action_rect,
                 6.0,
-                if item.connected { SYSTEM_BLUE_TINT } else { GLASS_CONTROL },
+                if item.connected { p.accent_tint } else { p.control_fill },
             )?;
             if item.connected {
                 surface.draw_sf_symbol(
                     Rect::new(action_rect.x + 6.0, action_rect.y + 7.0, 10.0, 10.0),
                     SfSymbol::Check,
-                    SYSTEM_BLUE,
+                    p.accent,
                     1.3,
                 )?;
                 surface.draw_text(
                     "Joined",
                     Rect::new(action_rect.x + 16.0, action_rect.y, action_rect.width - 18.0, action_rect.height),
                     9.0,
-                    TEXT_PRIMARY,
+                    p.text_primary,
                     TextAlign::Center,
                 )?;
             } else {
@@ -2592,7 +2693,7 @@ impl NotchView {
                     "Connect",
                     action_rect,
                     9.0,
-                    TEXT_SECONDARY,
+                    p.text_secondary,
                     TextAlign::Center,
                 )?;
             }
@@ -2601,18 +2702,23 @@ impl NotchView {
         Ok(())
     }
 
-    fn render_shortcuts(&self, surface: &NativeSurface, sc: &ShortcutsLayout) -> Result<()> {
+    fn render_shortcuts(
+        &self,
+        surface: &NativeSurface,
+        sc: &ShortcutsLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         surface.draw_sf_symbol(
             Rect::new(sc.header_rect.x + 2.0, sc.header_rect.y + 4.0, 14.0, 14.0),
             SfSymbol::ShortcutKeys,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.3,
         )?;
         surface.draw_text_bold(
             "Keyboard Shortcuts",
             Rect::new(sc.header_rect.x + 22.0, sc.header_rect.y, sc.header_rect.width - 96.0, sc.header_rect.height),
             12.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         let set_r = self.press_rect(sc.settings_btn);
@@ -2626,14 +2732,14 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(set_r.x + 6.0, set_r.y + 5.0, 10.0, 10.0),
             SfSymbol::Gear,
-            TEXT_SECONDARY,
+            p.text_secondary,
             1.2,
         )?;
         surface.draw_text(
             "Settings",
             Rect::new(set_r.x + 17.0, set_r.y, set_r.width - 19.0, set_r.height),
             9.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -2654,8 +2760,8 @@ impl NotchView {
             ("Emergency Pause", "Ctrl+Alt+P"),
         ];
 
-        self.render_shortcut_column(surface, sc.left_col, "Display & Activation", &left_items)?;
-        self.render_shortcut_column(surface, sc.right_col, "Navigation & System", &right_items)?;
+        self.render_shortcut_column(surface, sc.left_col, "Display & Activation", &left_items, p)?;
+        self.render_shortcut_column(surface, sc.right_col, "Navigation & System", &right_items, p)?;
         Ok(())
     }
 
@@ -2665,19 +2771,17 @@ impl NotchView {
         col: Rect,
         heading: &str,
         items: &[(&str, &str)],
+        p: &AdaptivePalette,
     ) -> Result<()> {
         surface.draw_text_bold(
             heading,
             Rect::new(col.x + 2.0, col.y, col.width - 4.0, 14.0),
             9.0,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Leading,
         )?;
         let box_rect = Rect::new(col.x, col.y + 16.0, col.width, col.height - 16.0);
-        surface.draw_liquid_glass_panel(
-            box_rect,
-            LiquidGlassStyle::elevated(10.0).without_shadow(),
-        )?;
+        self.render_adaptive_card(surface, box_rect, 10.0, p)?;
 
         let row_h = (box_rect.height - 8.0) / items.len() as f32;
         for (i, (label, keys)) in items.iter().enumerate() {
@@ -2686,7 +2790,7 @@ impl NotchView {
                 label,
                 Rect::new(box_rect.x + 8.0, ry, box_rect.width * 0.48, row_h),
                 9.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Leading,
             )?;
             let key_rect = Rect::new(
@@ -2695,25 +2799,30 @@ impl NotchView {
                 box_rect.width * 0.50 - 8.0,
                 (row_h - 4.0).max(14.0),
             );
-            surface.fill_rounded_rect(key_rect, 5.0, GLASS_CONTROL)?;
-            surface.stroke_rounded_rect(key_rect, 5.0, GLASS_HAIRLINE, 0.8)?;
-            surface.draw_text(keys, key_rect, 8.5, TEXT_PRIMARY, TextAlign::Center)?;
+            surface.fill_rounded_rect(key_rect, 5.0, p.control_fill)?;
+            surface.stroke_rounded_rect(key_rect, 5.0, p.hairline_border, 0.8)?;
+            surface.draw_text(keys, key_rect, 8.5, p.text_primary, TextAlign::Center)?;
         }
         Ok(())
     }
 
-    fn render_shelf(&self, surface: &NativeSurface, sh: &ShelfLayout) -> Result<()> {
+    fn render_shelf(
+        &self,
+        surface: &NativeSurface,
+        sh: &ShelfLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
         surface.draw_sf_symbol(
             Rect::new(sh.header_rect.x, sh.header_rect.y + 4.0, 14.0, 14.0),
             SfSymbol::FolderDrop,
-            if self.drag_hover { SYSTEM_BLUE } else { TEXT_PRIMARY },
+            if self.drag_hover { p.accent } else { p.text_primary },
             1.4,
         )?;
         surface.draw_text_bold(
             &format!("File Shelf ({})", self.shelf_items.len()),
             Rect::new(sh.header_rect.x + 20.0, sh.header_rect.y, (sh.header_rect.width - 20.0).max(60.0), sh.header_rect.height),
             12.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Leading,
         )?;
         if let Some(clear_btn) = sh.clear_btn {
@@ -2728,27 +2837,24 @@ impl NotchView {
             surface.draw_sf_symbol(
                 Rect::new(clr_r.x + 6.0, clr_r.y + 5.0, 11.0, 11.0),
                 SfSymbol::Trash,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 1.3,
             )?;
             surface.draw_text(
                 "Clear",
                 Rect::new(clr_r.x + 17.0, clr_r.y, clr_r.width - 19.0, clr_r.height),
                 9.5,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Center,
             )?;
         }
 
         if self.shelf_items.is_empty() || self.drag_hover {
-            let drop_style = if self.drag_hover {
-                LiquidGlassStyle::tinted(SYSTEM_BLUE, 12.0).without_shadow()
-            } else {
-                LiquidGlassStyle::elevated(12.0).without_shadow()
-            };
-            surface.draw_liquid_glass_panel(sh.body_rect, drop_style)?;
             if self.drag_hover {
-                surface.stroke_rounded_rect(sh.body_rect, 12.0, SYSTEM_BLUE, 1.5)?;
+                surface.fill_rounded_rect(sh.body_rect, 12.0, p.accent_tint)?;
+                surface.stroke_rounded_rect(sh.body_rect, 12.0, p.accent, 1.5)?;
+            } else {
+                self.render_adaptive_card(surface, sh.body_rect, 12.0, p)?;
             }
             let icon_size = 24.0;
             surface.draw_sf_symbol(
@@ -2759,7 +2865,7 @@ impl NotchView {
                     icon_size,
                 ),
                 SfSymbol::FolderDrop,
-                if self.drag_hover { SYSTEM_BLUE } else { TEXT_SECONDARY },
+                if self.drag_hover { p.accent } else { p.text_secondary },
                 1.6,
             )?;
             let prompt = if self.drag_hover {
@@ -2776,7 +2882,7 @@ impl NotchView {
                     24.0,
                 ),
                 11.0,
-                if self.drag_hover { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                if self.drag_hover { p.text_primary } else { p.text_secondary },
                 TextAlign::Center,
             )?;
             return Ok(());
@@ -2789,10 +2895,7 @@ impl NotchView {
             let item = &self.shelf_items[i];
             let ry = sh.body_rect.y + i as f32 * (row_h + gap);
             let row = Rect::new(sh.body_rect.x, ry, sh.body_rect.width, row_h);
-            surface.draw_liquid_glass_panel(
-                row,
-                LiquidGlassStyle::elevated(9.0).without_shadow(),
-            )?;
+            self.render_adaptive_card(surface, row, 9.0, p)?;
 
             let kind_sym = match item.kind.as_str() {
                 "DIR" => SfSymbol::FolderDrop,
@@ -2800,11 +2903,11 @@ impl NotchView {
                 _ => SfSymbol::Document,
             };
             let badge_rect = Rect::new(row.x + 8.0, row.y + 8.0, 22.0, 22.0);
-            surface.fill_rounded_rect(badge_rect, 6.0, GLASS_CONTROL)?;
+            surface.fill_rounded_rect(badge_rect, 6.0, p.control_fill)?;
             surface.draw_sf_symbol(
                 Rect::new(badge_rect.x + 5.0, badge_rect.y + 5.0, 12.0, 12.0),
                 kind_sym,
-                TEXT_PRIMARY,
+                p.text_primary,
                 1.3,
             )?;
 
@@ -2812,14 +2915,14 @@ impl NotchView {
                 &item.name,
                 Rect::new(row.x + 38.0, row.y + 4.0, row.width - 116.0, row.height - 8.0),
                 10.5,
-                TEXT_PRIMARY,
+                p.text_primary,
                 TextAlign::Leading,
             )?;
             surface.draw_text(
                 &item.size_label,
                 Rect::new(row.x + row.width - 74.0, row.y + 4.0, 66.0, row.height - 8.0),
                 9.5,
-                TEXT_SECONDARY,
+                p.text_secondary,
                 TextAlign::Trailing,
             )?;
         }
@@ -2827,11 +2930,13 @@ impl NotchView {
         Ok(())
     }
 
-    fn render_hime_ai(&self, surface: &NativeSurface, ai: &HimeAiLayout) -> Result<()> {
-        surface.draw_liquid_glass_panel(
-            ai.card_rect,
-            LiquidGlassStyle::elevated(12.0).without_shadow(),
-        )?;
+    fn render_hime_ai(
+        &self,
+        surface: &NativeSurface,
+        ai: &HimeAiLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        self.render_adaptive_card(surface, ai.card_rect, 12.0, p)?;
         surface.draw_hime_eyes(
             ai.card_rect.x + ai.card_rect.width * 0.5,
             ai.card_rect.y + 42.0,
@@ -2843,21 +2948,21 @@ impl NotchView {
             "Hime AI Assistant",
             Rect::new(ai.card_rect.x + 16.0, ai.card_rect.y + 72.0, ai.card_rect.width - 32.0, 22.0),
             13.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
         surface.draw_text(
             &self.ai_status_text,
             Rect::new(ai.card_rect.x + 16.0, ai.card_rect.y + 98.0, ai.card_rect.width - 32.0, 20.0),
             10.5,
-            TEXT_SECONDARY,
+            p.text_secondary,
             TextAlign::Center,
         )?;
         let btn_r = self.press_rect(ai.open_drawer_btn);
         surface.draw_liquid_glass_button(
             btn_r,
             10.0,
-            Some(SYSTEM_BLUE),
+            Some(p.accent),
             self.is_hovered(ai.open_drawer_btn),
             self.is_pressed(ai.open_drawer_btn),
         )?;
@@ -3824,5 +3929,39 @@ mod tests {
         settle(&mut notch);
         assert!(notch.expand_spring.value.abs() < 0.05);
         assert!((notch.press_spring.value - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn notch_adapts_liquid_glass_polarity_for_dark_and_bright_backdrops() {
+        use crate::theme::{ColorThemeMode, ThemePolarity};
+
+        let surface = match NativeSurface::new("NotchAdaptiveGlassTest", -2200, -2200, 560, 320) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut notch = NotchView::new(NotchEdge::Top);
+        notch.set_panel(NotchPanel::CommandCenter);
+        settle(&mut notch);
+
+        // Dark/black backdrop under Auto -> LightGlass (frosted white glass + dark ink)
+        let dark_bg = vec![12_u8; 64 * 64 * 4];
+        let mut dark_bg_opaque = dark_bg;
+        for px in dark_bg_opaque.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        surface.set_backdrop_pixels(64, 64, &dark_bg_opaque);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface.begin_draw();
+        notch.render(&surface).expect("LightGlass render should succeed");
+        surface.end_draw_and_present().expect("LightGlass present should succeed");
+
+        // Bright/white backdrop under Auto -> DarkGlass (smoked glass + white ink)
+        let bright_bg = vec![240_u8; 64 * 64 * 4];
+        surface.set_backdrop_pixels(64, 64, &bright_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        surface.begin_draw();
+        notch.render(&surface).expect("DarkGlass render should succeed");
+        surface.end_draw_and_present().expect("DarkGlass present should succeed");
     }
 }
