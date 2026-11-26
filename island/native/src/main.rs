@@ -23,7 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetCursorPos, GetMessageW, KillTimer, LoadIconW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, IDI_APPLICATION, MF_STRING,
     MSG, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP,
-    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 
 use hime_island_native::ai_drawer::{
@@ -89,6 +90,7 @@ struct AppShell {
     drag_moved: bool,
     drag_start_cursor: (i32, i32),
     quit_event: Option<HANDLE>,
+    tick_count: u64,
 }
 
 impl AppShell {
@@ -101,15 +103,8 @@ impl AppShell {
         notch_surface.show();
         os_shell::enable_drag_drop(notch_surface.hwnd(), true);
 
-        let dock_w = 720u32;
-        let dock_h = 96u32;
-        let dock_surface = NativeSurface::new(
-            "HimeDock",
-            screen.x + (screen.width - dock_w as i32) / 2,
-            screen.y + screen.height - dock_h as i32 - 8,
-            dock_w,
-            dock_h,
-        )?;
+        let (dx, dy, dock_w, dock_h) = dock_surface_bounds(screen);
+        let dock_surface = NativeSurface::new("HimeDock", dx, dy, dock_w, dock_h)?;
         dock_surface.show();
 
         let overlay_surface =
@@ -178,13 +173,52 @@ impl AppShell {
             drag_moved: false,
             drag_start_cursor: (0, 0),
             quit_event,
+            tick_count: 0,
         };
-        let _ = notch_surface_bounds(NotchEdge::Top, screen);
-        let _ = &mut shell.notch_surface;
         let initial_snap = shell.telemetry.snapshot();
         shell.apply_telemetry(&initial_snap, false);
+        shell.notch_surface.show();
+        if shell.dock.visible {
+            shell.dock_surface.show();
+        }
+        shell.update_surface_click_through();
         shell.render_all();
+        shell.log_startup_diag();
         Ok(shell)
+    }
+
+    fn log_startup_diag(&self) {
+        self.log_tick_diag("startup");
+    }
+
+    fn log_tick_diag(&self, label: &str) {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
+        let (nw, nh) = self.notch_surface.dip_size();
+        let nrect = self.notch.computed_rect(nw, nh);
+        let nvis = unsafe { IsWindowVisible(self.notch_surface.hwnd()).as_bool() };
+        let mut nwin = RECT::default();
+        let _ = unsafe { GetWindowRect(self.notch_surface.hwnd(), &mut nwin) };
+        let (dw, dh) = self.dock_surface.dip_size();
+        let drect = self.dock.dock_rect(Rect::new(0.0, 0.0, dw, dh));
+        let dvis = unsafe { IsWindowVisible(self.dock_surface.hwnd()).as_bool() };
+        let mut dwin = RECT::default();
+        let _ = unsafe { GetWindowRect(self.dock_surface.hwnd(), &mut dwin) };
+        log_diag(&format!(
+            "{label}: notch(hwnd={:?}, vis={}, win=({},{},{},{}), dip=({nw:.1},{nh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), hidden={}) dock(hwnd={:?}, vis={}, enabled={}, win=({},{},{},{}), dip=({dw:.1},{dh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), spring={:.2}, items={})",
+            self.notch_surface.hwnd(),
+            nvis,
+            nwin.left, nwin.top, nwin.right, nwin.bottom,
+            nrect.x, nrect.y, nrect.width, nrect.height,
+            self.notch.is_hidden,
+            self.dock_surface.hwnd(),
+            dvis,
+            self.dock.visible,
+            dwin.left, dwin.top, dwin.right, dwin.bottom,
+            drect.x, drect.y, drect.width, drect.height,
+            self.dock.visibility.value,
+            self.dock.items().len(),
+        ));
     }
 
     fn apply_telemetry(&mut self, snap: &TelemetrySnapshot, notify_volume: bool) {
@@ -261,16 +295,13 @@ impl AppShell {
     fn update_surface_click_through(&self) {
         if let Some((cx, cy)) = os_shell::cursor_position() {
             let screen = os_shell::screen_bounds_at_point(cx, cy);
-            let (nx, ny, nw, nh) = notch_surface_bounds(self.notch.edge, screen);
-            let local_x = cx as f32 - nx as f32;
-            let local_y = cy as f32 - ny as f32;
-            let over_notch = os_shell::hit_test_notch(
-                local_x,
-                local_y,
-                &self.notch,
-                nw as f32,
-                nh as f32,
-            );
+            let (nx, ny, _, _) = notch_surface_bounds(self.notch.edge, screen);
+            let notch_scale = (self.notch_surface.dpi() / 96.0).max(0.5);
+            let (nw_dip, nh_dip) = self.notch_surface.dip_size();
+            let local_nx = (cx - nx) as f32 / notch_scale;
+            let local_ny = (cy - ny) as f32 / notch_scale;
+            let over_notch =
+                os_shell::hit_test_notch(local_nx, local_ny, &self.notch, nw_dip, nh_dip);
             let near_wake = os_shell::is_notch_edge_hovered(
                 cx as f32,
                 cy as f32,
@@ -280,7 +311,25 @@ impl AppShell {
             );
             self.notch_surface
                 .set_click_through(!(over_notch || near_wake || self.dragging_notch));
+
+            if self.dock.visible {
+                let primary = os_shell::primary_screen_bounds();
+                let (dx, dy, _, _) = dock_surface_bounds(primary);
+                let dock_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+                let (dw_dip, dh_dip) = self.dock_surface.dip_size();
+                let local_dx = (cx - dx) as f32 / dock_scale;
+                let local_dy = (cy - dy) as f32 / dock_scale;
+                let dock_rect = self.dock.dock_rect(Rect::new(0.0, 0.0, dw_dip, dh_dip));
+                let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
+                self.dock_surface.set_click_through(!over_dock);
+            } else {
+                self.dock_surface.set_click_through(true);
+            }
         }
+        self.drawer_surface
+            .set_click_through(!self.ai_drawer.visible);
+        self.settings_surface
+            .set_click_through(!self.settings.visible);
     }
 
     fn handle_surface_event(&mut self, ev: SurfaceEvent, ctrl_hwnd: HWND) {
@@ -330,14 +379,15 @@ impl AppShell {
         }
 
         if ev.hwnd == self.dock_surface.hwnd().0 as isize {
-            let (sw, sh) = self.dock_surface.size();
-            let rect = Rect::new(0.0, 0.0, sw as f32, sh as f32);
+            let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+            let (dw, dh) = self.dock_surface.dip_size();
+            let rect = Rect::new(0.0, 0.0, dw, dh);
             match ev.kind {
                 SurfaceEventKind::MouseMove { x, y } => {
-                    self.dock.set_hovered_at(x, y, rect);
+                    self.dock.set_hovered_at(x / scale, y / scale, rect);
                 }
                 SurfaceEventKind::LeftButtonUp { x, y } => {
-                    if let Some(idx) = self.dock.hit_test(x, y, rect) {
+                    if let Some(idx) = self.dock.hit_test(x / scale, y / scale, rect) {
                         if let Some(item) = self.dock.items().get(idx).cloned() {
                             launch_dock_item(&item);
                         }
@@ -350,108 +400,38 @@ impl AppShell {
         }
 
         if ev.hwnd == self.settings_surface.hwnd().0 as isize {
-            if let SurfaceEventKind::LeftButtonUp { x, y } = ev.kind {
-                if let Some(ctrl) = self.settings.hit_test(x, y) {
-                    self.settings.apply_control(ctrl);
-                    match ctrl {
-                        SettingsControl::CycleNotchMode => match self.settings.state.notch_mode {
-                            NotchMode::Top => {
-                                self.notch.set_hidden(false);
-                                self.apply_notch_edge(NotchEdge::Top);
-                            }
-                            NotchMode::Left => {
-                                self.notch.set_hidden(false);
-                                self.apply_notch_edge(NotchEdge::Left);
-                            }
-                            NotchMode::Right => {
-                                self.notch.set_hidden(false);
-                                self.apply_notch_edge(NotchEdge::Right);
-                            }
-                            NotchMode::Hidden => {
-                                self.notch.set_hidden(true);
-                            }
-                        },
-                        SettingsControl::ToggleDock => {
-                            let enabled = self.settings.state.dock_enabled;
-                            self.dock.set_visible(enabled);
-                            if enabled {
-                                self.dock_surface.show();
-                                os_shell::hide_taskbar();
-                            } else {
-                                self.dock_surface.hide();
-                                os_shell::restore_taskbar();
-                            }
-                        }
-                        SettingsControl::ToggleHimeAi => {
-                            if self.settings.state.hime_ai_enabled {
-                                let _ = self.module_mgr.spawn();
-                            } else {
-                                let _ = self.module_mgr.stop();
-                            }
-                        }
-                        SettingsControl::TestAndSaveProfile => {
-                            let cfg = self.settings.state.active_profile.clone();
-                            let ipc = Arc::clone(&self.ipc);
-                            let tx = self.ipc_tx.clone();
-                            std::thread::spawn(move || {
-                                let upsert = AiProfileUpsertParams {
-                                    contract_version: IPC_CONTRACT_VERSION.to_string(),
-                                    id: cfg.id.clone(),
-                                    name: cfg.name,
-                                    adapter_kind: cfg.preset.adapter_kind().to_string(),
-                                    base_url: cfg.base_url,
-                                    default_model: cfg.model,
-                                    priority: 100,
-                                    enabled: true,
-                                    api_key: None,
-                                };
-                                let res = ipc
-                                    .upsert_profile(upsert)
-                                    .and_then(|_| ipc.test_profile(&cfg.id))
-                                    .map(|r| r.message);
-                                let _ = tx.send(IpcBgResult::ProfileTest(res));
-                            });
-                        }
-                        SettingsControl::Close => {
-                            self.settings_surface.hide();
-                        }
-                        SettingsControl::ToggleDockWinNumber
-                        | SettingsControl::ToggleNotifSuppression
-                        | SettingsControl::CycleProviderPreset => {}
+            let scale = (self.settings_surface.dpi() / 96.0).max(0.5);
+            match ev.kind {
+                SurfaceEventKind::LeftButtonDown { .. } => {
+                    if self.settings.visible {
+                        os_shell::focus_window(self.settings_surface.hwnd());
                     }
-                    self.ensure_fast_timer(ctrl_hwnd);
                 }
+                SurfaceEventKind::LeftButtonUp { x, y } => {
+                    if let Some(ctrl) = self.settings.hit_test(x / scale, y / scale) {
+                        self.apply_settings_control(ctrl, ctrl_hwnd);
+                    } else if self.settings.visible {
+                        os_shell::focus_window(self.settings_surface.hwnd());
+                    }
+                }
+                SurfaceEventKind::MouseMove { .. } | SurfaceEventKind::DropFiles { .. } => {}
             }
             return;
         }
 
         if ev.hwnd == self.drawer_surface.hwnd().0 as isize {
+            let scale = (self.drawer_surface.dpi() / 96.0).max(0.5);
             match ev.kind {
+                SurfaceEventKind::LeftButtonDown { .. } => {
+                    if self.ai_drawer.visible {
+                        os_shell::focus_window(self.drawer_surface.hwnd());
+                    }
+                }
                 SurfaceEventKind::LeftButtonUp { x, y } => {
-                    if let Some(action) = self.ai_drawer.hit_test(x, y) {
-                        match action {
-                            DrawerAction::Close => {
-                                self.ai_drawer.close();
-                                self.drawer_surface.hide();
-                            }
-                            DrawerAction::ClearAttachments => {
-                                self.ai_drawer.clear_attachments();
-                                self.shelf.clear();
-                                let _ = self.shelf.save();
-                            }
-                            DrawerAction::SendPrompt => {
-                                self.dispatch_drawer_prompt();
-                            }
-                            DrawerAction::Approve(id) => {
-                                self.ai_drawer.resolve_approval(&id, true);
-                                self.dispatch_approval(id, true);
-                            }
-                            DrawerAction::Deny(id) => {
-                                self.ai_drawer.resolve_approval(&id, false);
-                                self.dispatch_approval(id, false);
-                            }
-                        }
-                        self.ensure_fast_timer(ctrl_hwnd);
+                    if let Some(action) = self.ai_drawer.hit_test(x / scale, y / scale) {
+                        self.apply_drawer_action(action, ctrl_hwnd);
+                    } else if self.ai_drawer.visible {
+                        os_shell::focus_window(self.drawer_surface.hwnd());
                     }
                 }
                 SurfaceEventKind::DropFiles { wparam } => {
@@ -462,9 +442,144 @@ impl AppShell {
                         self.ensure_fast_timer(ctrl_hwnd);
                     }
                 }
-                SurfaceEventKind::MouseMove { .. } | SurfaceEventKind::LeftButtonDown { .. } => {}
+                SurfaceEventKind::MouseMove { .. } => {}
             }
         }
+    }
+
+    fn apply_settings_control(&mut self, ctrl: SettingsControl, ctrl_hwnd: HWND) {
+        self.settings.apply_control(ctrl);
+        match ctrl {
+            SettingsControl::CycleNotchMode => match self.settings.state.notch_mode {
+                NotchMode::Top => {
+                    self.notch.set_hidden(false);
+                    self.apply_notch_edge(NotchEdge::Top);
+                }
+                NotchMode::Left => {
+                    self.notch.set_hidden(false);
+                    self.apply_notch_edge(NotchEdge::Left);
+                }
+                NotchMode::Right => {
+                    self.notch.set_hidden(false);
+                    self.apply_notch_edge(NotchEdge::Right);
+                }
+                NotchMode::Hidden => {
+                    self.notch.set_hidden(true);
+                }
+            },
+            SettingsControl::ToggleDock => {
+                let enabled = self.settings.state.dock_enabled;
+                self.dock.set_visible(enabled);
+                if enabled {
+                    self.dock_surface.show();
+                    os_shell::hide_taskbar();
+                } else {
+                    self.dock_surface.hide();
+                    os_shell::restore_taskbar();
+                }
+            }
+            SettingsControl::ToggleHimeAi => {
+                if self.settings.state.hime_ai_enabled {
+                    let _ = self.module_mgr.spawn();
+                } else {
+                    let _ = self.module_mgr.stop();
+                }
+            }
+            SettingsControl::TestAndSaveProfile => {
+                let cfg = self.settings.state.active_profile.clone();
+                let ipc = Arc::clone(&self.ipc);
+                let tx = self.ipc_tx.clone();
+                std::thread::spawn(move || {
+                    let upsert = AiProfileUpsertParams {
+                        contract_version: IPC_CONTRACT_VERSION.to_string(),
+                        id: cfg.id.clone(),
+                        name: cfg.name,
+                        adapter_kind: cfg.preset.adapter_kind().to_string(),
+                        base_url: cfg.base_url,
+                        default_model: cfg.model,
+                        priority: 100,
+                        enabled: true,
+                        api_key: None,
+                    };
+                    let res = ipc
+                        .upsert_profile(upsert)
+                        .and_then(|_| ipc.test_profile(&cfg.id))
+                        .map(|r| r.message);
+                    let _ = tx.send(IpcBgResult::ProfileTest(res));
+                });
+            }
+            SettingsControl::Close => {
+                os_shell::set_window_focusable(self.settings_surface.hwnd(), false);
+                self.settings_surface.hide();
+            }
+            SettingsControl::ToggleDockWinNumber
+            | SettingsControl::ToggleNotifSuppression
+            | SettingsControl::CycleProviderPreset => {}
+        }
+        self.ensure_fast_timer(ctrl_hwnd);
+    }
+
+    fn apply_drawer_action(&mut self, action: DrawerAction, ctrl_hwnd: HWND) {
+        match action {
+            DrawerAction::Close => {
+                self.ai_drawer.close();
+                os_shell::set_window_focusable(self.drawer_surface.hwnd(), false);
+                self.drawer_surface.hide();
+            }
+            DrawerAction::ClearAttachments => {
+                self.ai_drawer.clear_attachments();
+                self.shelf.clear();
+                let _ = self.shelf.save();
+            }
+            DrawerAction::SendPrompt => {
+                self.dispatch_drawer_prompt();
+            }
+            DrawerAction::Approve(id) => {
+                self.ai_drawer.resolve_approval(&id, true);
+                self.dispatch_approval(id, true);
+            }
+            DrawerAction::Deny(id) => {
+                self.ai_drawer.resolve_approval(&id, false);
+                self.dispatch_approval(id, false);
+            }
+        }
+        self.ensure_fast_timer(ctrl_hwnd);
+    }
+
+    fn handle_window_key_message(&mut self, msg: &MSG, ctrl_hwnd: HWND) -> bool {
+        if msg.hwnd == self.drawer_surface.hwnd() && self.ai_drawer.visible {
+            let action = match msg.message {
+                WM_KEYDOWN => self.ai_drawer.handle_key_down(msg.wParam.0 as u32),
+                WM_CHAR => char::from_u32(msg.wParam.0 as u32)
+                    .and_then(|ch| self.ai_drawer.handle_char(ch)),
+                _ => None,
+            };
+            if let Some(act) = action {
+                self.apply_drawer_action(act, ctrl_hwnd);
+            } else {
+                self.ensure_fast_timer(ctrl_hwnd);
+            }
+            self.render_all();
+            return true;
+        }
+
+        if msg.hwnd == self.settings_surface.hwnd() && self.settings.visible {
+            let ctrl = match msg.message {
+                WM_KEYDOWN => self.settings.handle_key_down(msg.wParam.0 as u32),
+                WM_CHAR => char::from_u32(msg.wParam.0 as u32)
+                    .and_then(|ch| self.settings.handle_char(ch)),
+                _ => None,
+            };
+            if let Some(c) = ctrl {
+                self.apply_settings_control(c, ctrl_hwnd);
+            } else {
+                self.ensure_fast_timer(ctrl_hwnd);
+            }
+            self.render_all();
+            return true;
+        }
+
+        false
     }
 
     fn dispatch_drawer_prompt(&mut self) {
@@ -525,8 +640,13 @@ impl AppShell {
                 }
                 self.ai_drawer.toggle();
                 if self.ai_drawer.visible {
+                    self.drawer_surface.set_click_through(false);
+                    os_shell::set_window_focusable(self.drawer_surface.hwnd(), true);
                     self.drawer_surface.show();
+                    os_shell::focus_window(self.drawer_surface.hwnd());
+                    self.render_all();
                 } else {
+                    os_shell::set_window_focusable(self.drawer_surface.hwnd(), false);
                     self.drawer_surface.hide();
                 }
             }
@@ -544,6 +664,8 @@ impl AppShell {
                 if next {
                     self.dock_surface.show();
                     os_shell::hide_taskbar();
+                    self.update_surface_click_through();
+                    self.render_all();
                 } else {
                     self.dock_surface.hide();
                     os_shell::restore_taskbar();
@@ -552,8 +674,13 @@ impl AppShell {
             HotkeyAction::ToggleShortcuts => {
                 self.settings.toggle();
                 if self.settings.visible {
+                    self.settings_surface.set_click_through(false);
+                    os_shell::set_window_focusable(self.settings_surface.hwnd(), true);
                     self.settings_surface.show();
+                    os_shell::focus_window(self.settings_surface.hwnd());
+                    self.render_all();
                 } else {
+                    os_shell::set_window_focusable(self.settings_surface.hwnd(), false);
                     self.settings_surface.hide();
                 }
             }
@@ -633,6 +760,14 @@ impl AppShell {
         animating |= self.ai_drawer.tick(dt);
 
         self.render_all();
+        self.tick_count = self.tick_count.saturating_add(1);
+        if self.tick_count == 12 {
+            self.log_tick_diag("tick_3s");
+            os_shell::ensure_topmost(self.notch_surface.hwnd());
+            if self.dock.visible {
+                os_shell::ensure_topmost(self.dock_surface.hwnd());
+            }
+        }
         if animating {
             self.ensure_fast_timer(ctrl_hwnd);
         } else if self.fast_timer_active {
@@ -656,36 +791,45 @@ impl AppShell {
         self.fast_timer_active = false;
     }
 
+    fn render_surface<F>(&self, name: &str, surface: &NativeSurface, draw: F)
+    where
+        F: FnOnce(&NativeSurface) -> windows::core::Result<()>,
+    {
+        surface.begin_draw();
+        if let Err(err) = draw(surface) {
+            log_render_error(name, "render", &err);
+        }
+        if let Err(err) = surface.end_draw_and_present() {
+            log_render_error(name, "present", &err);
+        }
+    }
+
     fn render_all(&self) {
-        self.notch_surface.begin_draw();
-        let _ = self.notch.render(&self.notch_surface);
-        let _ = self.notch_surface.end_draw_and_present();
+        self.render_surface("HimeNotch", &self.notch_surface, |s| self.notch.render(s));
 
         if self.dock.visible {
-            self.dock_surface.begin_draw();
-            let _ = self.dock.render(&self.dock_surface);
-            let _ = self.dock_surface.end_draw_and_present();
+            self.render_surface("HimeDock", &self.dock_surface, |s| self.dock.render(s));
         }
 
         if self.overlay.is_visible() {
             self.overlay_surface.show();
-            self.overlay_surface.begin_draw();
-            let _ = self.overlay.render(&self.overlay_surface);
-            let _ = self.overlay_surface.end_draw_and_present();
+            self.render_surface("HimeOverlay", &self.overlay_surface, |s| {
+                self.overlay.render(s)
+            });
         } else {
             self.overlay_surface.hide();
         }
 
         if self.settings.visible || self.settings.is_animating() {
-            self.settings_surface.begin_draw();
-            let _ = self.settings.render(&self.settings_surface);
-            let _ = self.settings_surface.end_draw_and_present();
+            self.render_surface("HimeSettings", &self.settings_surface, |s| {
+                self.settings.render(s)
+            });
         }
 
         if self.ai_drawer.visible || self.ai_drawer.is_animating() {
-            self.drawer_surface.begin_draw();
-            let _ = self.ai_drawer.render(&self.drawer_surface);
-            let _ = self.drawer_surface.end_draw_and_present();
+            self.render_surface("HimeAiDrawer", &self.drawer_surface, |s| {
+                self.ai_drawer.render(s)
+            });
         }
     }
 
@@ -700,6 +844,37 @@ impl AppShell {
             }
         }
     }
+}
+
+fn log_diag(msg: &str) {
+    use std::io::Write;
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(base).join("Hime");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("native-render.log"))
+    {
+        let _ = writeln!(file, "{msg}");
+    }
+}
+
+fn log_render_error(surface: &str, stage: &str, err: &windows::core::Error) {
+    log_diag(&format!("[{surface}] {stage} failed: {err:?}"));
+}
+
+fn dock_surface_bounds(screen: os_shell::ScreenBounds) -> (i32, i32, u32, u32) {
+    let w = 720u32;
+    let h = 96u32;
+    (
+        screen.x + (screen.width - w as i32) / 2,
+        screen.y + screen.height - h as i32 - 8,
+        w,
+        h,
+    )
 }
 
 fn notch_surface_bounds(edge: NotchEdge, screen: os_shell::ScreenBounds) -> (i32, i32, u32, u32) {
@@ -804,6 +979,16 @@ fn main() {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
             let _ = TranslateMessage(&msg);
+            if msg.message == WM_KEYDOWN || msg.message == WM_CHAR {
+                let handled = APP_SHELL.with(|cell| {
+                    cell.borrow_mut()
+                        .as_mut()
+                        .is_some_and(|shell| shell.handle_window_key_message(&msg, ctrl_hwnd))
+                });
+                if handled {
+                    continue;
+                }
+            }
             DispatchMessageW(&msg);
         }
         let _ = KillTimer(Some(ctrl_hwnd), TIMER_ANIM_ID);

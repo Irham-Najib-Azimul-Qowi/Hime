@@ -7,27 +7,20 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
-use windows::core::{w, Error, HRESULT, Interface, PCWSTR, Result};
+use windows::core::{s, w, HRESULT, PCWSTR, Result};
 use windows_numerics::Vector2 as D2D_POINT_2F;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
     D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1PathGeometry,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
-};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-};
-use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -35,22 +28,16 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
-use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn, ValidateRect};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, PostMessageW, RegisterClassExW,
-    SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
@@ -150,26 +137,20 @@ impl Default for HimeExpression {
     }
 }
 
-/// GPU-composited borderless topmost transparent window backed by
-/// Direct3D11 + Direct2D + DirectWrite + DirectComposition.
+/// Hardware-accelerated borderless topmost window backed by
+/// Direct2D `ID2D1HwndRenderTarget` + DirectWrite + `SetWindowRgn` rounded clipping.
 pub struct NativeSurface {
     hwnd: HWND,
     width: u32,
     height: u32,
+    dpi: f32,
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
-    _d3d_device: ID3D11Device,
-    _d2d_device: ID2D1Device,
-    d2d_context: ID2D1DeviceContext,
-    swap_chain: IDXGISwapChain1,
-    dcomp_device: IDCompositionDevice,
-    _dcomp_target: IDCompositionTarget,
-    _dcomp_visual: IDCompositionVisual,
-    target_bitmap: Option<ID2D1Bitmap1>,
+    d2d_target: ID2D1HwndRenderTarget,
 }
 
 impl NativeSurface {
-    /// Creates a new borderless topmost transparent DirectComposition surface window.
+    /// Creates a new borderless topmost Direct2D HWND render target window.
     pub fn new(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
@@ -180,10 +161,7 @@ impl NativeSurface {
             register_window_class(hinstance);
 
             let wide_title = to_wide_null(title);
-            let ex_style = WS_EX_LAYERED
-                | WS_EX_TOPMOST
-                | WS_EX_TOOLWINDOW
-                | WS_EX_NOREDIRECTIONBITMAP;
+            let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             let hwnd = CreateWindowExW(
                 ex_style,
                 WINDOW_CLASS_NAME,
@@ -199,76 +177,38 @@ impl NativeSurface {
                 None,
             )?;
 
-            // Ensure layered window alpha is full so DirectComposition controls per-pixel alpha.
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-
-            let mut d3d_device: Option<ID3D11Device> = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HINSTANCE::default().into(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut d3d_device),
-                None,
-                None,
-            )?;
-            let d3d_device = d3d_device.ok_or_else(Error::from_win32)?;
-            let dxgi_device: IDXGIDevice = d3d_device.cast()?;
+            let dpi = get_window_dpi(hwnd);
 
             let d2d_factory: ID2D1Factory1 =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let d2d_device: ID2D1Device = d2d_factory.CreateDevice(&dxgi_device)?;
-            let d2d_context: ID2D1DeviceContext =
-                d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-
             let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
-            let dxgi_adapter = dxgi_device.GetAdapter()?;
-            let dxgi_factory: IDXGIFactory2 = dxgi_adapter.GetParent()?;
-            let sc_desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: width,
-                Height: height,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                Stereo: false.into(),
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
+            let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
                 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                Scaling: Default::default(),
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-                Flags: 0,
+                dpiX: dpi,
+                dpiY: dpi,
+                ..Default::default()
             };
-            let swap_chain = dxgi_factory.CreateSwapChainForComposition(&dxgi_device, &sc_desc, None)?;
+            let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+                hwnd,
+                pixelSize: D2D_SIZE_U { width, height },
+                presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+            };
+            let d2d_target = d2d_factory.CreateHwndRenderTarget(&rt_props, &hwnd_props)?;
 
-            let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
-            let dcomp_target = dcomp_device.CreateTargetForHwnd(hwnd, true)?;
-            let dcomp_visual = dcomp_device.CreateVisual()?;
-            dcomp_visual.SetContent(&swap_chain)?;
-            dcomp_target.SetRoot(&dcomp_visual)?;
-            dcomp_device.Commit()?;
-
-            let mut surface = Self {
+            Ok(Self {
                 hwnd,
                 width,
                 height,
+                dpi,
                 d2d_factory,
                 dwrite_factory,
-                _d3d_device: d3d_device,
-                _d2d_device: d2d_device,
-                d2d_context,
-                swap_chain,
-                dcomp_device,
-                _dcomp_target: dcomp_target,
-                _dcomp_visual: dcomp_visual,
-                target_bitmap: None,
-            };
-            surface.bind_swap_chain_bitmap()?;
-            Ok(surface)
+                d2d_target,
+            })
         }
     }
 
@@ -280,6 +220,16 @@ impl NativeSurface {
         (self.width, self.height)
     }
 
+    pub fn dpi(&self) -> f32 {
+        self.dpi
+    }
+
+    /// Returns the logical surface size in DIPs adjusted for the window's DPI.
+    pub fn dip_size(&self) -> (f32, f32) {
+        let scale = (self.dpi / 96.0).max(0.5);
+        (self.width as f32 / scale, self.height as f32 / scale)
+    }
+
     pub fn d2d_factory(&self) -> &ID2D1Factory1 {
         &self.d2d_factory
     }
@@ -288,14 +238,23 @@ impl NativeSurface {
         &self.dwrite_factory
     }
 
-    pub fn device_context(&self) -> &ID2D1DeviceContext {
-        &self.d2d_context
+    pub fn render_target(&self) -> &ID2D1HwndRenderTarget {
+        &self.d2d_target
     }
 
-    /// Shows the surface without stealing keyboard focus.
+    /// Shows the surface without stealing keyboard focus and ensures topmost Z-order.
     pub fn show(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
         }
     }
 
@@ -310,12 +269,15 @@ impl NativeSurface {
     pub fn set_click_through(&self, enabled: bool) {
         unsafe {
             let style = GetWindowLongW(self.hwnd, GWL_EXSTYLE);
+            let transparent = WS_EX_TRANSPARENT.0 as i32;
             let new_style = if enabled {
-                style | WS_EX_TRANSPARENT.0 as i32
+                style | transparent
             } else {
-                style & !(WS_EX_TRANSPARENT.0 as i32)
+                style & !transparent
             };
-            SetWindowLongW(self.hwnd, GWL_EXSTYLE, new_style);
+            if new_style != style {
+                SetWindowLongW(self.hwnd, GWL_EXSTYLE, new_style);
+            }
         }
     }
 
@@ -355,20 +317,35 @@ impl NativeSurface {
         }
     }
 
-    /// Begins a Direct2D frame and clears the swap chain to transparent.
-    pub fn begin_draw(&self) {
+    /// Clips the window to a rounded rectangle in DIPs so areas outside the pill are transparent.
+    pub fn set_rounded_region(&self, rect: Rect, radius: f32) {
+        let scale = (self.dpi / 96.0).max(0.5);
+        let left = (rect.x * scale).round() as i32;
+        let top = (rect.y * scale).round() as i32;
+        let right = ((rect.x + rect.width) * scale).round() as i32 + 1;
+        let bottom = ((rect.y + rect.height) * scale).round() as i32 + 1;
+        let diam = ((radius * 2.0) * scale).round().max(0.0) as i32;
         unsafe {
-            self.d2d_context.BeginDraw();
-            self.d2d_context.Clear(Some(&TRANSPARENT.to_d2d()));
+            let rgn = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
+            if !rgn.is_invalid() {
+                // On success, the system owns `rgn` and deletes it automatically.
+                let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+            }
         }
     }
 
-    /// Ends the Direct2D frame, presents the swap chain, and commits DirectComposition.
+    /// Begins a Direct2D frame and clears the HWND render target.
+    pub fn begin_draw(&self) {
+        unsafe {
+            self.d2d_target.BeginDraw();
+            self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
+        }
+    }
+
+    /// Ends the Direct2D frame and presents directly to the HWND.
     pub fn end_draw_and_present(&self) -> Result<()> {
         unsafe {
-            self.d2d_context.EndDraw(None, None)?;
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
-            self.dcomp_device.Commit()?;
+            self.d2d_target.EndDraw(None, None)?;
             Ok(())
         }
     }
@@ -382,7 +359,7 @@ impl NativeSurface {
                 radiusX: radius,
                 radiusY: radius,
             };
-            self.d2d_context.FillRoundedRectangle(&rr, &brush);
+            self.d2d_target.FillRoundedRectangle(&rr, &brush);
             Ok(())
         }
     }
@@ -402,7 +379,7 @@ impl NativeSurface {
                 radiusX: radius,
                 radiusY: radius,
             };
-            self.d2d_context
+            self.d2d_target
                 .DrawRoundedRectangle(&rr, &brush, stroke_width, None);
             Ok(())
         }
@@ -422,7 +399,7 @@ impl NativeSurface {
             let format = self.create_text_format(font_size, align)?;
             let wide: Vec<u16> = text.encode_utf16().collect();
             let d2d_rect = rect.to_d2d();
-            self.d2d_context.DrawText(
+            self.d2d_target.DrawText(
                 &wide,
                 &format,
                 &d2d_rect,
@@ -446,11 +423,11 @@ impl NativeSurface {
 
             // Left concave ear
             let left_geo = self.build_ear_geometry(rect.x, rect.y, r, true)?;
-            self.d2d_context.FillGeometry(&left_geo, &brush, None);
+            self.d2d_target.FillGeometry(&left_geo, &brush, None);
 
             // Right concave ear
             let right_geo = self.build_ear_geometry(rect.x + rect.width, rect.y, r, false)?;
-            self.d2d_context.FillGeometry(&right_geo, &brush, None);
+            self.d2d_target.FillGeometry(&right_geo, &brush, None);
 
             Ok(())
         }
@@ -495,7 +472,7 @@ impl NativeSurface {
             if blink > 0.9 || expression == HimeExpression::Offline {
                 let half_w = 3.2 * s;
                 for ex in [left_x, right_x] {
-                    self.d2d_context.DrawLine(
+                    self.d2d_target.DrawLine(
                         pt(ex - half_w, center_y),
                         pt(ex + half_w, center_y),
                         &brush,
@@ -510,7 +487,7 @@ impl NativeSurface {
             match expression {
                 HimeExpression::Netral => {
                     for ex in [left_x, right_x] {
-                        self.d2d_context.FillEllipse(
+                        self.d2d_target.FillEllipse(
                             &D2D1_ELLIPSE {
                                 point: pt(ex, center_y),
                                 radiusX: 3.4 * s,
@@ -518,7 +495,7 @@ impl NativeSurface {
                             },
                             &glow_brush,
                         );
-                        self.d2d_context.FillEllipse(
+                        self.d2d_target.FillEllipse(
                             &D2D1_ELLIPSE {
                                 point: pt(ex, center_y),
                                 radiusX: 2.2 * s,
@@ -536,7 +513,7 @@ impl NativeSurface {
                             pt(ex, center_y - 3.2 * s * open_factor),
                             pt(ex + 3.2 * s, center_y + 1.2 * s),
                         )?;
-                        self.d2d_context
+                        self.d2d_target
                             .DrawGeometry(&arc, &brush, 2.0 * s, Some(&round_cap));
                     }
                 }
@@ -553,7 +530,7 @@ impl NativeSurface {
                             radiusX: 1.4 * s,
                             radiusY: 1.4 * s,
                         };
-                        self.d2d_context.FillRoundedRectangle(&rr, &brush);
+                        self.d2d_target.FillRoundedRectangle(&rr, &brush);
                     }
                 }
                 HimeExpression::Khawatir => {
@@ -568,9 +545,9 @@ impl NativeSurface {
                         pt(right_x - 0.5 * s, center_y - 1.2 * s * open_factor),
                         pt(right_x + 3.0 * s, center_y + 1.6 * s),
                     )?;
-                    self.d2d_context
+                    self.d2d_target
                         .DrawGeometry(&left_arc, &brush, 2.0 * s, Some(&round_cap));
-                    self.d2d_context
+                    self.d2d_target
                         .DrawGeometry(&right_arc, &brush, 2.0 * s, Some(&round_cap));
                 }
                 HimeExpression::Waspada => {
@@ -581,9 +558,9 @@ impl NativeSurface {
                             radiusX: 3.4 * s,
                             radiusY: (3.8 * s * open_factor).max(0.8),
                         };
-                        self.d2d_context.FillEllipse(&outer, &glow_brush);
-                        self.d2d_context.DrawEllipse(&outer, &brush, 1.5 * s, None);
-                        self.d2d_context.FillEllipse(
+                        self.d2d_target.FillEllipse(&outer, &glow_brush);
+                        self.d2d_target.DrawEllipse(&outer, &brush, 1.5 * s, None);
+                        self.d2d_target.FillEllipse(
                             &D2D1_ELLIPSE {
                                 point: pt(ex, center_y),
                                 radiusX: 1.4 * s,
@@ -601,7 +578,7 @@ impl NativeSurface {
 
     unsafe fn create_brush(&self, color: Color) -> Result<ID2D1SolidColorBrush> {
         let d2d_color: D2D1_COLOR_F = color.to_d2d();
-        self.d2d_context.CreateSolidColorBrush(&d2d_color, None)
+        self.d2d_target.CreateSolidColorBrush(&d2d_color, None)
     }
 
     unsafe fn create_text_format(
@@ -681,51 +658,19 @@ impl NativeSurface {
 
     fn resize_swap_chain(&mut self, width: u32, height: u32) -> Result<()> {
         unsafe {
-            self.d2d_context.SetTarget(None);
-            self.target_bitmap = None;
-            self.swap_chain.ResizeBuffers(
-                2,
-                width,
-                height,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )?;
+            self.d2d_target.Resize(&D2D_SIZE_U { width, height })?;
             self.width = width;
             self.height = height;
-            self.bind_swap_chain_bitmap()
+            self.dpi = get_window_dpi(self.hwnd);
+            self.d2d_target.SetDpi(self.dpi, self.dpi);
+            Ok(())
         }
-    }
-
-    unsafe fn bind_swap_chain_bitmap(&mut self) -> Result<()> {
-        let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
-        let props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            ..Default::default()
-        };
-        let bitmap = self
-            .d2d_context
-            .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
-        self.d2d_context.SetTarget(&bitmap);
-        self.target_bitmap = Some(bitmap);
-        let _ = D2D_SIZE_U {
-            width: self.width,
-            height: self.height,
-        };
-        Ok(())
     }
 }
 
 impl Drop for NativeSurface {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.d2d_context.SetTarget(None);
-            self.target_bitmap = None;
             if !self.hwnd.0.is_null() {
                 let _ = DestroyWindow(self.hwnd);
             }
@@ -792,12 +737,32 @@ unsafe extern "system" fn surface_wnd_proc(
         return LRESULT(0);
     }
 
+    if msg == WM_PAINT {
+        let _ = ValidateRect(Some(hwnd), None);
+        return LRESULT(0);
+    }
+
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 #[inline]
 const fn pt(x: f32, y: f32) -> D2D_POINT_2F {
     D2D_POINT_2F { X: x, Y: y }
+}
+
+fn get_window_dpi(hwnd: HWND) -> f32 {
+    unsafe {
+        if let Ok(user32) = GetModuleHandleW(w!("user32.dll")) {
+            if let Some(proc_addr) = GetProcAddress(user32, s!("GetDpiForWindow")) {
+                let func: unsafe extern "system" fn(HWND) -> u32 = std::mem::transmute(proc_addr);
+                let dpi = func(hwnd);
+                if dpi >= 48 {
+                    return dpi as f32;
+                }
+            }
+        }
+    }
+    96.0
 }
 
 fn to_wide_null(s: &str) -> Vec<u16> {
@@ -831,5 +796,39 @@ mod tests {
             assert_eq!(expr, parsed);
         }
         assert_eq!(theme::CORNER_RADIUS, 18.0);
+    }
+
+    #[test]
+    fn native_surface_uses_hwnd_render_target_and_renders() {
+        let mut surface = match NativeSurface::new("HimeTestSurface", -2000, -2000, 160, 48) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let ex_style = unsafe { GetWindowLongW(surface.hwnd(), GWL_EXSTYLE) } as u32;
+        assert_ne!(ex_style & WS_EX_TOPMOST.0, 0);
+        assert_ne!(ex_style & WS_EX_TOOLWINDOW.0, 0);
+        assert_ne!(ex_style & WS_EX_NOACTIVATE.0, 0);
+
+        surface.set_click_through(true);
+        let ct_style = unsafe { GetWindowLongW(surface.hwnd(), GWL_EXSTYLE) } as u32;
+        assert_ne!(ct_style & WS_EX_TRANSPARENT.0, 0);
+
+        surface.set_click_through(false);
+        let nct_style = unsafe { GetWindowLongW(surface.hwnd(), GWL_EXSTYLE) } as u32;
+        assert_eq!(nct_style & WS_EX_TRANSPARENT.0, 0);
+
+        surface.set_bounds(-2000, -2000, 540, 200).expect("set_bounds should resize target");
+        assert_eq!(surface.size(), (540, 200));
+
+        let notch = crate::notch::NotchView::default();
+        surface.begin_draw();
+        notch.render(&surface).expect("NotchView::render should succeed");
+        surface.end_draw_and_present().expect("notch end_draw_and_present");
+
+        let mut dock = crate::dock::DockBar::new();
+        dock.add_item(crate::dock::DockItem::new("term", "Terminal", "wt.exe", true));
+        surface.begin_draw();
+        dock.render(&surface).expect("DockBar::render should succeed");
+        surface.end_draw_and_present().expect("dock end_draw_and_present");
     }
 }

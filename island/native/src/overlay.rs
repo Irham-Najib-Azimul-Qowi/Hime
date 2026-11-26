@@ -138,9 +138,10 @@ impl OverlayHud {
             return Ok(());
         }
 
-        let (sw, sh) = surface.size();
-        let rect = self.computed_rect(sw as f32, sh as f32);
+        let (sw, sh) = surface.dip_size();
+        let rect = self.computed_rect(sw, sh);
 
+        surface.set_rounded_region(rect, CORNER_RADIUS);
         surface.fill_rounded_rect(rect, CORNER_RADIUS, GLASS_SURFACE.with_alpha(0.92 * alpha))?;
         surface.stroke_rounded_rect(
             rect,

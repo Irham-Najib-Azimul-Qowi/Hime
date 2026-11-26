@@ -233,10 +233,11 @@ impl DockBar {
             return Ok(());
         }
 
-        let (sw, sh) = surface.size();
-        let surface_rect = Rect::new(0.0, 0.0, sw as f32, sh as f32);
+        let (sw, sh) = surface.dip_size();
+        let surface_rect = Rect::new(0.0, 0.0, sw, sh);
         let dock = self.dock_rect(surface_rect);
 
+        surface.set_rounded_region(dock, CORNER_RADIUS);
         surface.fill_rounded_rect(dock, CORNER_RADIUS, GLASS_SURFACE.with_alpha(0.92 * alpha))?;
         surface.stroke_rounded_rect(
             dock,

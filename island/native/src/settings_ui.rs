@@ -169,6 +169,7 @@ pub enum SettingsControl {
 pub struct SettingsPanel {
     pub state: SettingsState,
     pub visible: bool,
+    pub selected_index: Option<usize>,
     open_spring: SpringValue,
     width: f32,
     height: f32,
@@ -179,6 +180,7 @@ impl SettingsPanel {
         Self {
             state: SettingsState::default(),
             visible: false,
+            selected_index: None,
             open_spring: SpringValue::snappy(0.0),
             width: 420.0,
             height: 440.0,
@@ -187,6 +189,9 @@ impl SettingsPanel {
 
     pub fn open(&mut self) {
         self.visible = true;
+        if self.selected_index.is_none() {
+            self.selected_index = Some(0);
+        }
         self.open_spring.set_target(1.0);
     }
 
@@ -241,6 +246,69 @@ impl SettingsPanel {
         }
     }
 
+    pub fn handle_key_down(&mut self, vk: u32) -> Option<SettingsControl> {
+        if !self.visible {
+            return None;
+        }
+        const VK_RETURN: u32 = 0x0D;
+        const VK_ESCAPE: u32 = 0x1B;
+        const VK_SPACE: u32 = 0x20;
+        const VK_UP: u32 = 0x26;
+        const VK_DOWN: u32 = 0x28;
+        const ROW_CONTROLS: [SettingsControl; 7] = [
+            SettingsControl::CycleNotchMode,
+            SettingsControl::ToggleDock,
+            SettingsControl::ToggleDockWinNumber,
+            SettingsControl::ToggleNotifSuppression,
+            SettingsControl::ToggleHimeAi,
+            SettingsControl::CycleProviderPreset,
+            SettingsControl::TestAndSaveProfile,
+        ];
+
+        match vk {
+            VK_ESCAPE => Some(SettingsControl::Close),
+            VK_UP => {
+                let next = match self.selected_index {
+                    Some(0) | None => ROW_CONTROLS.len() - 1,
+                    Some(i) => i - 1,
+                };
+                self.selected_index = Some(next);
+                None
+            }
+            VK_DOWN => {
+                let next = match self.selected_index {
+                    Some(i) => (i + 1) % ROW_CONTROLS.len(),
+                    None => 0,
+                };
+                self.selected_index = Some(next);
+                None
+            }
+            VK_RETURN | VK_SPACE => self
+                .selected_index
+                .and_then(|i| ROW_CONTROLS.get(i).copied()),
+            _ => None,
+        }
+    }
+
+    pub fn handle_char(&mut self, ch: char) -> Option<SettingsControl> {
+        if !self.visible {
+            return None;
+        }
+        // Allow quick model suffix editing when Custom preset is active and row 5/6 is selected.
+        if self.state.active_profile.preset == ProviderPreset::Custom {
+            match ch {
+                '\x08' => {
+                    self.state.active_profile.model.pop();
+                }
+                c if !c.is_control() => {
+                    self.state.active_profile.model.push(c);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn row_rects(&self) -> Vec<(SettingsControl, Rect)> {
         let pad = 20.0;
         let row_w = self.width - pad * 2.0;
@@ -286,6 +354,7 @@ impl SettingsPanel {
         }
 
         let panel_rect = Rect::new(0.0, 0.0, self.width, self.height * progress.max(0.2));
+        surface.set_rounded_region(panel_rect, 18.0);
         surface.fill_rounded_rect(panel_rect, 18.0, GLASS_SURFACE)?;
         surface.stroke_rounded_rect(panel_rect, 18.0, GLASS_BORDER, 1.0)?;
 
@@ -304,11 +373,16 @@ impl SettingsPanel {
             TextAlign::Center,
         )?;
 
+        let mut row_idx = 0usize;
         for (ctrl, rect) in self.row_rects() {
             if ctrl == SettingsControl::Close || rect.y + rect.height > panel_rect.height {
                 continue;
             }
             surface.fill_rounded_rect(rect, 10.0, SURFACE_ELEVATED)?;
+            if self.selected_index == Some(row_idx) {
+                surface.stroke_rounded_rect(rect, 10.0, ACCENT_CYAN, 1.2)?;
+            }
+            row_idx += 1;
             let (label, value, value_color) = match ctrl {
                 SettingsControl::CycleNotchMode => (
                     "Notch Mode",
@@ -440,6 +514,19 @@ mod tests {
             Some(SettingsControl::CycleNotchMode)
         );
         assert_eq!(panel.hit_test(390.0, 24.0), Some(SettingsControl::Close));
+    }
+
+    #[test]
+    fn keyboard_navigation_selects_and_activates_controls() {
+        let mut panel = SettingsPanel::new();
+        assert_eq!(panel.handle_key_down(0x1B), None);
+
+        panel.open();
+        assert_eq!(panel.selected_index, Some(0));
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 1 (ToggleDock)
+        assert_eq!(panel.selected_index, Some(1));
+        assert_eq!(panel.handle_key_down(0x0D), Some(SettingsControl::ToggleDock));
+        assert_eq!(panel.handle_key_down(0x1B), Some(SettingsControl::Close));
     }
 }
 

@@ -192,6 +192,43 @@ impl AiDrawer {
         out
     }
 
+    pub fn handle_key_down(&mut self, vk: u32) -> Option<DrawerAction> {
+        if !self.visible {
+            return None;
+        }
+        const VK_ESCAPE: u32 = 0x1B;
+        if vk == VK_ESCAPE {
+            self.close();
+            return Some(DrawerAction::Close);
+        }
+        None
+    }
+
+    pub fn handle_char(&mut self, ch: char) -> Option<DrawerAction> {
+        if !self.visible {
+            return None;
+        }
+        match ch {
+            '\r' | '\n' => {
+                if !self.draft_prompt.trim().is_empty() || !self.attachments.is_empty() {
+                    Some(DrawerAction::SendPrompt)
+                } else {
+                    None
+                }
+            }
+            '\x08' => {
+                self.draft_prompt.pop();
+                None
+            }
+            '\x1b' => None,
+            c if c.is_control() => None,
+            c => {
+                self.draft_prompt.push(c);
+                None
+            }
+        }
+    }
+
     pub fn hit_test(&self, x: f32, y: f32) -> Option<DrawerAction> {
         if !self.visible {
             return None;
@@ -233,6 +270,7 @@ impl AiDrawer {
         }
 
         let panel = Rect::new(0.0, 0.0, self.width, self.height * progress.max(0.2));
+        surface.set_rounded_region(panel, 18.0);
         surface.fill_rounded_rect(panel, 18.0, GLASS_SURFACE)?;
         surface.stroke_rounded_rect(panel, 18.0, GLASS_BORDER, 1.0)?;
 
@@ -342,10 +380,12 @@ impl AiDrawer {
         if panel.height >= 120.0 {
             let input_rect = Rect::new(20.0, self.height - 48.0, self.width - 116.0, 32.0);
             surface.fill_rounded_rect(input_rect, 10.0, SURFACE_ELEVATED)?;
+            let prompt_display;
             let prompt_text = if self.draft_prompt.is_empty() {
-                "Ask Hime AI..."
+                "Ask Hime AI... (type & press Enter)"
             } else {
-                self.draft_prompt.as_str()
+                prompt_display = format!("{}|", self.draft_prompt);
+                prompt_display.as_str()
             };
             let prompt_color = if self.draft_prompt.is_empty() {
                 TEXT_SECONDARY
@@ -429,5 +469,30 @@ mod tests {
 
         let updated = drawer.resolve_approval("apr-42", true).unwrap();
         assert_eq!(updated.status, ApprovalStatus::Approved);
+    }
+
+    #[test]
+    fn keyboard_input_updates_draft_and_handles_enter_backspace_escape() {
+        let mut drawer = AiDrawer::new();
+        // Ignored while hidden
+        assert_eq!(drawer.handle_char('a'), None);
+        assert!(drawer.draft_prompt.is_empty());
+
+        drawer.open();
+        assert_eq!(drawer.handle_char('h'), None);
+        assert_eq!(drawer.handle_char('i'), None);
+        assert_eq!(drawer.handle_char('!'), None);
+        assert_eq!(drawer.draft_prompt, "hi!");
+
+        // Backspace removes last char
+        assert_eq!(drawer.handle_char('\x08'), None);
+        assert_eq!(drawer.draft_prompt, "hi");
+
+        // Enter triggers SendPrompt
+        assert_eq!(drawer.handle_char('\r'), Some(DrawerAction::SendPrompt));
+
+        // Escape closes drawer
+        assert_eq!(drawer.handle_key_down(0x1B), Some(DrawerAction::Close));
+        assert!(!drawer.visible);
     }
 }

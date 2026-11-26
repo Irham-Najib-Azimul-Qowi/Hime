@@ -206,8 +206,8 @@ impl NotchView {
 
     /// Renders the notch onto `surface`.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
-        let (sw, sh) = surface.size();
-        let rect = self.computed_rect(sw as f32, sh as f32);
+        let (sw, sh) = surface.dip_size();
+        let rect = self.computed_rect(sw, sh);
 
         if self.is_hidden && self.width_spring.is_settled() && self.height_spring.is_settled() {
             let bar_color = if self.net.is_internet_down {
@@ -215,11 +215,13 @@ impl NotchView {
             } else {
                 ACCENT_CYAN.with_alpha(0.75)
             };
+            surface.set_rounded_region(rect, 1.5);
             surface.fill_rounded_rect(rect, 1.5, bar_color)?;
             return Ok(());
         }
 
         let radius = if self.is_hidden { 2.0 } else { CORNER_RADIUS };
+        surface.set_rounded_region(rect, radius);
         surface.fill_rounded_rect(rect, radius, NOTCH_SURFACE)?;
         surface.stroke_rounded_rect(rect, radius, GLASS_BORDER, 1.0)?;
 
@@ -231,7 +233,7 @@ impl NotchView {
             return Ok(());
         }
 
-        let inner = self.content_rect(sw as f32, sh as f32);
+        let inner = self.content_rect(sw, sh);
         match self.edge {
             NotchEdge::Top => self.render_top_contents(surface, rect, inner)?,
             NotchEdge::Left | NotchEdge::Right => self.render_side_contents(surface, rect, inner)?,

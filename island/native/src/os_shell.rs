@@ -25,12 +25,15 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ABM_GETSTATE, ABM_GETTASKBARPOS,
     ABM_SETSTATE, APPBARDATA, HDROP,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics, GetWindowLongA,
-    GetWindowRect, IsWindowVisible, SetLayeredWindowAttributes, SetWindowLongA, SetWindowPos,
-    ShowWindow, GWL_EXSTYLE, LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+    GetWindowLongW, GetWindowRect, IsWindowVisible, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongA, SetWindowLongW, SetWindowPos, ShowWindow,
+    GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_HIDEWINDOW, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TRANSPARENT,
 };
 
 use crate::d2d::Rect;
@@ -643,6 +646,45 @@ pub fn should_enable_click_through(
 pub fn enable_drag_drop(hwnd: HWND, accept: bool) {
     unsafe {
         DragAcceptFiles(hwnd, accept);
+    }
+}
+
+/// Toggles `WS_EX_NOACTIVATE` so an interactive surface (Drawer / Settings) can accept keyboard focus.
+pub fn set_window_focusable(hwnd: HWND, focusable: bool) {
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let no_activate = WS_EX_NOACTIVATE.0 as i32;
+        let new_style = if focusable {
+            style & !no_activate
+        } else {
+            style | no_activate
+        };
+        if new_style != style {
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, new_style);
+        }
+    }
+}
+
+/// Brings `hwnd` to the foreground and gives it keyboard focus for `WM_KEYDOWN` / `WM_CHAR`.
+pub fn focus_window(hwnd: HWND) {
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+    }
+}
+
+/// Re-asserts `HWND_TOPMOST` Z-order without activating or stealing focus.
+pub fn ensure_topmost(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
