@@ -12,6 +12,11 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::animation::SpringValue;
 use crate::d2d::{EdgeSide, HimeExpression, NativeSurface, Rect, TextAlign};
+use crate::notch_workspace::{
+    active_lyric_index, parse_lrc_lines, FocusHitAction, FocusSessionStatus, FocusWorkspaceState,
+    LrcLine, ProactiveBannerAction, ProactiveBannerState, TaskTabFilter, TasksHitAction,
+    TasksWorkspaceState, TranslateBannerAction, TranslateBannerState,
+};
 use crate::theme::{
     ACCENT_CYAN, CORNER_RADIUS, SAFE_PADDING, STATUS_ALERT, STATUS_SUCCESS, TEXT_PRIMARY,
 };
@@ -19,6 +24,8 @@ use crate::theme::{
 const HIDDEN_BAR_THICKNESS: f32 = 3.0;
 const TOP_COLLAPSED_WIDTH: f32 = 276.0;
 const TOP_ALERT_WIDTH: f32 = 344.0;
+const TOP_BANNER_WIDTH: f32 = 380.0;
+const TOP_BANNER_HEIGHT: f32 = 96.0;
 const TOP_COLLAPSED_HEIGHT: f32 = 36.0;
 const TOP_EXPANDED_WIDTH: f32 = 400.0;
 const TOP_EXPANDED_HEIGHT: f32 = 280.0;
@@ -27,6 +34,8 @@ const TOP_SHORTCUTS_HEIGHT: f32 = 280.0;
 const SIDE_COLLAPSED_WIDTH: f32 = 46.0;
 const SIDE_COLLAPSED_HEIGHT: f32 = 200.0;
 const SIDE_ALERT_HEIGHT: f32 = 256.0;
+const SIDE_BANNER_WIDTH: f32 = 300.0;
+const SIDE_BANNER_HEIGHT: f32 = 112.0;
 const SIDE_EXPANDED_WIDTH: f32 = 400.0;
 const SIDE_EXPANDED_HEIGHT: f32 = 300.0;
 const EAR_WIDTH: f32 = 13.0;
@@ -72,6 +81,8 @@ pub enum NotchPanel {
     Wifi,
     Shortcuts,
     Shelf,
+    Tasks,
+    Focus,
     HimeAi,
 }
 
@@ -85,6 +96,8 @@ impl NotchPanel {
             Self::Wifi => "Wi-Fi",
             Self::Shortcuts => "Keys",
             Self::Shelf => "Shelf",
+            Self::Tasks => "Tasks",
+            Self::Focus => "Focus",
             Self::HimeAi => "AI",
         }
     }
@@ -122,10 +135,27 @@ pub enum NotchAction {
     MusicNext,
     MusicToggleLyrics,
     MusicSeek(f32),
+    LyricsAdjustOffset(i64),
+    LyricsResetOffset,
     WifiConnect(String),
     WifiRefresh,
     OpenAiDrawer,
     ClearShelf,
+    TasksSelectTab(TaskTabFilter),
+    TasksToggleComplete(String),
+    TasksDelete(String),
+    TasksCyclePriority,
+    TasksQuickAdd(String),
+    FocusStart,
+    FocusComplete,
+    FocusSkip,
+    FocusEmergencyPause,
+    ProactiveAccept(String),
+    ProactiveDismiss(String),
+    ProactiveSnooze(String),
+    ProactiveOpenDrawer,
+    TranslateClose,
+    TranslateOpenDrawer,
 }
 
 /// Network throughput & connectivity state.
@@ -281,6 +311,8 @@ pub struct NotchView {
     pub music_position_ms: u64,
     pub music_duration_ms: u64,
     pub music_lrc_lines: Vec<String>,
+    pub music_synced_lrc: Vec<LrcLine>,
+    pub music_lyric_offset_ms: i64,
     pub music_active_lyric_idx: Option<usize>,
     pub music_show_lyrics: bool,
     pub ncm_center_alert: Option<String>,
@@ -307,6 +339,10 @@ pub struct NotchView {
     pub calendar_today_day: u8,
     pub pomodoro: PomodoroState,
     pub shelf_items: Vec<ShelfSummaryItem>,
+    pub tasks_ws: TasksWorkspaceState,
+    pub focus_ws: FocusWorkspaceState,
+    pub proactive_banner: ProactiveBannerState,
+    pub translate_banner: TranslateBannerState,
     pub visualizer_phase: f32,
     pub width_spring: SpringValue,
     pub height_spring: SpringValue,
@@ -323,7 +359,7 @@ impl NotchView {
     /// Creates a new collapsed `NotchView` anchored at `edge`.
     pub fn new(edge: NotchEdge) -> Self {
         let (today_year, today_month, today_day) = current_local_date();
-        let (w, h) = target_dimensions(edge, false, false, NotchPanel::Status, false);
+        let (w, h) = target_dimensions(edge, false, false, NotchPanel::Status, false, false);
         Self {
             edge,
             is_hidden: false,
@@ -342,6 +378,8 @@ impl NotchView {
             music_position_ms: 0,
             music_duration_ms: 0,
             music_lrc_lines: Vec::new(),
+            music_synced_lrc: Vec::new(),
+            music_lyric_offset_ms: 0,
             music_active_lyric_idx: None,
             music_show_lyrics: false,
             ncm_center_alert: None,
@@ -368,6 +406,10 @@ impl NotchView {
             calendar_today_day: today_day,
             pomodoro: PomodoroState::default(),
             shelf_items: Vec::new(),
+            tasks_ws: TasksWorkspaceState::default(),
+            focus_ws: FocusWorkspaceState::default(),
+            proactive_banner: ProactiveBannerState::default(),
+            translate_banner: TranslateBannerState::default(),
             visualizer_phase: 0.0,
             width_spring: SpringValue::snappy(w),
             height_spring: SpringValue::snappy(h),
@@ -447,6 +489,8 @@ impl NotchView {
             NotchPanel::Wifi,
             NotchPanel::Shortcuts,
             NotchPanel::Shelf,
+            NotchPanel::Tasks,
+            NotchPanel::Focus,
         ];
         if self.ai_enabled {
             panels.push(NotchPanel::HimeAi);
@@ -507,6 +551,80 @@ impl NotchView {
         self.music_active_lyric_idx = active_idx;
     }
 
+    pub fn set_music_synced_lrc(&mut self, lines: Vec<LrcLine>) {
+        self.music_synced_lrc = lines;
+        self.music_lrc_lines = self
+            .music_synced_lrc
+            .iter()
+            .map(|l| l.text.clone())
+            .collect();
+        self.music_active_lyric_idx = active_lyric_index(
+            &self.music_synced_lrc,
+            self.music_position_ms,
+            self.music_lyric_offset_ms,
+        );
+    }
+
+    pub fn set_music_raw_lrc(&mut self, raw_lrc: &str) {
+        self.set_music_synced_lrc(parse_lrc_lines(raw_lrc));
+    }
+
+    pub fn update_music_position(&mut self, position_ms: u64) {
+        self.music_position_ms = position_ms;
+        if !self.music_synced_lrc.is_empty() {
+            self.music_active_lyric_idx = active_lyric_index(
+                &self.music_synced_lrc,
+                self.music_position_ms,
+                self.music_lyric_offset_ms,
+            );
+        }
+    }
+
+    pub fn adjust_lyrics_offset(&mut self, delta_ms: i64) {
+        self.music_lyric_offset_ms = (self.music_lyric_offset_ms + delta_ms).clamp(-10_000, 10_000);
+        if !self.music_synced_lrc.is_empty() {
+            self.music_active_lyric_idx = active_lyric_index(
+                &self.music_synced_lrc,
+                self.music_position_ms,
+                self.music_lyric_offset_ms,
+            );
+        }
+    }
+
+    pub fn reset_lyrics_offset(&mut self) {
+        self.music_lyric_offset_ms = 0;
+        if !self.music_synced_lrc.is_empty() {
+            self.music_active_lyric_idx = active_lyric_index(
+                &self.music_synced_lrc,
+                self.music_position_ms,
+                self.music_lyric_offset_ms,
+            );
+        }
+    }
+
+    pub fn has_active_banner(&self) -> bool {
+        self.proactive_banner.active || self.translate_banner.active
+    }
+
+    fn banner_area(&self, outer: Rect) -> Rect {
+        Rect::new(
+            outer.x + 12.0,
+            outer.y + 4.0,
+            (outer.width - 24.0).max(160.0),
+            (outer.height - 8.0).max(64.0),
+        )
+    }
+
+    pub fn dismiss_proactive_banner(&mut self) {
+        self.proactive_banner.dismiss();
+        self.sync_targets();
+    }
+
+    pub fn close_translate_banner(&mut self) {
+        self.translate_banner.close();
+        self.sync_targets();
+    }
+
     pub fn set_wifi_status(&mut self, enabled: bool, ssid: Option<String>, networks: Vec<WifiNetworkItem>) {
         self.wifi_enabled = enabled;
         self.wifi_ssid = ssid;
@@ -553,12 +671,18 @@ impl NotchView {
         }
     }
 
-    /// Advances size, expansion, Pomodoro timer, and visualizer phase by `dt` seconds.
+    /// Advances size, expansion, Pomodoro timer, focus session, banners, and visualizer phase by `dt` seconds.
     pub fn tick(&mut self, dt: f32) -> bool {
         self.width_spring.tick(dt);
         self.height_spring.tick(dt);
         self.expand_spring.tick(dt);
         let pomo_changed = self.pomodoro.tick(dt);
+        let focus_changed = self.focus_ws.tick(dt);
+        let proactive_expired = self.proactive_banner.tick(dt);
+        let translate_expired = self.translate_banner.tick(dt);
+        if proactive_expired || translate_expired {
+            self.sync_targets();
+        }
         let is_playing = self.music.as_ref().is_some_and(|m| m.is_playing);
         if is_playing && dt > 0.0 {
             self.visualizer_phase = (self.visualizer_phase + dt * 5.2) % std::f32::consts::TAU;
@@ -567,7 +691,9 @@ impl NotchView {
             || !self.height_spring.is_settled()
             || !self.expand_spring.is_settled()
             || pomo_changed
+            || focus_changed
             || self.pomodoro.running
+            || (self.focus_ws.status == FocusSessionStatus::Active && !self.focus_ws.emergency_paused)
             || is_playing
     }
 
@@ -628,11 +754,38 @@ impl NotchView {
             }
             NotchAction::MusicSeek(ratio) => {
                 if self.music_duration_ms > 0 {
-                    self.music_position_ms =
-                        ((self.music_duration_ms as f32) * ratio.clamp(0.0, 1.0)) as u64;
+                    let pos = ((self.music_duration_ms as f32) * ratio.clamp(0.0, 1.0)) as u64;
+                    self.update_music_position(pos);
                 }
             }
+            NotchAction::LyricsAdjustOffset(delta_ms) => self.adjust_lyrics_offset(*delta_ms),
+            NotchAction::LyricsResetOffset => self.reset_lyrics_offset(),
             NotchAction::ClearShelf => self.shelf_items.clear(),
+            NotchAction::TasksSelectTab(tab) => self.tasks_ws.active_tab = *tab,
+            NotchAction::TasksToggleComplete(id) => {
+                self.tasks_ws.toggle_task(id);
+            }
+            NotchAction::TasksDelete(id) => {
+                self.tasks_ws.delete_task(id);
+            }
+            NotchAction::TasksCyclePriority => self.tasks_ws.cycle_quick_add_priority(),
+            NotchAction::TasksQuickAdd(title) => {
+                if self.tasks_ws.quick_add_draft.trim().is_empty() && !title.trim().is_empty() {
+                    self.tasks_ws.quick_add_draft = title.clone();
+                }
+                self.tasks_ws.commit_quick_add();
+            }
+            NotchAction::FocusStart => self.focus_ws.start(),
+            NotchAction::FocusComplete => self.focus_ws.complete(),
+            NotchAction::FocusSkip => self.focus_ws.skip(),
+            NotchAction::FocusEmergencyPause => self.focus_ws.toggle_emergency_pause(),
+            NotchAction::ProactiveAccept(_)
+            | NotchAction::ProactiveDismiss(_)
+            | NotchAction::ProactiveSnooze(_)
+            | NotchAction::ProactiveOpenDrawer => self.dismiss_proactive_banner(),
+            NotchAction::TranslateClose | NotchAction::TranslateOpenDrawer => {
+                self.close_translate_banner();
+            }
             NotchAction::OpenSettings
             | NotchAction::MusicPrev
             | NotchAction::MusicNext
@@ -690,6 +843,24 @@ impl NotchView {
         }
 
         if !self.is_expanded {
+            if self.has_active_banner() {
+                let area = self.banner_area(outer);
+                if self.translate_banner.active {
+                    return self.translate_banner.hit_test(x, y, area).map(|act| match act {
+                        TranslateBannerAction::Close => NotchAction::TranslateClose,
+                        TranslateBannerAction::OpenDrawer => NotchAction::TranslateOpenDrawer,
+                    });
+                }
+                if self.proactive_banner.active {
+                    return self.proactive_banner.hit_test(x, y, area).map(|act| match act {
+                        ProactiveBannerAction::Accept(id) => NotchAction::ProactiveAccept(id),
+                        ProactiveBannerAction::Dismiss(id) => NotchAction::ProactiveDismiss(id),
+                        ProactiveBannerAction::Snooze(id) => NotchAction::ProactiveSnooze(id),
+                        ProactiveBannerAction::OpenDrawer => NotchAction::ProactiveOpenDrawer,
+                    });
+                }
+                return None;
+            }
             if self.music.is_some() {
                 let badge_rect = Rect::new(outer.x + outer.width - 48.0, outer.y + 4.0, 32.0, 28.0);
                 if point_in_rect(x, y, badge_rect) {
@@ -835,6 +1006,17 @@ impl NotchView {
                 if point_in_rect(x, y, mus.next_btn) {
                     return Some(NotchAction::MusicNext);
                 }
+                if self.music_show_lyrics {
+                    if point_in_rect(x, y, mus.offset_minus_btn) {
+                        return Some(NotchAction::LyricsAdjustOffset(-200));
+                    }
+                    if point_in_rect(x, y, mus.offset_plus_btn) {
+                        return Some(NotchAction::LyricsAdjustOffset(200));
+                    }
+                    if point_in_rect(x, y, mus.offset_reset_btn) {
+                        return Some(NotchAction::LyricsResetOffset);
+                    }
+                }
             }
             BodyLayout::Wifi(wf) => {
                 if point_in_rect(x, y, wf.back_btn) {
@@ -863,6 +1045,23 @@ impl NotchView {
                         return Some(NotchAction::ClearShelf);
                     }
                 }
+            }
+            BodyLayout::Tasks(body_rect) => {
+                return self.tasks_ws.hit_test(x, y, *body_rect).map(|act| match act {
+                    TasksHitAction::SelectTab(tab) => NotchAction::TasksSelectTab(tab),
+                    TasksHitAction::ToggleTask(id) => NotchAction::TasksToggleComplete(id),
+                    TasksHitAction::DeleteTask(id) => NotchAction::TasksDelete(id),
+                    TasksHitAction::CyclePriority => NotchAction::TasksCyclePriority,
+                    TasksHitAction::QuickAdd(title) => NotchAction::TasksQuickAdd(title),
+                });
+            }
+            BodyLayout::Focus(body_rect) => {
+                return self.focus_ws.hit_test(x, y, *body_rect).map(|act| match act {
+                    FocusHitAction::Start => NotchAction::FocusStart,
+                    FocusHitAction::Complete => NotchAction::FocusComplete,
+                    FocusHitAction::Skip => NotchAction::FocusSkip,
+                    FocusHitAction::EmergencyPause => NotchAction::FocusEmergencyPause,
+                });
             }
             BodyLayout::HimeAi(ai) => {
                 if point_in_rect(x, y, ai.open_drawer_btn) {
@@ -914,6 +1113,16 @@ impl NotchView {
 
         if self.is_expanded || self.expand_spring.value > 0.25 {
             return self.render_expanded_contents(surface, rect);
+        }
+
+        if self.has_active_banner() {
+            let area = self.banner_area(rect);
+            if self.translate_banner.active {
+                return self.translate_banner.render(surface, area);
+            }
+            if self.proactive_banner.active {
+                return self.proactive_banner.render(surface, area);
+            }
         }
 
         match self.edge {
@@ -1186,6 +1395,15 @@ impl NotchView {
                 NotchPanel::Shelf => {
                     surface.draw_shelf_icon(cx, cy, 11.0, icon_color)?;
                 }
+                NotchPanel::Tasks => {
+                    surface.draw_line(cx - 4.0, cy - 2.0, cx - 2.0, cy, icon_color, 1.3)?;
+                    surface.draw_line(cx - 2.0, cy, cx + 1.5, cy - 3.5, icon_color, 1.3)?;
+                    surface.draw_line(cx - 4.0, cy + 3.5, cx + 4.0, cy + 3.5, icon_color, 1.3)?;
+                }
+                NotchPanel::Focus => {
+                    surface.stroke_circle(cx, cy, 4.8, icon_color, 1.2)?;
+                    surface.fill_circle(cx, cy, 1.8, icon_color)?;
+                }
                 NotchPanel::HimeAi => {
                     surface.draw_sparkles_icon(cx, cy, 11.0, icon_color)?;
                 }
@@ -1219,6 +1437,8 @@ impl NotchView {
             BodyLayout::Wifi(wf) => self.render_wifi(surface, wf),
             BodyLayout::Shortcuts(sc) => self.render_shortcuts(surface, sc),
             BodyLayout::Shelf(sh) => self.render_shelf(surface, sh),
+            BodyLayout::Tasks(body_rect) => self.tasks_ws.render(surface, *body_rect),
+            BodyLayout::Focus(body_rect) => self.focus_ws.render(surface, *body_rect),
             BodyLayout::HimeAi(ai) => self.render_hime_ai(surface, ai),
         }
     }
@@ -1810,7 +2030,7 @@ impl NotchView {
         if self.music_show_lyrics && !self.music_lrc_lines.is_empty() {
             let active_idx = self.music_active_lyric_idx.unwrap_or(0);
             let start = active_idx.saturating_sub(1);
-            let line_h = (mus.lyrics_box.height - 8.0) / 3.0;
+            let line_h = (mus.lyrics_text_box.height - 4.0) / 3.0;
             for row_i in 0..3 {
                 let line_idx = start + row_i;
                 let Some(line) = self.music_lrc_lines.get(line_idx) else {
@@ -1818,13 +2038,13 @@ impl NotchView {
                 };
                 let is_curr = line_idx == active_idx;
                 let rect = Rect::new(
-                    mus.lyrics_box.x + 10.0,
-                    mus.lyrics_box.y + 4.0 + row_i as f32 * line_h,
-                    mus.lyrics_box.width - 20.0,
+                    mus.lyrics_text_box.x + 10.0,
+                    mus.lyrics_text_box.y + 2.0 + row_i as f32 * line_h,
+                    mus.lyrics_text_box.width - 20.0,
                     line_h,
                 );
                 if is_curr {
-                    surface.draw_text_bold(line, rect, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
+                    surface.draw_text_bold(line, rect, 11.0, ACCENT_CYAN, TextAlign::Center)?;
                 } else {
                     surface.draw_text(line, rect, 9.5, TEXT_SUBTLE_WHITE, TextAlign::Center)?;
                 }
@@ -1834,31 +2054,60 @@ impl NotchView {
                 .music_active_lyric_idx
                 .and_then(|idx| self.music_lrc_lines.get(idx + 1).cloned());
             if let Some(upcoming) = next_line {
-                let half_h = (mus.lyrics_box.height - 6.0) * 0.5;
+                let half_h = (mus.lyrics_text_box.height - 4.0) * 0.5;
                 surface.draw_text_bold(
                     &line,
-                    Rect::new(mus.lyrics_box.x + 10.0, mus.lyrics_box.y + 3.0, mus.lyrics_box.width - 20.0, half_h),
+                    Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0, mus.lyrics_text_box.width - 20.0, half_h),
                     11.0,
                     TEXT_PRIMARY,
                     TextAlign::Center,
                 )?;
                 surface.draw_text(
                     &upcoming,
-                    Rect::new(mus.lyrics_box.x + 10.0, mus.lyrics_box.y + 3.0 + half_h, mus.lyrics_box.width - 20.0, half_h),
+                    Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0 + half_h, mus.lyrics_text_box.width - 20.0, half_h),
                     9.5,
                     TEXT_MUTED_WHITE,
                     TextAlign::Center,
                 )?;
             } else {
-                surface.draw_text_bold(&line, mus.lyrics_box, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
+                surface.draw_text_bold(&line, mus.lyrics_text_box, 11.0, TEXT_PRIMARY, TextAlign::Center)?;
             }
         } else {
             let fallback = if self.music_show_lyrics {
-                "♪ Lirik LRC belum tersedia untuk lagu ini"
+                "♪ Synced lyrics unavailable for this track"
             } else {
-                "♪ Klik Lirik untuk tampilan lirik LRC"
+                "♪ Click Lirik for synced LRC lyrics"
             };
-            surface.draw_text(fallback, mus.lyrics_box, 10.0, TEXT_MUTED_WHITE, TextAlign::Center)?;
+            surface.draw_text(fallback, mus.lyrics_text_box, 10.0, TEXT_MUTED_WHITE, TextAlign::Center)?;
+        }
+
+        if self.music_show_lyrics {
+            let offset_label = if self.music_lyric_offset_ms > 0 {
+                format!("Offset: +{}ms", self.music_lyric_offset_ms)
+            } else {
+                format!("Offset: {}ms", self.music_lyric_offset_ms)
+            };
+            surface.draw_text(
+                &offset_label,
+                mus.offset_label_rect,
+                8.5,
+                if self.music_lyric_offset_ms != 0 { ACCENT_CYAN } else { TEXT_MUTED_WHITE },
+                TextAlign::Leading,
+            )?;
+            surface.fill_rounded_rect(mus.offset_minus_btn, 5.0, CARD_BG_ACTIVE)?;
+            surface.draw_text("-0.2s", mus.offset_minus_btn, 8.5, TEXT_PRIMARY, TextAlign::Center)?;
+            surface.fill_rounded_rect(mus.offset_plus_btn, 5.0, CARD_BG_ACTIVE)?;
+            surface.draw_text("+0.2s", mus.offset_plus_btn, 8.5, TEXT_PRIMARY, TextAlign::Center)?;
+            surface.fill_rounded_rect(
+                mus.offset_reset_btn,
+                5.0,
+                if self.music_lyric_offset_ms != 0 {
+                    ACCENT_CYAN.with_alpha(0.22)
+                } else {
+                    CARD_BG
+                },
+            )?;
+            surface.draw_text("Rst", mus.offset_reset_btn, 8.5, TEXT_PRIMARY, TextAlign::Center)?;
         }
 
         Ok(())
@@ -2161,8 +2410,11 @@ impl NotchView {
         let close_btn = Rect::new(inner_x + inner_w - 22.0, top_y + 2.0, 22.0, 22.0);
 
         let panels = self.available_panels();
-        let tab_w = 24.0;
-        let tab_gap = 4.0;
+        let avail_tabs_w = (close_btn.x - 8.0) - (next_btn.x + next_btn.width + 6.0);
+        let tab_gap = 3.0;
+        let tab_w = ((avail_tabs_w - (panels.len().saturating_sub(1)) as f32 * tab_gap)
+            / panels.len().max(1) as f32)
+            .clamp(16.0, 24.0);
         let total_tabs_w = panels.len() as f32 * tab_w + (panels.len().saturating_sub(1)) as f32 * tab_gap;
         let tabs_start_x = (close_btn.x - 8.0 - total_tabs_w).max(next_btn.x + next_btn.width + 6.0);
         let tabs = panels
@@ -2285,6 +2537,21 @@ impl NotchView {
                 let lyrics_y = ctrl_y + 44.0;
                 let lyrics_h = (body_y + body_h - lyrics_y).max(52.0);
                 let lyrics_box = Rect::new(inner_x, lyrics_y, inner_w, lyrics_h);
+                let lyrics_text_box = if self.music_show_lyrics && lyrics_h > 44.0 {
+                    Rect::new(lyrics_box.x, lyrics_box.y, lyrics_box.width, lyrics_box.height - 22.0)
+                } else {
+                    lyrics_box
+                };
+                let bar_y = lyrics_box.y + lyrics_box.height - 20.0;
+                let offset_reset_btn = Rect::new(lyrics_box.x + lyrics_box.width - 34.0, bar_y, 28.0, 16.0);
+                let offset_plus_btn = Rect::new(offset_reset_btn.x - 40.0, bar_y, 36.0, 16.0);
+                let offset_minus_btn = Rect::new(offset_plus_btn.x - 40.0, bar_y, 36.0, 16.0);
+                let offset_label_rect = Rect::new(
+                    lyrics_box.x + 8.0,
+                    bar_y,
+                    (offset_minus_btn.x - lyrics_box.x - 12.0).max(60.0),
+                    16.0,
+                );
 
                 BodyLayout::Music(MusicLayout {
                     album_badge,
@@ -2297,6 +2564,11 @@ impl NotchView {
                     play_pause_btn,
                     next_btn,
                     lyrics_box,
+                    lyrics_text_box,
+                    offset_label_rect,
+                    offset_minus_btn,
+                    offset_plus_btn,
+                    offset_reset_btn,
                 })
             }
             NotchPanel::Wifi => {
@@ -2356,6 +2628,8 @@ impl NotchView {
                     body_rect,
                 })
             }
+            NotchPanel::Tasks => BodyLayout::Tasks(Rect::new(inner_x, body_y, inner_w, body_h)),
+            NotchPanel::Focus => BodyLayout::Focus(Rect::new(inner_x, body_y, inner_w, body_h)),
             NotchPanel::HimeAi => {
                 let card_rect = Rect::new(inner_x, body_y, inner_w, body_h);
                 let open_drawer_btn = Rect::new(
@@ -2383,12 +2657,14 @@ impl NotchView {
 
     fn sync_targets(&mut self) {
         let has_alert = self.ncm_center_alert.is_some();
+        let has_banner = self.has_active_banner();
         let (w, h) = target_dimensions(
             self.edge,
             self.is_hidden,
             self.is_expanded,
             self.active_panel,
             has_alert,
+            has_banner,
         );
         self.width_spring.set_target(w);
         self.height_spring.set_target(h);
@@ -2413,6 +2689,8 @@ enum BodyLayout {
     Wifi(WifiLayout),
     Shortcuts(ShortcutsLayout),
     Shelf(ShelfLayout),
+    Tasks(Rect),
+    Focus(Rect),
     HimeAi(HimeAiLayout),
 }
 
@@ -2456,6 +2734,11 @@ struct MusicLayout {
     play_pause_btn: Rect,
     next_btn: Rect,
     lyrics_box: Rect,
+    lyrics_text_box: Rect,
+    offset_label_rect: Rect,
+    offset_minus_btn: Rect,
+    offset_plus_btn: Rect,
+    offset_reset_btn: Rect,
 }
 
 struct WifiLayout {
@@ -2491,30 +2774,43 @@ fn target_dimensions(
     is_expanded: bool,
     panel: NotchPanel,
     has_alert: bool,
+    has_banner: bool,
 ) -> (f32, f32) {
     match (edge, is_hidden, is_expanded) {
         (NotchEdge::Top, true, _) => (48.0, HIDDEN_BAR_THICKNESS),
         (NotchEdge::Left | NotchEdge::Right, true, _) => (HIDDEN_BAR_THICKNESS, 48.0),
-        (NotchEdge::Top, false, false) => (
-            if has_alert {
-                TOP_ALERT_WIDTH
+        (NotchEdge::Top, false, false) => {
+            if has_banner {
+                (TOP_BANNER_WIDTH, TOP_BANNER_HEIGHT)
             } else {
-                TOP_COLLAPSED_WIDTH
-            },
-            TOP_COLLAPSED_HEIGHT,
-        ),
+                (
+                    if has_alert {
+                        TOP_ALERT_WIDTH
+                    } else {
+                        TOP_COLLAPSED_WIDTH
+                    },
+                    TOP_COLLAPSED_HEIGHT,
+                )
+            }
+        }
         (NotchEdge::Top, false, true) => match panel {
             NotchPanel::Shortcuts => (TOP_SHORTCUTS_WIDTH, TOP_SHORTCUTS_HEIGHT),
             _ => (TOP_EXPANDED_WIDTH, TOP_EXPANDED_HEIGHT),
         },
-        (NotchEdge::Left | NotchEdge::Right, false, false) => (
-            SIDE_COLLAPSED_WIDTH,
-            if has_alert {
-                SIDE_ALERT_HEIGHT
+        (NotchEdge::Left | NotchEdge::Right, false, false) => {
+            if has_banner {
+                (SIDE_BANNER_WIDTH, SIDE_BANNER_HEIGHT)
             } else {
-                SIDE_COLLAPSED_HEIGHT
-            },
-        ),
+                (
+                    SIDE_COLLAPSED_WIDTH,
+                    if has_alert {
+                        SIDE_ALERT_HEIGHT
+                    } else {
+                        SIDE_COLLAPSED_HEIGHT
+                    },
+                )
+            }
+        }
         (NotchEdge::Left | NotchEdge::Right, false, true) => match panel {
             NotchPanel::Shortcuts => (TOP_SHORTCUTS_WIDTH, SIDE_EXPANDED_HEIGHT),
             _ => (SIDE_EXPANDED_WIDTH, SIDE_EXPANDED_HEIGHT),
@@ -2859,6 +3155,8 @@ mod tests {
             NotchPanel::Wifi,
             NotchPanel::Shortcuts,
             NotchPanel::Shelf,
+            NotchPanel::Tasks,
+            NotchPanel::Focus,
             NotchPanel::HimeAi,
         ];
         for panel in panels {
@@ -2868,5 +3166,83 @@ mod tests {
             notch.render(&surface).expect("render panel should succeed");
             surface.end_draw_and_present().expect("present should succeed");
         }
+    }
+
+    #[test]
+    fn tasks_focus_lrc_and_banners_integrate_with_notch_view() {
+        let mut notch = NotchView::new(NotchEdge::Top);
+        notch.set_music_raw_lrc("[00:01.00]Line A\n[00:03.00]Line B\n[00:05.00]Line C");
+        notch.update_music_position(3_100);
+        assert_eq!(notch.music_active_lyric_idx, Some(1));
+
+        notch.music_show_lyrics = true;
+        notch.set_panel(NotchPanel::Music);
+        settle(&mut notch);
+        let surf = Rect::new(0.0, 0.0, 560.0, 320.0);
+        let outer = notch.computed_rect(surf.width, surf.height);
+        let layout = notch.compute_expanded_layout(outer);
+        let BodyLayout::Music(mus) = layout.body else {
+            panic!("expected Music layout");
+        };
+        let (mx, my) = rect_center(mus.offset_minus_btn);
+        assert_eq!(
+            notch.hit_test_click(mx, my, surf),
+            Some(NotchAction::LyricsAdjustOffset(-200))
+        );
+        notch.apply_action(&NotchAction::LyricsAdjustOffset(-200));
+        assert_eq!(notch.music_lyric_offset_ms, -200);
+        assert_eq!(notch.music_active_lyric_idx, Some(0));
+
+        // Tasks panel
+        notch.tasks_ws.quick_add_draft = "Ship Rust shell".into();
+        notch.set_panel(NotchPanel::Tasks);
+        settle(&mut notch);
+        let outer_t = notch.computed_rect(surf.width, surf.height);
+        let layout_t = notch.compute_expanded_layout(outer_t);
+        let BodyLayout::Tasks(tbody) = layout_t.body else {
+            panic!("expected Tasks layout");
+        };
+        let tlayout = notch.tasks_ws.layout(tbody);
+        let (ax, ay) = rect_center(tlayout.quick_add_submit_btn);
+        let add_act = notch.hit_test_click(ax, ay, surf).expect("quick add hit");
+        assert_eq!(add_act, NotchAction::TasksQuickAdd("Ship Rust shell".into()));
+        notch.apply_action(&add_act);
+        assert_eq!(notch.tasks_ws.tasks.len(), 1);
+
+        // Focus panel
+        notch.set_panel(NotchPanel::Focus);
+        settle(&mut notch);
+        let outer_f = notch.computed_rect(surf.width, surf.height);
+        let layout_f = notch.compute_expanded_layout(outer_f);
+        let BodyLayout::Focus(fbody) = layout_f.body else {
+            panic!("expected Focus layout");
+        };
+        let flayout = notch.focus_ws.layout(fbody);
+        let (sx, sy) = rect_center(flayout.start_btn.expect("start btn"));
+        assert_eq!(notch.hit_test_click(sx, sy, surf), Some(NotchAction::FocusStart));
+        notch.apply_action(&NotchAction::FocusStart);
+        assert_eq!(notch.focus_ws.status, FocusSessionStatus::Active);
+
+        // Collapsed HUD banner hit-test
+        notch.set_expanded(false);
+        notch.proactive_banner.show(
+            "p-1",
+            "focus_check",
+            crate::notch_workspace::ProactiveLevel::Tanya,
+            "Stay focused",
+            "Ready to resume?",
+            HimeExpression::Fokus,
+            None,
+        );
+        notch.sync_targets();
+        settle(&mut notch);
+        let outer_b = notch.computed_rect(surf.width, surf.height);
+        let b_area = notch.banner_area(outer_b);
+        let p_layout = notch.proactive_banner.layout(b_area);
+        let (pax, pay) = rect_center(p_layout.accept_btn);
+        let p_act = notch.hit_test_click(pax, pay, surf).expect("accept hit");
+        assert_eq!(p_act, NotchAction::ProactiveAccept("p-1".into()));
+        notch.apply_action(&p_act);
+        assert!(!notch.proactive_banner.active);
     }
 }

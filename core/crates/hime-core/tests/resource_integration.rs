@@ -8,9 +8,10 @@ use hime_storage::Database;
 async fn test_resource_manager_unit_invariants() {
     let rm = ResourceManager::new(ResourceMode::Balanced);
 
-    // 1. Initial defaults
+    // 1. Initial defaults & explicit Normal mode invariants (decoupled from host RAM pressure)
     assert_eq!(rm.get_mode(), ResourceMode::Balanced);
     assert_eq!(rm.get_save_mode(), SaveMode::Auto);
+    rm.set_save_mode(SaveMode::Off);
     assert_eq!(rm.ai_idle_timeout_seconds(), 600); // 10 minutes normal
     assert_eq!(rm.target_budget_mb(), 350); // <= 350 MB normal idle target
 
@@ -56,7 +57,24 @@ async fn test_resource_rpc_endpoints() {
 
     let (mut client_reader, mut client_writer) = tokio::io::split(client_stream);
 
-    // 1. Query resource metrics
+    // 1. Force Save Mode to 'off' first so Normal mode budget checks are deterministic under any host RAM load
+    let req0 = JsonRpcRequest::new(
+        "req-res-0",
+        "resource.save_mode.set",
+        Some(serde_json::json!({
+            "mode": "off"
+        })),
+    );
+    Frame::new(MsgType::Request, req0.to_bytes().unwrap())
+        .unwrap()
+        .write_to(&mut client_writer)
+        .await
+        .unwrap();
+    let resp_frame0 = Frame::read_from(&mut client_reader).await.unwrap();
+    let resp0 = JsonRpcResponse::from_slice(&resp_frame0.payload).unwrap();
+    assert!(resp0.result.is_some());
+
+    // 1b. Query resource metrics in Normal mode
     let req1 = JsonRpcRequest::new("req-res-1", "resource.metrics.get", None);
     let payload1 = req1.to_bytes().unwrap();
     Frame::new(MsgType::Request, payload1)

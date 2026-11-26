@@ -299,6 +299,15 @@ async fn test_intelligence_e2e_resource_mode_adaptation() {
     let auth_token = generate_token_256().unwrap();
     let server = CoreServer::new_in_memory(auth_token).unwrap();
 
+    // 0. Force SaveMode::Off so host RAM >85% doesn't cap Performance mode concurrency
+    let req_save_off = JsonRpcRequest::new(
+        0,
+        "resource.save_mode.set",
+        Some(serde_json::json!({ "mode": "off" })),
+    );
+    let save_off = server.dispatch_rpc(req_save_off).await;
+    assert!(save_off.error.is_none());
+
     // 1. Initial Balanced mode
     let req_initial = JsonRpcRequest::new(1, "resource.get_mode", None);
     let initial = server.dispatch_rpc(req_initial).await;

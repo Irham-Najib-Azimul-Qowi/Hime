@@ -372,6 +372,8 @@ mod tests {
     #[test]
     fn test_resource_manager_modes_and_limits() {
         let rm = ResourceManager::default();
+        // Force SaveMode::Off so host RAM pressure (>85%) doesn't override mode limits.
+        rm.set_save_mode(SaveMode::Off);
         assert_eq!(rm.get_mode(), ResourceMode::Balanced);
         assert_eq!(rm.max_concurrent_tasks(), 2);
 
@@ -382,12 +384,21 @@ mod tests {
         rm.set_mode(ResourceMode::Performance);
         assert_eq!(rm.get_mode(), ResourceMode::Performance);
         assert_eq!(rm.max_concurrent_tasks(), 4);
+
+        // Mode Hemat overrides Performance to 1 concurrent task
+        rm.set_save_mode(SaveMode::On);
+        assert_eq!(rm.max_concurrent_tasks(), 1);
     }
 
     #[test]
     fn test_save_mode_transitions_and_idle_timeouts() {
         let rm = ResourceManager::default();
         assert_eq!(rm.get_save_mode(), SaveMode::Auto);
+        assert_eq!(rm.is_save_mode_active(), rm.is_low_memory());
+
+        rm.set_save_mode(SaveMode::Off);
+        assert_eq!(rm.get_save_mode(), SaveMode::Off);
+        assert!(!rm.is_save_mode_active());
         assert_eq!(rm.ai_idle_timeout_seconds(), 600); // 10 min normal
         assert_eq!(rm.target_budget_mb(), 350);
 
@@ -397,12 +408,6 @@ mod tests {
         assert_eq!(rm.ai_idle_timeout_seconds(), 180); // 3 min in Mode Hemat
         assert_eq!(rm.target_budget_mb(), 250);
         assert_eq!(rm.max_concurrent_tasks(), 1);
-
-        rm.set_save_mode(SaveMode::Off);
-        assert_eq!(rm.get_save_mode(), SaveMode::Off);
-        assert!(!rm.is_save_mode_active());
-        assert_eq!(rm.ai_idle_timeout_seconds(), 600);
-        assert_eq!(rm.target_budget_mb(), 350);
     }
 
     #[test]
@@ -425,6 +430,7 @@ mod tests {
     fn test_process_metrics_aggregate_and_budget_invariants() {
         let rm = ResourceManager::default();
         // 1. Idle state in Normal mode
+        rm.set_save_mode(SaveMode::Off);
         let metrics_idle = rm.get_process_metrics();
         assert_eq!(metrics_idle.target_budget_mb, 350);
         assert!(metrics_idle.total_working_set_mb <= 350.0);

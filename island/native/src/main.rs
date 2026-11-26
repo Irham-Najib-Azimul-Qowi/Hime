@@ -11,7 +11,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, GUID, PCWSTR, PWSTR};
 use windows::Devices::Radios::{Radio, RadioKind, RadioState};
@@ -26,13 +26,15 @@ use windows::Win32::NetworkManagement::WiFi::{
 };
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
     CreateEventW, OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
-    VK_SHIFT,
+    GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
+    UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE,
+    TRACKMOUSEEVENT, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
@@ -53,7 +55,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use hime_island_native::ai_drawer::{
-    AiDrawer, ApprovalCard, ApprovalStatus, DrawerAction, DrawerAttachment,
+    AiDrawer, ApprovalCard, ApprovalStatus, DeveloperWorkspaceSummary, DocumentsWorkspaceSummary,
+    DrawerAction, DrawerAttachment, DrawerTab,
 };
 use hime_island_native::d2d::{
     self, HimeExpression, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind, WM_SURFACE_EVENT,
@@ -61,19 +64,28 @@ use hime_island_native::d2d::{
 use hime_island_native::dock::{DockAction, DockBar, DockItem, DockMode, TrayEntry};
 use hime_island_native::hotkey::{self, HotkeyAction, HotkeyManager};
 use hime_island_native::ipc_client::{
-    AiProfileUpsertParams, ApprovalResolution, ChatTurnParams, ChatTurnResult, HimeIpcClient,
-    IpcError, IPC_CONTRACT_VERSION,
+    AiProfileUpsertParams, ApprovalResolution, ChatTurnParams, ChatTurnResult,
+    CreateProductivityTaskParams, DocumentJobRecord, EmergencyPauseRecord, HimeIpcClient, IpcError,
+    LyricsGetParams, LyricsResult, LyricsSetOffsetResponse, ProactiveActionResponse,
+    ProactiveSettings, ProactiveSettingsSetParams, ProactiveSuggestionItem, ProductivityTaskRecord,
+    Routine, RoutineSessionOutcomeResponse, RoutineStartSessionResponse, ScanSecretsParams,
+    ScreenTimeSessionRecord, TranslateOptInStatus, TranslateSelectionParams,
+    TranslateSetOptInResponse, TranslationResult, IPC_CONTRACT_VERSION,
 };
 use hime_island_native::module_mgr::{HimeAiModuleManager, RouterProbeResult};
 use hime_island_native::notch::{
     NotchAction, NotchEdge, NotchPanel, NotchView, ShelfSummaryItem, WifiNetworkItem,
+};
+use hime_island_native::notch_workspace::{
+    parse_lrc_lines, FocusSessionStatus, LrcLine, ProactiveLevel, TaskCardItem, TaskPriority,
+    TaskStatus, TaskTabFilter,
 };
 use hime_island_native::os_shell;
 use hime_island_native::overlay::{sanitize_device_name, DualEdgeOverlays};
 use hime_island_native::settings_store::{NativeSettings, SettingsStore};
 use hime_island_native::settings_ui::{
     ApiProfileConfig, NotchMode, ProviderPreset, SettingsAction, SettingsControl, SettingsPanel,
-    SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
+    SettingsTab, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
 };
 use hime_island_native::shelf::{FileShelf, ShelfItemKind};
 use hime_island_native::telemetry::{
@@ -99,6 +111,12 @@ const MENU_TOGGLE_DOCK: usize = 1002;
 const MENU_TOGGLE_AI_DRAWER: usize = 1003;
 const MENU_TOGGLE_SETTINGS: usize = 1004;
 const MENU_EXIT: usize = 1005;
+
+const HOTKEY_TRANSLATE_CST: i32 = 241; // Ctrl + Shift + T
+const VK_T: u32 = 0x54;
+const PROACTIVE_EVAL_INTERVAL: Duration = Duration::from_secs(60);
+const CORE_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const MEDIA_TIMELINE_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
 static ORIG_SURFACE_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static EXTRA_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
@@ -215,6 +233,348 @@ enum IpcBgResult {
     WifiScan(Vec<WifiNetworkInfo>),
     WifiConnect(String, Result<(), String>),
     TrayEntries(Vec<TrayEntry>),
+    MediaTimeline {
+        title: String,
+        artist: String,
+        album: Option<String>,
+        position_ms: u64,
+        duration_ms: u64,
+    },
+    LyricsLoaded {
+        title: String,
+        artist: String,
+        result: Result<LyricsResult, IpcError>,
+    },
+    LyricsOffsetSaved(Result<LyricsSetOffsetResponse, IpcError>),
+    TasksLoaded(Result<Vec<ProductivityTaskRecord>, IpcError>),
+    FocusDataLoaded {
+        routines: Result<Vec<Routine>, IpcError>,
+        screentime: Result<Vec<ScreenTimeSessionRecord>, IpcError>,
+    },
+    RoutineStarted(Result<RoutineStartSessionResponse, IpcError>),
+    RoutineOutcome(Result<RoutineSessionOutcomeResponse, IpcError>),
+    EmergencyPaused(Result<EmergencyPauseRecord, IpcError>),
+    ProactiveEvaluated(Result<Vec<ProactiveSuggestionItem>, IpcError>),
+    ProactiveResponded(Result<ProactiveActionResponse, IpcError>),
+    TranslateOptInLoaded(Result<TranslateOptInStatus, IpcError>),
+    TranslateOptInSaved(Result<TranslateSetOptInResponse, IpcError>),
+    TranslationDone(Result<TranslationResult, IpcError>),
+    ProactiveSettingsLoaded(Result<ProactiveSettings, IpcError>),
+    ProactiveBudgetSaved(Result<String, IpcError>),
+    MemoryCountLoaded(Result<usize, IpcError>),
+    SkillsCountLoaded(Result<usize, IpcError>),
+    McpCountLoaded(Result<usize, IpcError>),
+    DevCheckLoaded(Result<DeveloperWorkspaceSummary, IpcError>),
+    DocsLoaded(Result<DocumentsWorkspaceSummary, IpcError>),
+}
+
+enum IpcCommand {
+    BootstrapWorkspace,
+    RefreshAiSettingsAndCounts,
+    GetLyrics {
+        title: String,
+        artist: String,
+        album: Option<String>,
+        duration_sec: Option<u32>,
+    },
+    SetLyricsOffset {
+        cache_key: String,
+        offset_ms: i32,
+    },
+    RefreshTasks,
+    CreateTask(CreateProductivityTaskParams),
+    MoveTask {
+        task_id: String,
+        column_id: String,
+        status: String,
+    },
+    DeleteTask(String),
+    RefreshFocusAndScreenTime,
+    FocusStart {
+        routine_id: String,
+    },
+    FocusComplete {
+        session_id: String,
+    },
+    FocusSkip {
+        session_id: String,
+    },
+    FocusEmergencyPause {
+        duration_min: i64,
+        reason: String,
+    },
+    EvaluateProactive,
+    RespondProactive {
+        suggestion_id: String,
+        action: String,
+    },
+    SetTranslateOptIn(bool),
+    SetProactiveBudget(String),
+    RefreshMemory,
+    ReloadSkills,
+    ReloadMcp,
+    RunDevCheck {
+        workspace_path: String,
+    },
+    RefreshDocs,
+}
+
+struct IpcWorker {
+    tx: mpsc::Sender<IpcCommand>,
+}
+
+impl IpcWorker {
+    fn spawn(ipc: Arc<HimeIpcClient>, result_tx: mpsc::Sender<IpcBgResult>) -> Self {
+        let (tx, rx) = mpsc::channel::<IpcCommand>();
+        let _ = std::thread::Builder::new()
+            .name("hime-ipc-worker".to_string())
+            .spawn(move || run_ipc_worker(ipc, rx, result_tx));
+        Self { tx }
+    }
+
+    fn send(&self, cmd: IpcCommand) {
+        let _ = self.tx.send(cmd);
+    }
+}
+
+fn run_ipc_worker(
+    ipc: Arc<HimeIpcClient>,
+    rx: mpsc::Receiver<IpcCommand>,
+    result_tx: mpsc::Sender<IpcBgResult>,
+) {
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            IpcCommand::BootstrapWorkspace => {
+                let _ = result_tx.send(IpcBgResult::TasksLoaded(
+                    ipc.list_productivity_tasks(None),
+                ));
+                let _ = result_tx.send(IpcBgResult::FocusDataLoaded {
+                    routines: ipc.list_routines(false),
+                    screentime: ipc.list_screentime_sessions(Some(100)),
+                });
+                send_ai_settings_and_counts(&ipc, &result_tx);
+            }
+            IpcCommand::RefreshAiSettingsAndCounts => {
+                send_ai_settings_and_counts(&ipc, &result_tx);
+            }
+            IpcCommand::GetLyrics {
+                title,
+                artist,
+                album,
+                duration_sec,
+            } => {
+                let res = ipc.get_lyrics(LyricsGetParams {
+                    title: title.clone(),
+                    artist: artist.clone(),
+                    album,
+                    duration_sec,
+                    allow_online: true,
+                });
+                let _ = result_tx.send(IpcBgResult::LyricsLoaded {
+                    title,
+                    artist,
+                    result: res,
+                });
+            }
+            IpcCommand::SetLyricsOffset {
+                cache_key,
+                offset_ms,
+            } => {
+                let res = ipc.set_lyrics_offset(&cache_key, offset_ms);
+                let _ = result_tx.send(IpcBgResult::LyricsOffsetSaved(res));
+            }
+            IpcCommand::RefreshTasks => {
+                let _ = result_tx.send(IpcBgResult::TasksLoaded(
+                    ipc.list_productivity_tasks(None),
+                ));
+            }
+            IpcCommand::CreateTask(params) => {
+                let res = ipc
+                    .create_productivity_task(params)
+                    .and_then(|_| ipc.list_productivity_tasks(None));
+                let _ = result_tx.send(IpcBgResult::TasksLoaded(res));
+            }
+            IpcCommand::MoveTask {
+                task_id,
+                column_id,
+                status,
+            } => {
+                let res = ipc
+                    .move_productivity_task(&task_id, &column_id, &status)
+                    .and_then(|_| ipc.list_productivity_tasks(None));
+                let _ = result_tx.send(IpcBgResult::TasksLoaded(res));
+            }
+            IpcCommand::DeleteTask(task_id) => {
+                let res = ipc
+                    .delete_productivity_task(&task_id)
+                    .and_then(|_| ipc.list_productivity_tasks(None));
+                let _ = result_tx.send(IpcBgResult::TasksLoaded(res));
+            }
+            IpcCommand::RefreshFocusAndScreenTime => {
+                let _ = result_tx.send(IpcBgResult::FocusDataLoaded {
+                    routines: ipc.list_routines(false),
+                    screentime: ipc.list_screentime_sessions(Some(100)),
+                });
+            }
+            IpcCommand::FocusStart { routine_id } => {
+                let res = ipc.start_routine_session(&routine_id, None);
+                let _ = result_tx.send(IpcBgResult::RoutineStarted(res));
+            }
+            IpcCommand::FocusComplete { session_id } => {
+                let res = ipc.complete_routine_session(&session_id);
+                let _ = result_tx.send(IpcBgResult::RoutineOutcome(res));
+                let _ = result_tx.send(IpcBgResult::FocusDataLoaded {
+                    routines: ipc.list_routines(false),
+                    screentime: ipc.list_screentime_sessions(Some(100)),
+                });
+            }
+            IpcCommand::FocusSkip { session_id } => {
+                let res = ipc.skip_routine_session(&session_id, Some("User skipped"));
+                let _ = result_tx.send(IpcBgResult::RoutineOutcome(res));
+                let _ = result_tx.send(IpcBgResult::FocusDataLoaded {
+                    routines: ipc.list_routines(false),
+                    screentime: ipc.list_screentime_sessions(Some(100)),
+                });
+            }
+            IpcCommand::FocusEmergencyPause {
+                duration_min,
+                reason,
+            } => {
+                let res = ipc.trigger_emergency_pause(duration_min, &reason);
+                let _ = result_tx.send(IpcBgResult::EmergencyPaused(res));
+            }
+            IpcCommand::EvaluateProactive => {
+                let res = ipc.evaluate_proactive_suggestions();
+                let _ = result_tx.send(IpcBgResult::ProactiveEvaluated(res));
+            }
+            IpcCommand::RespondProactive {
+                suggestion_id,
+                action,
+            } => {
+                let res = ipc.respond_proactive_suggestion(&suggestion_id, &action);
+                let _ = result_tx.send(IpcBgResult::ProactiveResponded(res));
+            }
+            IpcCommand::SetTranslateOptIn(enabled) => {
+                let res = ipc.set_translate_opt_in(enabled);
+                let _ = result_tx.send(IpcBgResult::TranslateOptInSaved(res));
+            }
+            IpcCommand::SetProactiveBudget(budget) => {
+                let current = ipc.get_proactive_settings().ok();
+                let params = ProactiveSettingsSetParams {
+                    is_enabled: current.as_ref().is_none_or(|s| s.is_enabled),
+                    attention_mode: budget_to_attention_mode(&budget).to_string(),
+                    quiet_hour_start: current.as_ref().map_or(23, |s| s.quiet_hour_start),
+                    quiet_hour_end: current.as_ref().map_or(6, |s| s.quiet_hour_end),
+                    cooldown_minutes: current.as_ref().map_or(30, |s| s.cooldown_minutes),
+                    mute_hours: None,
+                };
+                let res = ipc.set_proactive_settings(params).map(|_| budget);
+                let _ = result_tx.send(IpcBgResult::ProactiveBudgetSaved(res));
+            }
+            IpcCommand::RefreshMemory => {
+                let res = ipc.list_memory(None, None, Some(200)).map(|m| m.len());
+                let _ = result_tx.send(IpcBgResult::MemoryCountLoaded(res));
+            }
+            IpcCommand::ReloadSkills => {
+                let res = ipc.reload_skills().map(|s| s.len());
+                let _ = result_tx.send(IpcBgResult::SkillsCountLoaded(res));
+            }
+            IpcCommand::ReloadMcp => {
+                let res = ipc
+                    .reload_mcp()
+                    .and_then(|_| ipc.list_mcp())
+                    .map(|s| s.len());
+                let _ = result_tx.send(IpcBgResult::McpCountLoaded(res));
+            }
+            IpcCommand::RunDevCheck { workspace_path } => {
+                let res = run_dev_workspace_check(&ipc, &workspace_path);
+                let _ = result_tx.send(IpcBgResult::DevCheckLoaded(res));
+            }
+            IpcCommand::RefreshDocs => {
+                let res = ipc.list_document_jobs().map(|jobs| summarize_document_jobs(&jobs));
+                let _ = result_tx.send(IpcBgResult::DocsLoaded(res));
+            }
+        }
+    }
+}
+
+fn send_ai_settings_and_counts(ipc: &HimeIpcClient, result_tx: &mpsc::Sender<IpcBgResult>) {
+    let _ = result_tx.send(IpcBgResult::TranslateOptInLoaded(
+        ipc.get_translate_opt_in(),
+    ));
+    let _ = result_tx.send(IpcBgResult::ProactiveSettingsLoaded(
+        ipc.get_proactive_settings(),
+    ));
+    let _ = result_tx.send(IpcBgResult::MemoryCountLoaded(
+        ipc.list_memory(None, None, Some(200)).map(|m| m.len()),
+    ));
+    let _ = result_tx.send(IpcBgResult::SkillsCountLoaded(
+        ipc.list_skills().map(|s| s.len()),
+    ));
+    let _ = result_tx.send(IpcBgResult::McpCountLoaded(
+        ipc.list_mcp().map(|s| s.len()),
+    ));
+}
+
+fn run_dev_workspace_check(
+    ipc: &HimeIpcClient,
+    workspace_path: &str,
+) -> Result<DeveloperWorkspaceSummary, IpcError> {
+    let git = ipc.developer_git_status(workspace_path)?;
+    let mut candidate_files: Vec<String> = Vec::new();
+    for path in git
+        .staged_files
+        .iter()
+        .chain(git.modified_files.iter())
+        .chain(git.untracked_files.iter())
+    {
+        if !candidate_files.contains(path) {
+            candidate_files.push(path.clone());
+        }
+        if candidate_files.len() >= 20 {
+            break;
+        }
+    }
+
+    let mut total_findings = 0usize;
+    let mut scan_error: Option<String> = None;
+    for rel in &candidate_files {
+        let full = Path::new(workspace_path).join(rel);
+        if !full.is_file() {
+            continue;
+        }
+        match ipc.developer_scan_secrets(ScanSecretsParams {
+            file_path: Some(rel.clone()),
+            path: Some(full.to_string_lossy().into_owned()),
+            content: None,
+        }) {
+            Ok(scan) => total_findings = total_findings.saturating_add(scan.count),
+            Err(err) => {
+                scan_error = Some(err.to_string());
+                break;
+            }
+        }
+    }
+
+    let status_text = if let Some(err) = scan_error {
+        format!("Git ok; scan err: {err}")
+    } else if total_findings > 0 {
+        format!("{total_findings} secret finding(s) detected")
+    } else if git.is_clean {
+        "Clean • 0 secret findings".to_string()
+    } else {
+        format!("{} file(s) scanned • 0 secrets", candidate_files.len())
+    };
+
+    Ok(DeveloperWorkspaceSummary {
+        branch: git.current_branch,
+        staged_count: git.staged_files.len(),
+        unstaged_count: git.modified_files.len(),
+        untracked_count: git.untracked_files.len(),
+        is_clean: git.is_clean,
+        secret_findings_count: total_findings,
+        last_check_status: Some(status_text),
+    })
 }
 
 enum OsCommand {
@@ -225,6 +585,7 @@ enum OsCommand {
     MediaNext,
     MediaPrev,
     MediaSeek(u64),
+    SyncMediaTimeline,
     SetWifiRadio(bool),
     SetBluetoothRadio(bool),
     ScanWifi,
@@ -314,6 +675,30 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                     if let Some(session) = get_smtc_session(&mut smtc_mgr) {
                         let ticks = (pos_ms as i64).saturating_mul(10_000);
                         let _ = session.TryChangePlaybackPositionAsync(ticks);
+                    }
+                }
+                OsCommand::SyncMediaTimeline => {
+                    if let Some(session) = get_smtc_session(&mut smtc_mgr) {
+                        if let Ok(props) = session.TryGetMediaPropertiesAsync().and_then(|op| op.get()) {
+                            let title = props.Title().unwrap_or_default().to_string();
+                            let artist = props.Artist().unwrap_or_default().to_string();
+                            let album = props
+                                .AlbumTitle()
+                                .ok()
+                                .map(|s| s.to_string())
+                                .filter(|s| !s.trim().is_empty());
+                            if let Ok(tl) = session.GetTimelineProperties() {
+                                let pos_ticks = tl.Position().map(|t| t.Duration).unwrap_or(0).max(0);
+                                let end_ticks = tl.EndTime().map(|t| t.Duration).unwrap_or(0).max(0);
+                                let _ = result_tx.send(IpcBgResult::MediaTimeline {
+                                    title,
+                                    artist,
+                                    album,
+                                    position_ms: (pos_ticks / 10_000) as u64,
+                                    duration_ms: (end_ticks / 10_000) as u64,
+                                });
+                            }
+                        }
                     }
                 }
                 OsCommand::SetWifiRadio(enabled) => {
@@ -467,6 +852,7 @@ struct AppShell {
     telemetry: TelemetryHandle,
     module_mgr: HimeAiModuleManager,
     ipc: Arc<HimeIpcClient>,
+    ipc_worker: IpcWorker,
     ipc_tx: mpsc::Sender<IpcBgResult>,
     ipc_rx: mpsc::Receiver<IpcBgResult>,
     os_worker: OsWorker,
@@ -484,6 +870,16 @@ struct AppShell {
     last_brightness_write_at: Option<Instant>,
     last_audio_device: Option<String>,
     last_running_windows: Vec<RunningWindow>,
+    last_music_track: Option<(String, String)>,
+    current_lyrics_cache_key: Option<String>,
+    active_routine_session_id: Option<String>,
+    last_proactive_id: Option<String>,
+    dismissed_proactive_ids: HashSet<String>,
+    last_proactive_eval_at: Instant,
+    last_media_timeline_sync_at: Instant,
+    last_core_bootstrap_at: Option<Instant>,
+    core_workspace_seeded: bool,
+    workspace_checked_once: bool,
     dragging_notch: bool,
     dragging_notch_slider: bool,
     drag_moved: bool,
@@ -598,6 +994,7 @@ impl AppShell {
         let (ipc_tx, ipc_rx) = mpsc::channel();
         let os_worker = OsWorker::spawn(ipc_tx.clone());
         let ipc = Arc::new(HimeIpcClient::with_default_pipe());
+        let ipc_worker = IpcWorker::spawn(Arc::clone(&ipc), ipc_tx.clone());
 
         let quit_event = unsafe { CreateEventW(None, true, false, w!("HimeQuit")) }.ok();
 
@@ -610,6 +1007,7 @@ impl AppShell {
 
         let dock = DockBar::new();
         let overlays = DualEdgeOverlays::new();
+        let now = Instant::now();
 
         let mut shell = Self {
             notch,
@@ -622,6 +1020,7 @@ impl AppShell {
             telemetry,
             module_mgr,
             ipc,
+            ipc_worker,
             ipc_tx,
             ipc_rx,
             os_worker,
@@ -631,7 +1030,7 @@ impl AppShell {
             overlay_right_surface,
             settings_surface,
             drawer_surface,
-            last_tick: Instant::now(),
+            last_tick: now,
             fast_timer_active: false,
             last_snap_volume: None,
             last_snap_brightness: None,
@@ -639,6 +1038,20 @@ impl AppShell {
             last_brightness_write_at: None,
             last_audio_device: None,
             last_running_windows: Vec::new(),
+            last_music_track: None,
+            current_lyrics_cache_key: None,
+            active_routine_session_id: None,
+            last_proactive_id: None,
+            dismissed_proactive_ids: HashSet::new(),
+            last_proactive_eval_at: now,
+            last_media_timeline_sync_at: now,
+            last_core_bootstrap_at: if native_settings.hime_ai_enabled {
+                Some(now)
+            } else {
+                None
+            },
+            core_workspace_seeded: false,
+            workspace_checked_once: false,
             dragging_notch: false,
             dragging_notch_slider: false,
             drag_moved: false,
@@ -651,6 +1064,9 @@ impl AppShell {
         shell.apply_native_settings(&native_settings, false);
         shell.sync_shelf_to_views();
         shell.os_worker.send(OsCommand::ScanTrayEntries);
+        if native_settings.hime_ai_enabled {
+            shell.ipc_worker.send(IpcCommand::BootstrapWorkspace);
+        }
 
         let initial_snap = shell.telemetry.snapshot();
         shell.apply_telemetry(&initial_snap, false);
@@ -773,8 +1189,13 @@ impl AppShell {
         // 6. Hime AI sidecar
         if norm.hime_ai_enabled {
             let _ = self.module_mgr.spawn();
+            if !self.core_workspace_seeded && save {
+                self.ipc_worker.send(IpcCommand::BootstrapWorkspace);
+                self.last_core_bootstrap_at = Some(Instant::now());
+            }
         } else {
             let _ = self.module_mgr.stop();
+            self.core_workspace_seeded = false;
             if self.ai_drawer.visible {
                 self.ai_drawer.close();
                 os_shell::set_window_focusable(self.drawer_surface.hwnd(), false);
@@ -836,8 +1257,39 @@ impl AppShell {
         let show_music =
             self.native_settings.music_mode_enabled || self.notch.active_panel == NotchPanel::Music;
         if show_music {
+            let next_track = snap
+                .music
+                .as_ref()
+                .map(|m| (m.title.clone(), m.artist.clone()));
+            if next_track != self.last_music_track {
+                self.last_music_track = next_track.clone();
+                self.current_lyrics_cache_key = None;
+                self.notch.music_album = None;
+                self.notch.music_position_ms = 0;
+                self.notch.music_duration_ms = 0;
+                self.notch.music_lyric_offset_ms = 0;
+                self.notch.set_music_synced_lrc(Vec::new());
+                if let Some((title, artist)) = next_track {
+                    self.os_worker.send(OsCommand::SyncMediaTimeline);
+                    if self.native_settings.music_mode_enabled
+                        && self.native_settings.hime_ai_enabled
+                    {
+                        self.ipc_worker.send(IpcCommand::GetLyrics {
+                            title,
+                            artist,
+                            album: None,
+                            duration_sec: None,
+                        });
+                    }
+                }
+            }
             self.notch.set_music(snap.music.clone());
         } else {
+            if self.last_music_track.is_some() {
+                self.last_music_track = None;
+                self.current_lyrics_cache_key = None;
+                self.notch.set_music_synced_lrc(Vec::new());
+            }
             self.notch.set_music(None);
         }
 
@@ -1290,12 +1742,63 @@ impl AppShell {
         }
     }
 
+    fn refresh_active_notch_panel(&mut self) {
+        match self.notch.active_panel {
+            NotchPanel::Wifi => {
+                self.os_worker.send(OsCommand::ScanWifi);
+            }
+            NotchPanel::Music => {
+                self.os_worker.send(OsCommand::SyncMediaTimeline);
+                if self.current_lyrics_cache_key.is_none()
+                    && self.native_settings.music_mode_enabled
+                    && self.native_settings.hime_ai_enabled
+                {
+                    if let Some(m) = &self.notch.music {
+                        self.ipc_worker.send(IpcCommand::GetLyrics {
+                            title: m.title.clone(),
+                            artist: m.artist.clone(),
+                            album: self.notch.music_album.clone(),
+                            duration_sec: (self.notch.music_duration_ms > 0)
+                                .then_some((self.notch.music_duration_ms / 1000) as u32),
+                        });
+                    }
+                }
+            }
+            NotchPanel::Tasks => {
+                if self.native_settings.hime_ai_enabled {
+                    self.notch.tasks_ws.loading = true;
+                    self.notch.tasks_ws.error = None;
+                    self.ipc_worker.send(IpcCommand::RefreshTasks);
+                }
+            }
+            NotchPanel::Focus => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RefreshFocusAndScreenTime);
+                }
+            }
+            NotchPanel::Status
+            | NotchPanel::CommandCenter
+            | NotchPanel::Calendar
+            | NotchPanel::Shortcuts
+            | NotchPanel::Shelf
+            | NotchPanel::HimeAi => {}
+        }
+    }
+
     fn execute_notch_action(&mut self, action: NotchAction, ctrl_hwnd: HWND) {
         let was_vol_muted = self.notch.volume_muted;
+        let quick_add_prio = self.notch.tasks_ws.quick_add_priority;
+        let quick_add_tab = self.notch.tasks_ws.active_tab;
         self.notch.apply_action(&action);
 
         match action {
-            NotchAction::ExpandPanel(NotchPanel::Wifi) | NotchAction::OpenWifiList | NotchAction::WifiRefresh => {
+            NotchAction::ExpandPanel(_)
+            | NotchAction::OpenWifiList
+            | NotchAction::PrevPanel
+            | NotchAction::NextPanel => {
+                self.refresh_active_notch_panel();
+            }
+            NotchAction::WifiRefresh => {
                 self.os_worker.send(OsCommand::ScanWifi);
             }
             NotchAction::ToggleWifi => {
@@ -1389,23 +1892,145 @@ impl AppShell {
                 let pos_ms = ((self.notch.music_duration_ms as f32) * ratio.clamp(0.0, 1.0)) as u64;
                 self.os_worker.send(OsCommand::MediaSeek(pos_ms));
             }
+            NotchAction::LyricsAdjustOffset(_) | NotchAction::LyricsResetOffset => {
+                if self.native_settings.hime_ai_enabled {
+                    if let Some(cache_key) = self.current_lyrics_cache_key.clone() {
+                        self.ipc_worker.send(IpcCommand::SetLyricsOffset {
+                            cache_key,
+                            offset_ms: self.notch.music_lyric_offset_ms as i32,
+                        });
+                    }
+                }
+            }
+            NotchAction::TasksQuickAdd(title) => {
+                let trimmed = title.trim().to_string();
+                if !trimmed.is_empty() && self.native_settings.hime_ai_enabled {
+                    let due_date = match quick_add_tab {
+                        TaskTabFilter::Upcoming => Some(now_unix_secs() + 86_400),
+                        _ => Some(now_unix_secs()),
+                    };
+                    let column_id = match quick_add_tab {
+                        TaskTabFilter::Upcoming => "col-upcoming".to_string(),
+                        _ => "col-todo".to_string(),
+                    };
+                    self.ipc_worker.send(IpcCommand::CreateTask(
+                        CreateProductivityTaskParams {
+                            title: trimmed,
+                            board_id: Some("board-default".to_string()),
+                            column_id: Some(column_id),
+                            priority: Some(task_priority_to_str(quick_add_prio).to_string()),
+                            due_date,
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            NotchAction::TasksToggleComplete(id) => {
+                if !id.starts_with("local-task-") && self.native_settings.hime_ai_enabled {
+                    let is_done = self
+                        .notch
+                        .tasks_ws
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == id)
+                        .is_some_and(|t| t.status.is_done());
+                    let (column_id, status) = if is_done {
+                        ("col-done".to_string(), "done".to_string())
+                    } else {
+                        ("col-todo".to_string(), "todo".to_string())
+                    };
+                    self.ipc_worker.send(IpcCommand::MoveTask {
+                        task_id: id,
+                        column_id,
+                        status,
+                    });
+                }
+            }
+            NotchAction::TasksDelete(id) => {
+                if !id.starts_with("local-task-") && self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::DeleteTask(id));
+                }
+            }
+            NotchAction::TasksSelectTab(_) | NotchAction::TasksCyclePriority => {}
+            NotchAction::FocusStart => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::FocusStart {
+                        routine_id: self.notch.focus_ws.routine_id.clone(),
+                    });
+                }
+            }
+            NotchAction::FocusComplete => {
+                if self.native_settings.hime_ai_enabled {
+                    if let Some(session_id) = self.active_routine_session_id.take() {
+                        self.ipc_worker
+                            .send(IpcCommand::FocusComplete { session_id });
+                    }
+                }
+            }
+            NotchAction::FocusSkip => {
+                if self.native_settings.hime_ai_enabled {
+                    if let Some(session_id) = self.active_routine_session_id.take() {
+                        self.ipc_worker.send(IpcCommand::FocusSkip { session_id });
+                    }
+                }
+            }
+            NotchAction::FocusEmergencyPause => {
+                if self.notch.focus_ws.emergency_paused && self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::FocusEmergencyPause {
+                        duration_min: 15,
+                        reason: "Notch Emergency Pause".to_string(),
+                    });
+                }
+            }
+            NotchAction::ProactiveAccept(id) => {
+                self.dismissed_proactive_ids.insert(id.clone());
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RespondProactive {
+                        suggestion_id: id,
+                        action: "accept".to_string(),
+                    });
+                }
+            }
+            NotchAction::ProactiveDismiss(id) => {
+                self.dismissed_proactive_ids.insert(id.clone());
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RespondProactive {
+                        suggestion_id: id,
+                        action: "dismiss".to_string(),
+                    });
+                }
+            }
+            NotchAction::ProactiveSnooze(id) => {
+                self.dismissed_proactive_ids.insert(id.clone());
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RespondProactive {
+                        suggestion_id: id,
+                        action: "mute".to_string(),
+                    });
+                }
+            }
+            NotchAction::ProactiveOpenDrawer => {
+                if let Some(id) = self.last_proactive_id.clone() {
+                    self.dismissed_proactive_ids.insert(id);
+                }
+                self.open_drawer_tab(DrawerTab::Chat, ctrl_hwnd);
+            }
+            NotchAction::TranslateClose => {}
+            NotchAction::TranslateOpenDrawer => {
+                self.open_drawer_tab(DrawerTab::Translate, ctrl_hwnd);
+            }
             NotchAction::OpenSettings => {
                 self.open_settings(ctrl_hwnd);
             }
             NotchAction::OpenAiDrawer => {
-                if !self.ai_drawer.visible {
-                    self.handle_action(HotkeyAction::ToggleAssistant, ctrl_hwnd);
-                }
+                self.open_drawer_tab(DrawerTab::Chat, ctrl_hwnd);
             }
             NotchAction::ClearShelf => {
                 self.shelf.clear();
                 let _ = self.shelf.save();
                 self.sync_shelf_to_views();
             }
-            NotchAction::ExpandPanel(_)
-            | NotchAction::Collapse
-            | NotchAction::PrevPanel
-            | NotchAction::NextPanel
+            NotchAction::Collapse
             | NotchAction::OpenShortcuts
             | NotchAction::CalendarPrevMonth
             | NotchAction::CalendarNextMonth
@@ -1729,7 +2354,11 @@ impl AppShell {
 
     fn apply_settings_action(&mut self, action: SettingsAction, ctrl_hwnd: HWND) {
         match action {
-            SettingsAction::SelectTab(_) => {}
+            SettingsAction::SelectTab(tab) => {
+                if tab == SettingsTab::HimeAi && self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RefreshAiSettingsAndCounts);
+                }
+            }
             SettingsAction::UpdateSettings
             | SettingsAction::ToggleDockMode
             | SettingsAction::ToggleNotchMode
@@ -1738,6 +2367,44 @@ impl AppShell {
             | SettingsAction::ResetToDefaults => {
                 let ns = extract_native_settings_from_panel(&self.settings);
                 self.apply_native_settings(&ns, true);
+            }
+            SettingsAction::ToggleTranslateOptIn => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::SetTranslateOptIn(
+                        self.settings.state.translate_opt_in,
+                    ));
+                }
+            }
+            SettingsAction::CycleProactiveBudget => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::SetProactiveBudget(
+                        self.settings.state.proactive_budget.clone(),
+                    ));
+                }
+            }
+            SettingsAction::RefreshMemory => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::RefreshMemory);
+                } else {
+                    self.settings
+                        .set_status_notice(Some("Hime AI is disabled".to_string()));
+                }
+            }
+            SettingsAction::ReloadSkills => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::ReloadSkills);
+                } else {
+                    self.settings
+                        .set_status_notice(Some("Hime AI is disabled".to_string()));
+                }
+            }
+            SettingsAction::ReloadMcp => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ipc_worker.send(IpcCommand::ReloadMcp);
+                } else {
+                    self.settings
+                        .set_status_notice(Some("Hime AI is disabled".to_string()));
+                }
             }
             SettingsAction::TestAndSaveProfile => {
                 let ns = extract_native_settings_from_panel(&self.settings);
@@ -1787,6 +2454,9 @@ impl AppShell {
         self.settings_surface.show();
         os_shell::focus_window(self.settings_surface.hwnd());
         self.os_worker.send(OsCommand::Probe9Router);
+        if self.native_settings.hime_ai_enabled {
+            self.ipc_worker.send(IpcCommand::RefreshAiSettingsAndCounts);
+        }
         self.render_all();
         self.ensure_fast_timer(ctrl_hwnd);
     }
@@ -1840,6 +2510,16 @@ impl AppShell {
                 os_shell::set_window_focusable(self.drawer_surface.hwnd(), false);
                 self.drawer_surface.hide();
             }
+            DrawerAction::SelectTab(tab) => {
+                self.ai_drawer.select_tab(tab);
+                if tab == DrawerTab::Workspace
+                    && self.native_settings.hime_ai_enabled
+                    && !self.workspace_checked_once
+                {
+                    self.workspace_checked_once = true;
+                    self.trigger_workspace_checks();
+                }
+            }
             DrawerAction::ClearAttachments => {
                 self.shelf.clear();
                 let _ = self.shelf.save();
@@ -1856,8 +2536,112 @@ impl AppShell {
                 self.ai_drawer.resolve_approval(&id, false);
                 self.dispatch_approval(id, false);
             }
+            DrawerAction::ClearTranslation => {
+                self.ai_drawer.clear_translation();
+            }
+            DrawerAction::CopyTranslation => {
+                let text = self.ai_drawer.translation.translated_text.clone();
+                if text.trim().is_empty() {
+                    self.ai_drawer.translation.status_notice = Some("Nothing to copy".to_string());
+                } else if copy_text_to_clipboard(&text) {
+                    self.ai_drawer.mark_translation_copied();
+                } else {
+                    self.ai_drawer.translation.status_notice =
+                        Some("Clipboard unavailable".to_string());
+                }
+            }
+            DrawerAction::RunDevCheck => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ai_drawer.developer.last_check_status =
+                        Some("Running git & secret scan...".to_string());
+                    self.ipc_worker.send(IpcCommand::RunDevCheck {
+                        workspace_path: current_workspace_path(),
+                    });
+                } else {
+                    self.ai_drawer.developer.last_check_status =
+                        Some("Hime AI is disabled".to_string());
+                }
+            }
+            DrawerAction::RefreshDocs => {
+                if self.native_settings.hime_ai_enabled {
+                    self.ai_drawer.documents.latest_job_label =
+                        Some("Refreshing document jobs...".to_string());
+                    self.ipc_worker.send(IpcCommand::RefreshDocs);
+                } else {
+                    self.ai_drawer.documents.latest_job_label =
+                        Some("Hime AI is disabled".to_string());
+                }
+            }
         }
         self.ensure_fast_timer(ctrl_hwnd);
+    }
+
+    fn trigger_workspace_checks(&mut self) {
+        self.ai_drawer.developer.last_check_status = Some("Checking workspace...".to_string());
+        self.ipc_worker.send(IpcCommand::RunDevCheck {
+            workspace_path: current_workspace_path(),
+        });
+        self.ipc_worker.send(IpcCommand::RefreshDocs);
+    }
+
+    fn open_drawer_tab(&mut self, tab: DrawerTab, ctrl_hwnd: HWND) {
+        if !self.native_settings.hime_ai_enabled {
+            self.notch
+                .set_ncm_center_alert(Some("Hime AI is disabled".to_string()));
+            self.render_all();
+            self.ensure_fast_timer(ctrl_hwnd);
+            return;
+        }
+        self.ai_drawer.select_tab(tab);
+        if !self.ai_drawer.visible {
+            self.sync_shelf_to_views();
+            self.ai_drawer.open();
+        }
+        if tab == DrawerTab::Workspace && !self.workspace_checked_once {
+            self.workspace_checked_once = true;
+            self.trigger_workspace_checks();
+        }
+        self.drawer_surface.set_click_through(false);
+        os_shell::set_window_focusable(self.drawer_surface.hwnd(), true);
+        self.drawer_surface.show();
+        os_shell::focus_window(self.drawer_surface.hwnd());
+        self.update_surface_click_through();
+        self.render_all();
+        self.ensure_fast_timer(ctrl_hwnd);
+    }
+
+    fn trigger_translate_selection(&mut self, ctrl_hwnd: HWND) {
+        if !self.native_settings.hime_ai_enabled {
+            self.notch
+                .set_ncm_center_alert(Some("Hime AI is disabled".to_string()));
+            self.render_all();
+            self.ensure_fast_timer(ctrl_hwnd);
+            return;
+        }
+        let target_lang = if self.ai_drawer.translation.target_lang.trim().is_empty() {
+            "id".to_string()
+        } else {
+            self.ai_drawer.translation.target_lang.to_ascii_lowercase()
+        };
+        self.notch
+            .translate_banner
+            .show_loading("Selected text", &target_lang);
+        if !self.notch.is_expanded {
+            self.notch.set_hidden(false);
+        }
+        self.update_surface_click_through();
+        self.render_all();
+        self.ensure_fast_timer(ctrl_hwnd);
+
+        let ipc = Arc::clone(&self.ipc);
+        let tx = self.ipc_tx.clone();
+        std::thread::spawn(move || {
+            let res = ipc.translate_selection(TranslateSelectionParams {
+                target_lang,
+                text: None,
+            });
+            let _ = tx.send(IpcBgResult::TranslationDone(res));
+        });
     }
 
     fn handle_window_key_message(&mut self, msg: &MSG, ctrl_hwnd: HWND) -> bool {
@@ -2140,6 +2924,274 @@ impl AppShell {
                         self.dock.set_system_tray_count(snap.tray_count);
                     }
                 }
+                IpcBgResult::MediaTimeline {
+                    title,
+                    artist,
+                    album,
+                    position_ms,
+                    duration_ms,
+                } => {
+                    let matches_track = self.last_music_track.as_ref().is_some_and(|(t, a)| {
+                        t == &title && a == &artist
+                    });
+                    if matches_track {
+                        if album.is_some() {
+                            self.notch.music_album = album;
+                        }
+                        if duration_ms > 0 {
+                            self.notch.music_duration_ms = duration_ms;
+                        }
+                        self.notch.update_music_position(position_ms);
+                    }
+                }
+                IpcBgResult::LyricsLoaded {
+                    title,
+                    artist,
+                    result,
+                } => {
+                    let matches_track = self.last_music_track.as_ref().is_some_and(|(t, a)| {
+                        t == &title && a == &artist
+                    });
+                    if matches_track {
+                        match result {
+                            Ok(res) => {
+                                self.core_workspace_seeded = true;
+                                self.current_lyrics_cache_key = Some(res.cache_key.clone());
+                                self.notch.music_lyric_offset_ms = res.user_offset_ms as i64;
+                                if res.duration_sec > 0 && self.notch.music_duration_ms == 0 {
+                                    self.notch.music_duration_ms = res.duration_sec as u64 * 1000;
+                                }
+                                if res.album.is_some() && self.notch.music_album.is_none() {
+                                    self.notch.music_album = res.album.clone();
+                                }
+                                let (synced, plain) = lyrics_result_to_lines(&res);
+                                if !synced.is_empty() {
+                                    self.notch.set_music_synced_lrc(synced);
+                                } else {
+                                    self.notch.music_synced_lrc.clear();
+                                    self.notch.music_lrc_lines = plain;
+                                    self.notch.music_active_lyric_idx = None;
+                                }
+                            }
+                            Err(_) => {
+                                self.current_lyrics_cache_key = None;
+                            }
+                        }
+                    }
+                }
+                IpcBgResult::LyricsOffsetSaved(Ok(resp)) => {
+                    self.notch.music_lyric_offset_ms = resp.user_offset_ms as i64;
+                    let pos = self.notch.music_position_ms;
+                    self.notch.update_music_position(pos);
+                }
+                IpcBgResult::LyricsOffsetSaved(Err(_)) => {}
+                IpcBgResult::TasksLoaded(res) => {
+                    self.notch.tasks_ws.loading = false;
+                    match res {
+                        Ok(records) => {
+                            self.core_workspace_seeded = true;
+                            self.notch.tasks_ws.error = None;
+                            self.notch.tasks_ws.tasks = records
+                                .iter()
+                                .map(map_productivity_task_to_card)
+                                .collect();
+                        }
+                        Err(err) => {
+                            if self.core_workspace_seeded {
+                                self.notch.tasks_ws.error = Some(err.to_string());
+                            }
+                        }
+                    }
+                }
+                IpcBgResult::FocusDataLoaded {
+                    routines,
+                    screentime,
+                } => {
+                    if let Ok(list) = routines {
+                        self.core_workspace_seeded = true;
+                        if let Some(routine) = list.iter().find(|r| r.active).or_else(|| list.first())
+                        {
+                            self.notch.focus_ws.routine_id = routine.id.clone();
+                            self.notch.focus_ws.routine_title = routine.title.clone();
+                            self.notch.focus_ws.category = routine.category.clone();
+                            self.notch.focus_ws.enforcement =
+                                format!("{:?}", routine.enforcement).to_ascii_lowercase();
+                            self.notch.focus_ws.streak_days = routine.streak.current_count;
+                            if self.notch.focus_ws.status == FocusSessionStatus::Idle {
+                                let secs = routine.schedule.duration_min.max(1) * 60;
+                                self.notch.focus_ws.total_secs = secs;
+                                self.notch.focus_ws.remaining_secs = secs;
+                            }
+                        }
+                    }
+                    if let Ok(sessions) = screentime {
+                        self.core_workspace_seeded = true;
+                        let today = current_local_date_str();
+                        let (study, neutral, distracting) =
+                            summarize_screentime_sessions(&sessions, &today);
+                        self.notch.focus_ws.study_secs = study;
+                        self.notch.focus_ws.neutral_secs = neutral;
+                        self.notch.focus_ws.distracting_secs = distracting;
+                    }
+                }
+                IpcBgResult::RoutineStarted(Ok(res)) => {
+                    self.active_routine_session_id = Some(res.session.id);
+                    let secs = res.session.duration_min.max(1) * 60;
+                    self.notch.focus_ws.total_secs = secs;
+                    if self.notch.focus_ws.remaining_secs == 0 {
+                        self.notch.focus_ws.remaining_secs = secs;
+                    }
+                }
+                IpcBgResult::RoutineStarted(Err(err)) => {
+                    self.notch
+                        .set_ncm_center_alert(Some(format!("Focus start: {err}")));
+                }
+                IpcBgResult::RoutineOutcome(Ok(res)) => {
+                    self.notch.focus_ws.streak_days = res.streak.current_count;
+                }
+                IpcBgResult::RoutineOutcome(Err(_)) => {}
+                IpcBgResult::EmergencyPaused(Ok(pause)) => {
+                    self.notch.set_ncm_center_alert(Some(format!(
+                        "Emergency pause ({}m)",
+                        pause.duration_min
+                    )));
+                }
+                IpcBgResult::EmergencyPaused(Err(err)) => {
+                    self.notch
+                        .set_ncm_center_alert(Some(format!("Pause: {err}")));
+                }
+                IpcBgResult::ProactiveEvaluated(Ok(items)) => {
+                    self.core_workspace_seeded = true;
+                    if !self.notch.is_expanded && !self.notch.translate_banner.active {
+                        if let Some(sug) = items.into_iter().find(|s| {
+                            s.status == "pending" && !self.dismissed_proactive_ids.contains(&s.id)
+                        }) {
+                            let level = proactive_level_from_suggestion(&sug);
+                            self.last_proactive_id = Some(sug.id.clone());
+                            self.notch.proactive_banner.show(
+                                sug.id,
+                                sug.category,
+                                level,
+                                sug.title,
+                                sug.content,
+                                HimeExpression::Senang,
+                                Some(12.0),
+                            );
+                            self.notch.set_hidden(false);
+                        }
+                    }
+                }
+                IpcBgResult::ProactiveEvaluated(Err(_)) => {}
+                IpcBgResult::ProactiveResponded(Ok(_)) => {}
+                IpcBgResult::ProactiveResponded(Err(err)) => {
+                    log_diag(&format!("[proactive] respond failed: {err}"));
+                }
+                IpcBgResult::TranslateOptInLoaded(Ok(st)) => {
+                    self.core_workspace_seeded = true;
+                    self.settings.state.translate_opt_in = st.opted_in;
+                }
+                IpcBgResult::TranslateOptInLoaded(Err(_)) => {}
+                IpcBgResult::TranslateOptInSaved(Ok(resp)) => {
+                    self.settings.state.translate_opt_in = resp.opted_in;
+                    let label = if resp.opted_in { "enabled" } else { "disabled" };
+                    self.settings
+                        .set_status_notice(Some(format!("Translate selection {label}")));
+                }
+                IpcBgResult::TranslateOptInSaved(Err(err)) => {
+                    self.settings
+                        .set_status_notice(Some(format!("Translate opt-in: {err}")));
+                }
+                IpcBgResult::TranslationDone(Ok(tr)) => {
+                    self.notch.translate_banner.show_result(
+                        &tr.original,
+                        &tr.translated,
+                        &tr.target_lang,
+                        tr.cached,
+                    );
+                    if !self.notch.is_expanded {
+                        self.notch.set_hidden(false);
+                    }
+                    self.ai_drawer.set_translation(
+                        tr.original,
+                        tr.translated,
+                        tr.target_lang,
+                        tr.cached,
+                    );
+                }
+                IpcBgResult::TranslationDone(Err(err)) => {
+                    self.notch.translate_banner.show_error(err.to_string());
+                    if !self.notch.is_expanded {
+                        self.notch.set_hidden(false);
+                    }
+                }
+                IpcBgResult::ProactiveSettingsLoaded(Ok(ps)) => {
+                    self.core_workspace_seeded = true;
+                    self.settings.state.proactive_budget =
+                        attention_mode_to_budget(&ps.attention_mode).to_string();
+                }
+                IpcBgResult::ProactiveSettingsLoaded(Err(_)) => {}
+                IpcBgResult::ProactiveBudgetSaved(Ok(budget)) => {
+                    self.settings.state.proactive_budget = budget.clone();
+                    self.settings
+                        .set_status_notice(Some(format!("Proactive budget set to {budget}")));
+                }
+                IpcBgResult::ProactiveBudgetSaved(Err(err)) => {
+                    self.settings
+                        .set_status_notice(Some(format!("Proactive budget: {err}")));
+                }
+                IpcBgResult::MemoryCountLoaded(Ok(count)) => {
+                    self.core_workspace_seeded = true;
+                    self.settings.state.memory_count = count;
+                    if self.settings.visible {
+                        self.settings
+                            .set_status_notice(Some(format!("Memory refreshed: {count} entries")));
+                    }
+                }
+                IpcBgResult::MemoryCountLoaded(Err(err)) => {
+                    if self.settings.visible {
+                        self.settings
+                            .set_status_notice(Some(format!("Memory: {err}")));
+                    }
+                }
+                IpcBgResult::SkillsCountLoaded(Ok(count)) => {
+                    self.core_workspace_seeded = true;
+                    self.settings.state.skills_count = count;
+                    if self.settings.visible {
+                        self.settings
+                            .set_status_notice(Some(format!("Skills reloaded: {count} loaded")));
+                    }
+                }
+                IpcBgResult::SkillsCountLoaded(Err(err)) => {
+                    if self.settings.visible {
+                        self.settings
+                            .set_status_notice(Some(format!("Skills: {err}")));
+                    }
+                }
+                IpcBgResult::McpCountLoaded(Ok(count)) => {
+                    self.core_workspace_seeded = true;
+                    self.settings.state.mcp_count = count;
+                    if self.settings.visible {
+                        self.settings
+                            .set_status_notice(Some(format!("MCP servers: {count} connected")));
+                    }
+                }
+                IpcBgResult::McpCountLoaded(Err(err)) => {
+                    if self.settings.visible {
+                        self.settings.set_status_notice(Some(format!("MCP: {err}")));
+                    }
+                }
+                IpcBgResult::DevCheckLoaded(Ok(summary)) => {
+                    self.ai_drawer.set_developer_summary(summary);
+                }
+                IpcBgResult::DevCheckLoaded(Err(err)) => {
+                    self.ai_drawer.developer.last_check_status = Some(format!("IPC: {err}"));
+                }
+                IpcBgResult::DocsLoaded(Ok(summary)) => {
+                    self.ai_drawer.set_documents_summary(summary);
+                }
+                IpcBgResult::DocsLoaded(Err(err)) => {
+                    self.ai_drawer.documents.latest_job_label = Some(format!("IPC: {err}"));
+                }
             }
         }
 
@@ -2154,12 +3206,56 @@ impl AppShell {
             self.os_worker.send(OsCommand::ScanTrayEntries);
         }
 
+        // Smoothly advance LRC lyrics position while playing & periodically re-sync SMTC timeline
+        let is_playing = self.notch.music.as_ref().is_some_and(|m| m.is_playing);
+        if is_playing {
+            let delta_ms = (dt * 1000.0).round() as u64;
+            if delta_ms > 0 {
+                let next_pos = self.notch.music_position_ms.saturating_add(delta_ms);
+                self.notch.update_music_position(next_pos);
+            }
+            if now.duration_since(self.last_media_timeline_sync_at) >= MEDIA_TIMELINE_SYNC_INTERVAL {
+                self.last_media_timeline_sync_at = now;
+                self.os_worker.send(OsCommand::SyncMediaTimeline);
+            }
+        }
+
+        // Retry initial workspace bootstrap if Core pipe was still starting up
+        if self.native_settings.hime_ai_enabled && !self.core_workspace_seeded {
+            let should_retry = self
+                .last_core_bootstrap_at
+                .is_none_or(|t| now.duration_since(t) >= CORE_BOOTSTRAP_RETRY_INTERVAL);
+            if should_retry {
+                self.last_core_bootstrap_at = Some(now);
+                self.ipc_worker.send(IpcCommand::BootstrapWorkspace);
+            }
+        }
+
+        // Periodic proactive engine evaluation
+        if self.native_settings.hime_ai_enabled
+            && now.duration_since(self.last_proactive_eval_at) >= PROACTIVE_EVAL_INTERVAL
+        {
+            self.last_proactive_eval_at = now;
+            self.ipc_worker.send(IpcCommand::EvaluateProactive);
+        }
+
+        let prev_focus_status = self.notch.focus_ws.status;
         let mut animating = false;
         animating |= self.notch.tick(dt);
+        if prev_focus_status == FocusSessionStatus::Active
+            && self.notch.focus_ws.status == FocusSessionStatus::Completed
+            && self.native_settings.hime_ai_enabled
+        {
+            if let Some(session_id) = self.active_routine_session_id.take() {
+                self.ipc_worker
+                    .send(IpcCommand::FocusComplete { session_id });
+            }
+        }
         animating |= self.dock.tick(dt);
         animating |= self.overlays.tick(dt);
         animating |= self.settings.tick(dt);
         animating |= self.ai_drawer.tick(dt);
+        animating |= self.notch.has_active_banner();
 
         self.sync_overlay_visibility();
         self.render_all();
@@ -2735,6 +3831,241 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn copy_text_to_clipboard(text: &str) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn OpenClipboard(hWndNewOwner: isize) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(uFormat: u32, hMem: isize) -> isize;
+        fn CloseClipboard() -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> isize;
+        fn GlobalLock(hMem: isize) -> *mut c_void;
+        fn GlobalUnlock(hMem: isize) -> i32;
+        fn GlobalFree(hMem: isize) -> isize;
+    }
+
+    const CF_UNICODEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let byte_len = wide.len().saturating_mul(std::mem::size_of::<u16>());
+    unsafe {
+        if OpenClipboard(0) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+        if hmem == 0 {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let ptr = GlobalLock(hmem) as *mut u16;
+        if ptr.is_null() {
+            let _ = GlobalFree(hmem);
+            let _ = CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        let _ = GlobalUnlock(hmem);
+        if SetClipboardData(CF_UNICODEXT, hmem) == 0 {
+            let _ = GlobalFree(hmem);
+            let _ = CloseClipboard();
+            return false;
+        }
+        let _ = CloseClipboard();
+        true
+    }
+}
+
+fn current_workspace_path() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+fn current_local_date_str() -> String {
+    let st = unsafe { GetLocalTime() };
+    format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn task_priority_to_str(priority: TaskPriority) -> &'static str {
+    match priority {
+        TaskPriority::Low => "low",
+        TaskPriority::Medium => "medium",
+        TaskPriority::High => "high",
+        TaskPriority::Critical => "critical",
+    }
+}
+
+fn map_productivity_task_to_card(record: &ProductivityTaskRecord) -> TaskCardItem {
+    let priority = match record.priority.trim().to_ascii_lowercase().as_str() {
+        "low" => TaskPriority::Low,
+        "high" => TaskPriority::High,
+        "critical" | "urgent" => TaskPriority::Critical,
+        _ => TaskPriority::Medium,
+    };
+    let status = match record.status.trim().to_ascii_lowercase().as_str() {
+        "done" | "completed" => TaskStatus::Done,
+        "in_progress" | "active" => TaskStatus::InProgress,
+        "review" => TaskStatus::Review,
+        _ => TaskStatus::Todo,
+    };
+    let due_label = if record.column_id.eq_ignore_ascii_case("col-upcoming") {
+        Some("Upcoming".to_string())
+    } else if let Some(due) = record.due_date {
+        if due > now_unix_secs() + 43_200 {
+            Some("Upcoming".to_string())
+        } else {
+            Some("Today".to_string())
+        }
+    } else {
+        Some("Today".to_string())
+    };
+    TaskCardItem {
+        id: record.id.clone(),
+        title: record.title.clone(),
+        priority,
+        status,
+        due_label,
+    }
+}
+
+fn lyrics_result_to_lines(res: &LyricsResult) -> (Vec<LrcLine>, Vec<String>) {
+    if let Some(raw) = res.synced_lyrics.as_deref() {
+        if !raw.trim().is_empty() {
+            let parsed = parse_lrc_lines(raw);
+            if !parsed.is_empty() {
+                let texts = parsed.iter().map(|l| l.text.clone()).collect();
+                return (parsed, texts);
+            }
+        }
+    }
+    if !res.lines.is_empty() {
+        let mut parsed: Vec<LrcLine> = res
+            .lines
+            .iter()
+            .map(|l| LrcLine {
+                ms: l.ms as u64,
+                text: l.text.clone(),
+            })
+            .collect();
+        parsed.sort_by_key(|l| l.ms);
+        let texts = parsed.iter().map(|l| l.text.clone()).collect();
+        return (parsed, texts);
+    }
+    if let Some(plain) = res.plain_lyrics.as_deref() {
+        let lines: Vec<String> = plain
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        return (Vec::new(), lines);
+    }
+    (Vec::new(), Vec::new())
+}
+
+fn summarize_screentime_sessions(
+    sessions: &[ScreenTimeSessionRecord],
+    today_date_str: &str,
+) -> (u64, u64, u64) {
+    let mut study = 0u64;
+    let mut neutral = 0u64;
+    let mut distracting = 0u64;
+    for s in sessions {
+        if let Some(d) = s.date_str.as_deref() {
+            if !d.is_empty() && d != today_date_str {
+                continue;
+            }
+        }
+        let secs = s.duration_secs.max(0) as u64;
+        match s.category.trim().to_ascii_lowercase().as_str() {
+            "study" | "productive" | "work" | "focus" | "coding" | "learning" => {
+                study = study.saturating_add(secs);
+            }
+            "distracting" | "entertainment" | "social" | "gaming" => {
+                distracting = distracting.saturating_add(secs);
+            }
+            _ => {
+                neutral = neutral.saturating_add(secs);
+            }
+        }
+    }
+    (study, neutral, distracting)
+}
+
+fn summarize_document_jobs(jobs: &[DocumentJobRecord]) -> DocumentsWorkspaceSummary {
+    let mut active_jobs = 0usize;
+    let mut completed_jobs = 0usize;
+    let mut failed_jobs = 0usize;
+    for job in jobs {
+        match job.status.trim().to_ascii_lowercase().as_str() {
+            "completed" | "done" | "success" => completed_jobs += 1,
+            "failed" | "error" => failed_jobs += 1,
+            _ => active_jobs += 1,
+        }
+    }
+    let latest_job_label = jobs
+        .iter()
+        .max_by_key(|j| j.created_at)
+        .map(|job| {
+            let name = job
+                .target_path
+                .as_deref()
+                .or(job.source_path.as_deref())
+                .and_then(|p| Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or(&job.operation);
+            format!("{name} ({})", job.status)
+        });
+    DocumentsWorkspaceSummary {
+        active_jobs,
+        completed_jobs,
+        failed_jobs,
+        latest_job_label,
+    }
+}
+
+fn proactive_level_from_suggestion(item: &ProactiveSuggestionItem) -> ProactiveLevel {
+    if item.score >= 0.85 {
+        ProactiveLevel::Penting
+    } else if item.score >= 0.6 {
+        ProactiveLevel::Tanya
+    } else if item.score >= 0.35 {
+        ProactiveLevel::Colek
+    } else {
+        ProactiveLevel::Bisik
+    }
+}
+
+fn budget_to_attention_mode(budget: &str) -> &'static str {
+    match budget.trim().to_ascii_lowercase().as_str() {
+        "quiet" | "pendiam" => "pendiam",
+        "chatty" | "cerewet" => "cerewet",
+        _ => "seimbang",
+    }
+}
+
+fn attention_mode_to_budget(mode: &str) -> &'static str {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "pendiam" | "quiet" => "quiet",
+        "cerewet" | "chatty" => "chatty",
+        _ => "balanced",
+    }
+}
+
 fn log_diag(msg: &str) {
     use std::io::Write;
     let Some(base) = std::env::var_os("LOCALAPPDATA") else {
@@ -2924,6 +4255,15 @@ fn main() {
 
     let hk_mgr = HotkeyManager::register(ctrl_hwnd, true);
     HOTKEY_MGR.with(|cell| *cell.borrow_mut() = Some(hk_mgr));
+    let translate_hk_ok = unsafe {
+        RegisterHotKey(
+            Some(ctrl_hwnd),
+            HOTKEY_TRANSLATE_CST,
+            HOT_KEY_MODIFIERS((MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT).0),
+            VK_T,
+        )
+        .is_ok()
+    };
 
     unsafe {
         if !start_fast {
@@ -2947,6 +4287,11 @@ fn main() {
         let _ = KillTimer(Some(ctrl_hwnd), TIMER_ANIM_ID);
     }
 
+    if translate_hk_ok {
+        unsafe {
+            let _ = UnregisterHotKey(Some(ctrl_hwnd), HOTKEY_TRANSLATE_CST);
+        }
+    }
     HOTKEY_MGR.with(|cell| {
         cell.borrow_mut().take();
     });
@@ -2967,6 +4312,14 @@ unsafe extern "system" fn controller_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_HOTKEY => {
+            if wparam.0 as i32 == HOTKEY_TRANSLATE_CST {
+                APP_SHELL.with(|cell| {
+                    if let Some(shell) = cell.borrow_mut().as_mut() {
+                        shell.trigger_translate_selection(hwnd);
+                    }
+                });
+                return LRESULT(0);
+            }
             let action = HOTKEY_MGR.with(|cell| {
                 cell.borrow()
                     .as_ref()
@@ -3246,5 +4599,136 @@ mod tests {
         }
         assert!(dock.is_hidden);
         assert_eq!(dock.show_progress.value, 0.0);
+    }
+
+    #[test]
+    fn lyrics_result_parses_synced_lrc_and_falls_back_to_lines() {
+        let synced = LyricsResult {
+            cache_key: "k1".into(),
+            title: "Nightcall".into(),
+            artist: "Kavinsky".into(),
+            album: None,
+            duration_sec: 258,
+            source: "lrclib".into(),
+            synced_lyrics: Some("[00:01.00]First\n[00:04.50]Second".into()),
+            plain_lyrics: None,
+            lines: Vec::new(),
+            is_synced: true,
+            is_instrumental: false,
+            user_offset_ms: -200,
+        };
+        let (lrc, texts) = lyrics_result_to_lines(&synced);
+        assert_eq!(lrc.len(), 2);
+        assert_eq!(lrc[0].ms, 1000);
+        assert_eq!(texts, vec!["First", "Second"]);
+
+        let from_vec = LyricsResult {
+            synced_lyrics: None,
+            lines: vec![hime_island_native::ipc_client::LyricLine {
+                ms: 2500,
+                text: "From vector".into(),
+            }],
+            ..synced
+        };
+        let (lrc2, texts2) = lyrics_result_to_lines(&from_vec);
+        assert_eq!(lrc2.len(), 1);
+        assert_eq!(lrc2[0].ms, 2500);
+        assert_eq!(texts2, vec!["From vector"]);
+    }
+
+    #[test]
+    fn productivity_and_workspace_mappers_convert_core_records() {
+        let rec = ProductivityTaskRecord {
+            id: "ptask-1".into(),
+            board_id: "board-default".into(),
+            column_id: "col-upcoming".into(),
+            title: "Ship Phase 5".into(),
+            description: None,
+            priority: "critical".into(),
+            status: "done".into(),
+            due_date: None,
+            estimated_minutes: None,
+            actual_minutes: None,
+            labels: None,
+            parent_task_id: None,
+            created_at: 100,
+            updated_at: 100,
+            completed_at: Some(200),
+        };
+        let card = map_productivity_task_to_card(&rec);
+        assert_eq!(card.priority, TaskPriority::Critical);
+        assert_eq!(card.status, TaskStatus::Done);
+        assert_eq!(card.due_label.as_deref(), Some("Upcoming"));
+
+        let sessions = vec![
+            ScreenTimeSessionRecord {
+                id: "s1".into(),
+                app_name: "code.exe".into(),
+                window_title: None,
+                category: "coding".into(),
+                duration_secs: 1800,
+                timestamp: 100,
+                date_str: Some("2026-11-26".into()),
+            },
+            ScreenTimeSessionRecord {
+                id: "s2".into(),
+                app_name: "youtube.exe".into(),
+                window_title: None,
+                category: "distracting".into(),
+                duration_secs: 300,
+                timestamp: 120,
+                date_str: Some("2026-11-26".into()),
+            },
+            ScreenTimeSessionRecord {
+                id: "s3".into(),
+                app_name: "old.exe".into(),
+                window_title: None,
+                category: "study".into(),
+                duration_secs: 9999,
+                timestamp: 10,
+                date_str: Some("2026-11-25".into()),
+            },
+        ];
+        assert_eq!(
+            summarize_screentime_sessions(&sessions, "2026-11-26"),
+            (1800, 0, 300)
+        );
+
+        assert_eq!(budget_to_attention_mode("quiet"), "pendiam");
+        assert_eq!(budget_to_attention_mode("balanced"), "seimbang");
+        assert_eq!(budget_to_attention_mode("chatty"), "cerewet");
+        assert_eq!(attention_mode_to_budget("pendiam"), "quiet");
+        assert_eq!(attention_mode_to_budget("seimbang"), "balanced");
+        assert_eq!(attention_mode_to_budget("cerewet"), "chatty");
+
+        let jobs = vec![
+            DocumentJobRecord {
+                id: "j1".into(),
+                operation: "merge_pdfs".into(),
+                source_path: None,
+                target_path: Some(r"C:\docs\merged.pdf".into()),
+                status: "completed".into(),
+                format: "pdf".into(),
+                metadata: None,
+                created_at: 20,
+                completed_at: Some(25),
+            },
+            DocumentJobRecord {
+                id: "j2".into(),
+                operation: "create_report".into(),
+                source_path: None,
+                target_path: None,
+                status: "running".into(),
+                format: "html".into(),
+                metadata: None,
+                created_at: 10,
+                completed_at: None,
+            },
+        ];
+        let docs = summarize_document_jobs(&jobs);
+        assert_eq!(docs.active_jobs, 1);
+        assert_eq!(docs.completed_jobs, 1);
+        assert_eq!(docs.failed_jobs, 0);
+        assert_eq!(docs.latest_job_label.as_deref(), Some("merged.pdf (completed)"));
     }
 }

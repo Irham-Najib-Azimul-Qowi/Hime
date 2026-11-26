@@ -82,8 +82,6 @@ impl CoreServer {
 
         let event_bus = EventBus::new(128);
         let policy_engine = Arc::new(PolicyEngine::new());
-        // Enable Superadmin mode for personal desktop environment per user authorization
-        policy_engine.set_superadmin(true);
         let policy: Arc<dyn PolicyEnforcer> = Arc::clone(&policy_engine) as Arc<dyn PolicyEnforcer>;
         let ai = Arc::new(AiOrchestrator::new(
             Arc::clone(&storage),

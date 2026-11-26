@@ -1,111 +1,109 @@
-# Hime — Personal AI Operating Environment (v1.0 RC)
+# Hime — Pure-Rust Modular AI Desktop Ecosystem
 
-[![Build & Test Status](https://img.shields.io/badge/tests-123%20passed-brightgreen.svg)](#)
-[![Security Audit](https://img.shields.io/badge/security-0%20critical%20%7C%200%20high-success.svg)](#)
-[![Release Status](https://img.shields.io/badge/release-v1.0.0--rc.1-blue.svg)](#)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20(Beta)-lightgrey.svg)](#)
-
-> **Hime** is an agentic personal operating environment for Windows (and cross-platform on Linux) that seamlessly merges an unobtrusive floating Dynamic Island interface with an autonomous AI agent runtime, memory, storage intelligence, cross-device sync, and specialized developer workspaces.
+> **Hime** is a Windows personal AI desktop ecosystem built around **ADR-017: Modular Two-Subsystem Native Rust Architecture**, pairing a pure-Rust Direct2D Dynamic Island shell (`hime-island-native.exe`) with a modular AI & intelligence runtime (`hime-core.exe`).
 
 ---
 
-## 1. KEY HIGHLIGHTS
+## 1. Architecture Overview (ADR-017 Phase 4)
 
-- **Floating Dynamic Island HUD**: 5 adaptive visual states (Idle, Thinking, Permission Approval, Notification, Error/Offline) docked at the top of your screen.
-- **Omnibox Command Palette (`Ctrl+K`)**: Keyboard-first desktop command center for instant action execution, agent prompts, and workspace filtering.
-- **Fail-Closed Security Architecture**: Central Policy Enforcement Point (PEP) with L0–L4 risk classification, cryptographic request-specific tickets, anti-replay, and zero plaintext credentials in external storage (DPAPI hardware-backed vault).
-- **Hermes Agent & 9Router Gateway Integration**: Full OpenAI-compatible model routing with real-time streaming, turn cancellation, and automatic Chain-of-Thought (`<think>`) output redaction.
-- **Storage Intelligence & Safe Operations**: Fast local file indexing, duplicate detection, and reversible file operations via `.hime/recycle/` with 1-Click Restore.
-- **Mobile Companion Layer**: Android Kotlin Compose application paired via secure local mTLS and QR codes for remote approvals (UR-02/UR-04) and device posture audit (UR-12).
-- **Academic & Document Toolkit**: Indonesian academic paper generation complying with national university standards (TNR 12, 1.5 spacing, 4-3-3-3 cm margins) and offline PDF merger/compressor.
-- **Developer Workspace & Secret Defense**: Allowlisted command runner (`git`, `cargo`, `pnpm`, `python`, `tsc`, `ruff`), pre-commit secret scanning, and built-in IEEE/ISO SE templates.
-- **Specialist Agents & Data/AI Studio**: Domain specialist registry (6 domains), CSV dataset profiler, leakage-free ML experiment designer (UR-13), and opt-in proactive assistance.
-- **Ultra-Lean Resource Footprint**: Core daemon idle RAM: **22.4 MB**, Desktop idle RAM: **58.2 MB**, cold startup: **182 ms**, native release binary: **4.85 MB**.
+Hime separates the always-on desktop interface from the AI runtime across two independent Rust subsystems communicating over a Win32 Named Pipe (`\\.\pipe\hime-ipc`):
+
+| Subsystem | Location | Binary | Role |
+| :--- | :--- | :--- | :--- |
+| **Subsystem 1: Hime Island Native** | `island/native/` | `hime-island-native.exe` | Pure-Rust Win32 + Direct2D + DirectWrite + DirectComposition shell (zero WebView2). Renders 3-edge Dynamic Island Notch, Floating Dock, Dual Edge Overlays, Drag & Drop File Shelf, Native Settings, AI Drawer, Module Manager, and embedded global hotkeys. |
+| **Subsystem 2: Hime Core (`hime-ai`)** | `core/` | `hime-core.exe` | Rust workspace (`hime-core`, `hime-ipc`, `hime-modsdk`, `hime-pal`, `hime-security`, `hime-storage`) providing Policy Enforcement (PEP/PDP), DPAPI-encrypted vault, SQLite WAL + FTS5 memory, dynamic `SKILL.md` runtime, MCP Host Client, lyrics/tasks/routines/screen-time/proactive/dev/document engines, and adaptive AI adapters. |
+| **External Gateway (Optional)** | External (`127.0.0.1:20128`) | `9router` | Optional external OpenAI-compatible router alongside direct Gemini native and Anthropic/OpenAI-compatible providers. |
+
+> The legacy Tauri 2.0 / WebView2 / React + Bun shell (`island/src`, `island/src-tauri`, `hime_hotkey.exe`) has been archived under [`Archive/legacy-webview2-island/`](Archive/legacy-webview2-island/README.md).
 
 ---
 
-## 2. MONOREPO ARCHITECTURE
+## 2. Repository Structure
 
 ```text
 Hime/
-├── apps/
-│   ├── hime-desktop/            # Tauri 2.0 Native Shell + React/TypeScript UI
-│   │   ├── src-tauri/           # Rust Tauri wrapper, windowing & system tray
-│   │   └── src/                 # React 18, Vite, Tailwind, Lucide Icons
-│   └── mobile/                  # Android Companion App (Kotlin, Jetpack Compose)
+├── island/
+│   ├── native/                  # Subsystem 1: Pure-Rust Direct2D + DirectComposition shell
+│   └── scripts/                 # Taskbar recovery and desktop inspection utilities
 │
-├── crates/                      # Core Rust Workspace Crates
-│   ├── hime-core/               # Orchestration, PDP/PEP, Tool Gateway, Task Engine
-│   ├── hime-ipc/                # Binary IPC framing, Named Pipes, Unix Domain Sockets
-│   ├── hime-pal/                # Platform Abstraction Layer (Paths, Supervisor, Sockets)
-│   ├── hime-security/           # DPAPI Vault, Software Vault, Policy, Redaction
-│   └── hime-storage/            # SQLite WAL database, migrations, audit events
+├── core/
+│   ├── Cargo.toml               # Subsystem 2: Rust virtual workspace manifest
+│   └── crates/
+│       ├── hime-core/           # AI adapters, orchestration, PDP/PEP, productivity, docs, dev tools
+│       ├── hime-ipc/            # Binary-framed Named Pipe / UDS JSON-RPC transport
+│       ├── hime-modsdk/         # Module & skill SDK contracts
+│       ├── hime-pal/            # Platform Abstraction Layer
+│       ├── hime-security/       # DPAPI / software vault, redaction, policy engine
+│       └── hime-storage/        # SQLite WAL persistence, FTS5 memory, audit log
 │
-├── docs/                        # Complete Engineering & Architecture Documentation
-│   ├── adr/                     # Architecture Decision Records (001 - 010)
-│   ├── architecture/            # Component Architecture Specifications
-│   ├── benchmarks/              # Performance & Target Hardware Benchmarks
-│   ├── legal/                   # Third-Party Notices & Clean-Room Audit
-│   ├── linux/                   # Linux Beta Architecture & Compositor Support
-│   ├── qa/                      # UI/UX & Reliability Audit Reports
-│   ├── runbook/                 # Operations & Disaster Recovery Runbook
-│   ├── security/                # Exhaustive Security Review & Test Report
-│   └── user/                    # Installation Guide & User Manual
+├── scripts/                     # Pure-Rust CLI, lifecycle, brand, hygiene & E2E gates
+│   ├── hime.ps1                 # Unified CLI (doctor, setup, dev, build, test, check, clean)
+│   ├── start-hime.ps1           # Launch hime-core + hime-island-native + supervisor
+│   ├── hime-supervisor.ps1      # Background self-healing watchdog (HimeQuit aware)
+│   ├── stop-hime.ps1            # Synchronized HimeQuit shutdown & taskbar restoration
+│   ├── setup-shortcuts.ps1      # Desktop, Start Menu & Autostart shortcuts
+│   ├── check-brand.ps1          # Brand compliance gate
+│   ├── check-hygiene.ps1        # Code hygiene gate
+│   ├── verify-e2e.ps1           # Automated 4-tier pure-Rust verification suite
+│   └── verify-desktop-live.ps1  # Live Win32 HWND, process & HimeQuit validation
 │
-├── project-management/          # Governance, Status, Phase Reports & Checklists
-│   ├── phases/                  # Completion Reports (Phase 01 through Phase 15)
-│   └── RELEASE-CRITERIA-CHECKLIST.md # v1.0 Exit Gate Verification Matrix
-│
-├── scripts/                     # Build, test, and environment verification scripts
-│   ├── build.ps1                # Monorepo build automation
-│   ├── test.ps1                 # Full automated test suite runner
-│   └── check-env.ps1            # Environment & toolchain verification
-│
-├── Cargo.toml                   # Root Cargo virtual workspace manifest (v1.0.0)
-├── CHANGELOG.md                 # Project version history
-└── PROJECT_STATUS.md            # Master status tracking
+├── tools/                       # Silent VBS launcher & helper utilities
+├── modules/                     # Declarative module manifests (eyes, keybinds)
+├── contracts/                   # JSON schemas for module manifests
+├── design/                      # Brand SVG marks, design tokens, eye geometry
+├── mobile/                      # Android Kotlin Compose companion app
+├── docs/                        # Architecture specs & ADRs (ADR-004 through ADR-017)
+└── Archive/
+    └── legacy-webview2-island/  # Archived WebView2 / Tauri / Bun shell (ADR-017 Phase 4)
 ```
 
 ---
 
-## 3. QUICK START
+## 3. Quick Start
 
 ### Prerequisites
-- **Windows:** Windows 10/11 64-bit, Rust 1.80+, Node.js 18+, pnpm 9+
-- **Linux:** Ubuntu 22.04+ / Fedora 39+, WebKitGTK 4.1, libssl-dev
+- **OS:** Windows 10 / 11 (64-bit)
+- **Toolchain:** Rust (`rustc` + `cargo`, `stable-x86_64-pc-windows-msvc` with Visual Studio C++ Build Tools), Git
+- *(No Node.js, Bun, or WebView2 build tools are required for the active pure-Rust desktop shell.)*
 
-### Automated Test Suite Execution
-To verify the entire multi-crate workspace:
+### Verify Toolchain & Quality Gates
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/test.ps1
+# Check Rust toolchain prerequisites
+.\scripts\hime.ps1 doctor
+
+# Run brand compliance, code hygiene, and all Rust unit/integration tests
+.\scripts\hime.ps1 check
+
+# Or run the full 4-tier E2E verification suite
+powershell -ExecutionPolicy Bypass -File scripts/verify-e2e.ps1
 ```
-*(All 123 automated unit and integration tests will execute and report 100% pass rate).*
 
-### Building for Production
+### Build & Run
 ```powershell
-# Build frontend bundle:
-pnpm --dir apps/hime-desktop build
+# Build optimized release binaries (core/target/release/hime-core.exe & island/native/target/release/hime-island-native.exe)
+.\scripts\hime.ps1 build
 
-# Build optimized release binary:
-cargo build --release -p hime-core
+# Start Hime Native Ecosystem (with self-healing supervisor)
+powershell -ExecutionPolicy Bypass -File scripts/start-hime.ps1
+
+# Validate live desktop processes, top-center Notch HWND, and HimeQuit shutdown
+powershell -ExecutionPolicy Bypass -File scripts/verify-desktop-live.ps1
+
+# Cleanly stop Hime and restore Windows taskbar
+powershell -ExecutionPolicy Bypass -File scripts/stop-hime.ps1
 ```
 
 ---
 
-## 4. DOCUMENTATION LINKS
+## 4. Documentation & ADRs
 
-- [Installation Guide](docs/user/INSTALLATION.md)
-- [User Manual & Shortcuts](docs/user/USER-MANUAL.md)
-- [Performance Benchmarks](docs/benchmarks/PERFORMANCE-REPORT.md)
-- [Security Audit Report](docs/security/SECURITY-TEST-REPORT.md)
-- [Operations & Recovery Runbook](docs/runbook/OPERATIONS-AND-RECOVERY.md)
-- [Linux Support Specification](docs/linux/LINUX-SUPPORT.md)
-- [Third-Party Attribution & Licenses](docs/legal/THIRD-PARTY.md)
-- [v1.0 Release Criteria Checklist](project-management/RELEASE-CRITERIA-CHECKLIST.md)
+- [ADR-017: Modular Two-Subsystem Native Rust Architecture](docs/adr/017-modular-two-subsystem-native-architecture.md)
+- [ADR-016: Dual Rust Workspace Architecture](docs/adr/016-dual-rust-workspace-architecture.md)
+- [Documentation Index](docs/INDEX.md)
+- [Project Status](PROJECT_STATUS.md)
 
 ---
 
-## 5. LICENSE
+## 5. License
 
-Licensed under the [MIT License](LICENSE-MIT) OR [Apache License 2.0](LICENSE-APACHE).
-All assets and source code developed clean-room. Zero code or assets from Nusa.
+Licensed under [LICENSE](LICENSE) and [NOTICE](NOTICE). See `Archive/legacy-webview2-island/` for archived WebView2 shell history.

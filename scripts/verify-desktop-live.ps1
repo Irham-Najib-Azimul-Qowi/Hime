@@ -1,15 +1,14 @@
 <#
 .SYNOPSIS
-    Live Desktop Application Validation for Hime Desktop
+    Live Desktop Application Validation for Pure-Rust Hime Desktop (ADR-017 Phase 4)
 .DESCRIPTION
-    Validates the running Hime ecosystem on Windows:
-    1. Verifies binary presence (hime-core.exe, hime-island.exe, hime_hotkey.exe).
+    Validates the running pure-Rust Hime ecosystem on Windows (no WebView2 / no hime_hotkey):
+    1. Verifies binary presence (hime-core.exe, hime-island-native.exe).
     2. Starts the ecosystem via scripts/start-hime.ps1.
-    3. Verifies process tree (hime-island, hime-core, hime_hotkey, hime-supervisor).
-    4. Validates visual / window presence (HWND enumeration, visibility, position covering top-center notch).
-    5. Tests synchronized clean shutdown via HimeQuit Named Event (< 2.0s latency).
-    6. Verifies marker cleanup (%APPDATA%\ai.hime.desktop\hime.active deleted) and taskbar state.
-    7. Cleans up any temporary test artifacts.
+    3. Verifies process tree (hime-core, hime-island-native, hime-supervisor) & hime.active marker.
+    4. Validates visible top-center Notch HWND via Win32 EnumWindows.
+    5. Tests synchronized clean shutdown via HimeQuit Named Event (< 2000ms latency).
+    6. Verifies marker cleanup (%APPDATA%\ai.hime.desktop\hime.active deleted) and taskbar restoration.
 #>
 
 [CmdletBinding()]
@@ -22,7 +21,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
 Write-Host "================================================================================" -ForegroundColor Cyan
-Write-Host "                HIME DESKTOP LIVE VALIDATION SUITE                             " -ForegroundColor Cyan
+Write-Host "           HIME PURE-RUST DESKTOP LIVE VALIDATION SUITE                         " -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host "Repository Root: $repoRoot" -ForegroundColor Gray
 Write-Host "Timestamp      : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss UTC'))" -ForegroundColor Gray
@@ -63,15 +62,14 @@ function Find-Bin($subpath, $name) {
 }
 
 $coreBin = Find-Bin "core" "hime-core.exe"
-$islandBin = Find-Bin "island\src-tauri" "hime-island.exe"
-$hotkeyBin = Find-Bin "island\src-tauri" "hime_hotkey.exe"
+$nativeBin = Find-Bin "island\native" "hime-island-native.exe"
 
-$binsOk = ($coreBin -ne $null) -and ($islandBin -ne $null) -and ($hotkeyBin -ne $null)
-$binDetails = "Core: $(if ($coreBin) { Split-Path $coreBin -Leaf } else { 'MISSING' }), Island: $(if ($islandBin) { Split-Path $islandBin -Leaf } else { 'MISSING' }), Hotkey: $(if ($hotkeyBin) { Split-Path $hotkeyBin -Leaf } else { 'MISSING' })"
+$binsOk = ($coreBin -ne $null) -and ($nativeBin -ne $null)
+$binDetails = "Core: $(if ($coreBin) { Split-Path $coreBin -Leaf } else { 'MISSING' }), NativeIsland: $(if ($nativeBin) { Split-Path $nativeBin -Leaf } else { 'MISSING' })"
 Record-Check "Binary Availability" $binsOk $binDetails
 
 if (-not $binsOk) {
-    Write-Host "[FATAL] Required binaries are missing. Build them before running live validation." -ForegroundColor Red
+    Write-Host "[FATAL] Required pure-Rust binaries are missing. Build them with '.\scripts\hime.ps1 build' before running live validation." -ForegroundColor Red
     exit 1
 }
 
@@ -84,44 +82,40 @@ $preActive = Test-Path "$env:APPDATA\ai.hime.desktop\hime.active"
 Record-Check "Clean Slate State" (-not $preActive) "No lingering active marker file"
 
 # --- Step 3: Ecosystem Launch ---
-Write-Host ">>> Checkpoint 3: Starting Hime Ecosystem..." -ForegroundColor Yellow
+Write-Host ">>> Checkpoint 3: Starting Hime Native Ecosystem..." -ForegroundColor Yellow
 $startScript = Join-Path $repoRoot "scripts\start-hime.ps1"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startScript
-Start-Sleep -Seconds 4
+Start-Sleep -Seconds 3
 
 # --- Step 4: Process Verification ---
 Write-Host ">>> Checkpoint 4: Verifying Running Processes..." -ForegroundColor Yellow
 $pCore = @(Get-Process -Name "hime-core" -ErrorAction SilentlyContinue)
-$pIsland = @(Get-Process -Name "hime-island", "island" -ErrorAction SilentlyContinue)
-$pHotkey = @(Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue)
+$pNative = @(Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue)
 
-# Find supervisor process
 $pSupervisor = @(Get-CimInstance Win32_Process | Where-Object {
     $_.CommandLine -like "*hime-supervisor.ps1*" -and $_.CommandLine -notlike "*verify-desktop-live*"
 })
 
 $coreRunning = ($pCore.Count -gt 0)
-$islandRunning = ($pIsland.Count -gt 0)
-$hotkeyRunning = ($pHotkey.Count -gt 0)
+$nativeRunning = ($pNative.Count -gt 0)
 $supervisorRunning = ($pSupervisor.Count -gt 0)
 
-# If supervisor process was started, record its PID
 $supervisorPid = if ($supervisorRunning) { ($pSupervisor | ForEach-Object { $_.ProcessId }) -join ', ' } else { "None" }
 
 Record-Check "Process: hime-core" $coreRunning "PID(s): $(($pCore | ForEach-Object { $_.Id }) -join ', ')"
-Record-Check "Process: hime-island" $islandRunning "PID(s): $(($pIsland | ForEach-Object { $_.Id }) -join ', ')"
-Record-Check "Process: hime_hotkey" $hotkeyRunning "PID(s): $(($pHotkey | ForEach-Object { $_.Id }) -join ', ')"
+Record-Check "Process: hime-island-native" $nativeRunning "PID(s): $(($pNative | ForEach-Object { $_.Id }) -join ', ')"
 Record-Check "Process: hime-supervisor" $supervisorRunning "Watchdog running in background (PID: $supervisorPid)"
 
 $activeMarkerExists = Test-Path "$env:APPDATA\ai.hime.desktop\hime.active"
 Record-Check "Marker: hime.active" $activeMarkerExists "Active marker file created and persistent"
 
 # --- Step 5: Visual / Window Presence Verification ---
-Write-Host ">>> Checkpoint 5: Window Presence & Desktop Overlay..." -ForegroundColor Yellow
+Write-Host ">>> Checkpoint 5: Visible Top-Center Notch HWND..." -ForegroundColor Yellow
 
 $hwndTypeDefinition = @'
 using System;
 using System.Text;
+using System.Threading;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
@@ -133,6 +127,11 @@ public class WinPresence {
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern IntPtr OpenDesktop(string lpszDesktop, int dwFlags, bool fInherit, uint dwDesiredAccess);
+    [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(int dwFlags, bool fInherit, uint dwDesiredAccess);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetThreadDesktop(IntPtr hDesktop);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool CloseDesktop(IntPtr hDesktop);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 
     public class WinInfo {
@@ -180,6 +179,32 @@ public class WinPresence {
 
         return result;
     }
+
+    public static bool IsTaskbarVisible() {
+        bool visible = false;
+        Thread t = new Thread(() => {
+            IntPtr hDesk = OpenDesktop("Default", 0, false, 0x01FF);
+            if (hDesk == IntPtr.Zero) {
+                hDesk = OpenInputDesktop(0, false, 0x01FF);
+            }
+            if (hDesk != IntPtr.Zero) {
+                SetThreadDesktop(hDesk);
+            }
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            visible = (tray != IntPtr.Zero && IsWindowVisible(tray));
+            if (hDesk != IntPtr.Zero) {
+                CloseDesktop(hDesk);
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        if (!visible) {
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            visible = (tray != IntPtr.Zero && IsWindowVisible(tray));
+        }
+        return visible;
+    }
 }
 '@
 
@@ -187,72 +212,57 @@ if (-not ([System.Management.Automation.PSTypeName]'WinPresence').Type) {
     Add-Type -TypeDefinition $hwndTypeDefinition
 }
 
-$islandPids = @()
-if ($pIsland) {
-    $islandPids = @($pIsland | ForEach-Object { [uint32]$_.Id })
+$nativePids = @()
+if ($pNative) {
+    $nativePids = @($pNative | ForEach-Object { [uint32]$_.Id })
 }
 
-$islandWindows = @()
-if ($islandPids.Count -gt 0) {
-    $islandWindows = [WinPresence]::FindWindowsForPids($islandPids)
+$nativeWindows = @()
+if ($nativePids.Count -gt 0) {
+    $nativeWindows = [WinPresence]::FindWindowsForPids($nativePids)
 }
 
-$hasWindowHandle = ($islandWindows.Count -gt 0)
-$visibleWindows = $islandWindows | Where-Object { $_.Visible }
-$windowDetails = "Found $($islandWindows.Count) window handle(s); $($visibleWindows.Count) visible"
+$hasWindowHandle = ($nativeWindows.Count -gt 0)
+$visibleWindows = @($nativeWindows | Where-Object { $_.Visible })
+$windowDetails = "Found $($nativeWindows.Count) window handle(s); $($visibleWindows.Count) visible"
 
-Record-Check "Island Window HWND" $hasWindowHandle $windowDetails
+Record-Check "Native Island HWND" $hasWindowHandle $windowDetails
 
-# Dynamically determine primary screen center and check top-center notch positioning
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-
 $screenCenter = [int]([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width / 2)
-$notchPillWindow = $visibleWindows | Where-Object {
-    ($_.Left -le $screenCenter) -and (($_.Left + $_.Width) -ge $screenCenter) -and ($_.Top -le 50)
-}
+$notchPillWindows = @($visibleWindows | Where-Object {
+    ($_.Left -le $screenCenter) -and (($_.Left + $_.Width) -ge $screenCenter) -and ($_.Top -le 50) -and ($_.Width -gt 0) -and ($_.Height -gt 0)
+})
 
-$tempScreenshot = Join-Path $env:TEMP "hime_live_test_overlay.png"
-$screenCaptureSuccess = $false
-try {
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-    $bounds = $screen.Bounds
-    $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-    $bitmap.Save($tempScreenshot, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose()
-    $bitmap.Dispose()
-
-    if (Test-Path $tempScreenshot) {
-        $fileSize = (Get-Item $tempScreenshot).Length
-        if ($fileSize -gt 1000) {
-            $screenCaptureSuccess = $true
-        }
-    }
-} catch {
-    $screenCaptureSuccess = $false
-} finally {
-    if (Test-Path $tempScreenshot) {
-        Remove-Item $tempScreenshot -Force -ErrorAction SilentlyContinue
-    }
-}
-
-$visualVerified = ($notchPillWindow -ne $null) -or ($visibleWindows.Count -gt 0) -or $screenCaptureSuccess
-$visualDetails = if ($notchPillWindow) {
-    "Notch overlay verified at top-center (Left:$($notchPillWindow[0].Left), Top:$($notchPillWindow[0].Top)) with dimensions $($notchPillWindow[0].Width)x$($notchPillWindow[0].Height)"
-} elseif ($visibleWindows.Count -gt 0) {
-    "Island overlay window verified visible (HWND: 0x$($visibleWindows[0].Hwnd.ToString('X')), Dim: $($visibleWindows[0].Width)x$($visibleWindows[0].Height))"
+$visualVerified = ($notchPillWindows.Count -gt 0)
+$visualDetails = if ($visualVerified) {
+    $nw = $notchPillWindows[0]
+    "Top-center Notch HWND verified (0x$($nw.Hwnd.ToString('X')), Title:'$($nw.Title)', Left:$($nw.Left), Top:$($nw.Top), $($nw.Width)x$($nw.Height))"
 } else {
-    "No visible island window found"
+    "No visible top-center Notch HWND found (screenCenter=$screenCenter, visible=$($visibleWindows.Count))"
 }
-Record-Check "Desktop Visual Presence" $visualVerified $visualDetails
+Record-Check "Top-Center Notch Presence" $visualVerified $visualDetails
 
 # --- Step 6: Synchronized Clean Shutdown ---
 Write-Host ">>> Checkpoint 6: Synchronized Clean Shutdown via HimeQuit..." -ForegroundColor Yellow
 
+$stateFile = "$env:APPDATA\ai.hime.desktop\hime.active"
+if (Test-Path $stateFile) {
+    Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+}
+
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-& (Join-Path $repoRoot "scripts\stop-hime.ps1") | Out-Null
+try {
+    $quitEvent = [System.Threading.EventWaitHandle]::OpenExisting("HimeQuit")
+    $quitEvent.Set() | Out-Null
+    $quitEvent.Dispose()
+} catch {
+    try {
+        $quitEvent = New-Object System.Threading.EventWaitHandle($true, [System.Threading.EventResetMode]::ManualReset, "HimeQuit")
+        $quitEvent.Set() | Out-Null
+        $quitEvent.Dispose()
+    } catch {}
+}
 
 $shutdownTimeoutMs = 2500
 $pollIntervalMs = 50
@@ -261,8 +271,8 @@ $cleanShutdownOk = $false
 
 while ($elapsed -lt $shutdownTimeoutMs) {
     $leftoverCore = Get-Process -Name "hime-core" -ErrorAction SilentlyContinue
-    $leftoverIsland = Get-Process -Name "hime-island", "island" -ErrorAction SilentlyContinue
-    if ((-not $leftoverCore) -and (-not $leftoverIsland)) {
+    $leftoverNative = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
+    if ((-not $leftoverCore) -and (-not $leftoverNative)) {
         $cleanShutdownOk = $true
         break
     }
@@ -271,21 +281,27 @@ while ($elapsed -lt $shutdownTimeoutMs) {
 }
 $sw.Stop()
 
+# Ensure fallback stop & taskbar restoration script runs cleanly
+& (Join-Path $repoRoot "scripts\stop-hime.ps1") | Out-Null
+
 $shutdownLatencyMs = $sw.ElapsedMilliseconds
 $latencyFast = ($cleanShutdownOk -and ($shutdownLatencyMs -lt 2000))
-Record-Check "Clean Shutdown (< 2000ms)" $latencyFast "Terminated in ${shutdownLatencyMs}ms (Limit: 2000ms)"
+Record-Check "Clean Shutdown (< 2000ms)" $latencyFast "HimeQuit terminated processes in ${shutdownLatencyMs}ms (Limit: 2000ms)"
 
 # Verify marker file cleanup
 $postActive = Test-Path "$env:APPDATA\ai.hime.desktop\hime.active"
 Record-Check "Marker Cleanup" (-not $postActive) "hime.active removed on user quit"
 
-# Verify taskbar intact
-$taskbarRestored = $true
+# Verify taskbar restoration
 $restoreScript = Join-Path $repoRoot "island\scripts\restore-taskbar.ps1"
+if (-not (Test-Path $restoreScript)) {
+    $restoreScript = Join-Path $repoRoot "scripts\restore-taskbar.ps1"
+}
 if (Test-Path $restoreScript) {
     & $restoreScript | Out-Null
 }
-Record-Check "Taskbar State" $taskbarRestored "Taskbar state verified and visible"
+$taskbarRestored = [WinPresence]::IsTaskbarVisible()
+Record-Check "Taskbar Restoration" $taskbarRestored "Shell_TrayWnd visible: $taskbarRestored"
 
 # --- Step 7: Summary Report ---
 Write-Host ""

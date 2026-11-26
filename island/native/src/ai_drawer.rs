@@ -7,9 +7,99 @@ use windows::core::Result;
 use crate::animation::SpringValue;
 use crate::d2d::{NativeSurface, Rect, TextAlign};
 use crate::theme::{
-    ACCENT_CYAN, GLASS_BORDER, GLASS_SURFACE, STATUS_ALERT, STATUS_SUCCESS, STATUS_WARNING,
-    SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    ACCENT_CYAN, GLASS_BORDER, GLASS_SURFACE, STATUS_ALERT, STATUS_OFFLINE, STATUS_SUCCESS,
+    STATUS_WARNING, SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
+
+pub const DRAWER_WIDTH: f32 = 440.0;
+pub const DRAWER_HEIGHT: f32 = 500.0;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum DrawerTab {
+    #[default]
+    Chat,
+    Translate,
+    Workspace,
+}
+
+impl DrawerTab {
+    pub const ALL: [Self; 3] = [Self::Chat, Self::Translate, Self::Workspace];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Translate => "Translate",
+            Self::Workspace => "Workspace",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DrawerTranslationState {
+    pub source_text: String,
+    pub translated_text: String,
+    pub source_lang: String,
+    pub target_lang: String,
+    pub cached: bool,
+    pub status_notice: Option<String>,
+}
+
+impl Default for DrawerTranslationState {
+    fn default() -> Self {
+        Self {
+            source_text: String::new(),
+            translated_text: String::new(),
+            source_lang: "auto".to_string(),
+            target_lang: "ID".to_string(),
+            cached: false,
+            status_notice: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeveloperWorkspaceSummary {
+    pub branch: String,
+    pub staged_count: usize,
+    pub unstaged_count: usize,
+    pub untracked_count: usize,
+    pub is_clean: bool,
+    pub secret_findings_count: usize,
+    pub last_check_status: Option<String>,
+}
+
+impl Default for DeveloperWorkspaceSummary {
+    fn default() -> Self {
+        Self {
+            branch: "main".to_string(),
+            staged_count: 0,
+            unstaged_count: 0,
+            untracked_count: 0,
+            is_clean: true,
+            secret_findings_count: 0,
+            last_check_status: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DocumentsWorkspaceSummary {
+    pub active_jobs: usize,
+    pub completed_jobs: usize,
+    pub failed_jobs: usize,
+    pub latest_job_label: Option<String>,
+}
+
+impl Default for DocumentsWorkspaceSummary {
+    fn default() -> Self {
+        Self {
+            active_jobs: 0,
+            completed_jobs: 0,
+            failed_jobs: 0,
+            latest_job_label: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DrawerAttachment {
@@ -53,19 +143,28 @@ pub struct ApprovalCard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawerAction {
     Close,
+    SelectTab(DrawerTab),
     ClearAttachments,
     SendPrompt,
     Approve(String),
     Deny(String),
+    ClearTranslation,
+    CopyTranslation,
+    RunDevCheck,
+    RefreshDocs,
 }
 
 /// Native AI Chat & Approval Drawer state + renderer.
 pub struct AiDrawer {
     pub visible: bool,
+    pub active_tab: DrawerTab,
     pub attachments: Vec<DrawerAttachment>,
     pub messages: Vec<ChatMessage>,
     pub approvals: Vec<ApprovalCard>,
     pub draft_prompt: String,
+    pub translation: DrawerTranslationState,
+    pub developer: DeveloperWorkspaceSummary,
+    pub documents: DocumentsWorkspaceSummary,
     open_spring: SpringValue,
     width: f32,
     height: f32,
@@ -75,14 +174,55 @@ impl AiDrawer {
     pub fn new() -> Self {
         Self {
             visible: false,
+            active_tab: DrawerTab::Chat,
             attachments: Vec::new(),
             messages: Vec::new(),
             approvals: Vec::new(),
             draft_prompt: String::new(),
+            translation: DrawerTranslationState::default(),
+            developer: DeveloperWorkspaceSummary::default(),
+            documents: DocumentsWorkspaceSummary::default(),
             open_spring: SpringValue::snappy(0.0),
-            width: 440.0,
-            height: 500.0,
+            width: DRAWER_WIDTH,
+            height: DRAWER_HEIGHT,
         }
+    }
+
+    pub fn select_tab(&mut self, tab: DrawerTab) {
+        self.active_tab = tab;
+    }
+
+    pub fn set_translation(
+        &mut self,
+        source_text: impl Into<String>,
+        translated_text: impl Into<String>,
+        target_lang: impl Into<String>,
+        cached: bool,
+    ) {
+        self.translation.source_text = source_text.into();
+        self.translation.translated_text = translated_text.into();
+        self.translation.target_lang = target_lang.into();
+        self.translation.cached = cached;
+        self.translation.status_notice = None;
+    }
+
+    pub fn clear_translation(&mut self) {
+        self.translation.source_text.clear();
+        self.translation.translated_text.clear();
+        self.translation.cached = false;
+        self.translation.status_notice = None;
+    }
+
+    pub fn mark_translation_copied(&mut self) {
+        self.translation.status_notice = Some("Copied translation".to_string());
+    }
+
+    pub fn set_developer_summary(&mut self, summary: DeveloperWorkspaceSummary) {
+        self.developer = summary;
+    }
+
+    pub fn set_documents_summary(&mut self, summary: DocumentsWorkspaceSummary) {
+        self.documents = summary;
     }
 
     pub fn open(&mut self) {
@@ -180,6 +320,53 @@ impl AiDrawer {
         Some(card.clone())
     }
 
+    fn close_rect(&self) -> Rect {
+        Rect::new(self.width - 42.0, 14.0, 28.0, 28.0)
+    }
+
+    pub fn tab_rects(&self) -> [(DrawerTab, Rect); 3] {
+        let start_x = 120.0;
+        let tab_w = 86.0;
+        let gap = 4.0;
+        let y = 14.0;
+        let h = 26.0;
+        [
+            (DrawerTab::Chat, Rect::new(start_x, y, tab_w, h)),
+            (
+                DrawerTab::Translate,
+                Rect::new(start_x + tab_w + gap, y, tab_w, h),
+            ),
+            (
+                DrawerTab::Workspace,
+                Rect::new(start_x + (tab_w + gap) * 2.0, y, tab_w, h),
+            ),
+        ]
+    }
+
+    fn clear_attachments_rect(&self) -> Rect {
+        Rect::new(self.width - 110.0, 50.0, 90.0, 26.0)
+    }
+
+    fn send_button_rect(&self) -> Rect {
+        Rect::new(self.width - 88.0, self.height - 48.0, 68.0, 32.0)
+    }
+
+    fn translate_clear_rect(&self) -> Rect {
+        Rect::new(20.0, 392.0, 96.0, 32.0)
+    }
+
+    fn translate_copy_rect(&self) -> Rect {
+        Rect::new(self.width - 126.0, 392.0, 106.0, 32.0)
+    }
+
+    fn dev_check_rect(&self) -> Rect {
+        Rect::new(self.width - 154.0, 198.0, 120.0, 32.0)
+    }
+
+    fn refresh_docs_rect(&self) -> Rect {
+        Rect::new(self.width - 154.0, 390.0, 120.0, 32.0)
+    }
+
     fn approval_button_rects(&self) -> Vec<(String, Rect, Rect)> {
         let mut out = Vec::new();
         let mut y = 340.0;
@@ -205,7 +392,7 @@ impl AiDrawer {
     }
 
     pub fn handle_char(&mut self, ch: char) -> Option<DrawerAction> {
-        if !self.visible {
+        if !self.visible || self.active_tab != DrawerTab::Chat {
             return None;
         }
         match ch {
@@ -233,34 +420,75 @@ impl AiDrawer {
         if !self.visible {
             return None;
         }
-        // Close button
-        if x >= self.width - 42.0 && x <= self.width - 14.0 && y >= 14.0 && y <= 42.0 {
+        if point_in_rect(x, y, self.close_rect()) {
             return Some(DrawerAction::Close);
         }
-        // Clear attachments chip
-        if !self.attachments.is_empty()
-            && x >= self.width - 110.0
-            && x <= self.width - 20.0
-            && y >= 50.0
-            && y <= 76.0
-        {
-            return Some(DrawerAction::ClearAttachments);
-        }
-        // Approval buttons
-        for (id, approve, deny) in self.approval_button_rects() {
-            if point_in_rect(x, y, approve) {
-                return Some(DrawerAction::Approve(id));
-            }
-            if point_in_rect(x, y, deny) {
-                return Some(DrawerAction::Deny(id));
+        for (tab, rect) in self.tab_rects() {
+            if point_in_rect(x, y, rect) {
+                return Some(DrawerAction::SelectTab(tab));
             }
         }
-        // Send button
-        let send = Rect::new(self.width - 88.0, self.height - 48.0, 68.0, 32.0);
-        if point_in_rect(x, y, send) {
-            return Some(DrawerAction::SendPrompt);
+        match self.active_tab {
+            DrawerTab::Chat => {
+                if !self.attachments.is_empty() && point_in_rect(x, y, self.clear_attachments_rect())
+                {
+                    return Some(DrawerAction::ClearAttachments);
+                }
+                for (id, approve, deny) in self.approval_button_rects() {
+                    if point_in_rect(x, y, approve) {
+                        return Some(DrawerAction::Approve(id));
+                    }
+                    if point_in_rect(x, y, deny) {
+                        return Some(DrawerAction::Deny(id));
+                    }
+                }
+                if point_in_rect(x, y, self.send_button_rect()) {
+                    return Some(DrawerAction::SendPrompt);
+                }
+                None
+            }
+            DrawerTab::Translate => {
+                if point_in_rect(x, y, self.translate_clear_rect()) {
+                    return Some(DrawerAction::ClearTranslation);
+                }
+                if point_in_rect(x, y, self.translate_copy_rect()) {
+                    return Some(DrawerAction::CopyTranslation);
+                }
+                None
+            }
+            DrawerTab::Workspace => {
+                if point_in_rect(x, y, self.dev_check_rect()) {
+                    return Some(DrawerAction::RunDevCheck);
+                }
+                if point_in_rect(x, y, self.refresh_docs_rect()) {
+                    return Some(DrawerAction::RefreshDocs);
+                }
+                None
+            }
         }
-        None
+    }
+
+    /// Hit-tests `(x, y)` and applies local drawer state transitions (tab switches, close,
+    /// translation clear/copy notice, attachment clear, approval resolution).
+    pub fn handle_click(&mut self, x: f32, y: f32) -> Option<DrawerAction> {
+        let action = self.hit_test(x, y)?;
+        match &action {
+            DrawerAction::Close => self.close(),
+            DrawerAction::SelectTab(tab) => self.select_tab(*tab),
+            DrawerAction::ClearAttachments => self.clear_attachments(),
+            DrawerAction::Approve(id) => {
+                self.resolve_approval(id, true);
+            }
+            DrawerAction::Deny(id) => {
+                self.resolve_approval(id, false);
+            }
+            DrawerAction::ClearTranslation => self.clear_translation(),
+            DrawerAction::CopyTranslation => self.mark_translation_copied(),
+            DrawerAction::SendPrompt
+            | DrawerAction::RunDevCheck
+            | DrawerAction::RefreshDocs => {}
+        }
+        Some(action)
     }
 
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
@@ -275,20 +503,62 @@ impl AiDrawer {
         surface.stroke_rounded_rect(panel, 18.0, GLASS_BORDER, 1.0)?;
 
         surface.draw_text(
-            "Hime AI Drawer",
-            Rect::new(20.0, 14.0, 220.0, 28.0),
+            "Hime AI",
+            Rect::new(20.0, 14.0, 92.0, 28.0),
             15.0,
             TEXT_PRIMARY,
             TextAlign::Leading,
         )?;
+
+        // Tab switcher in header
+        for (tab, rect) in self.tab_rects() {
+            let active = self.active_tab == tab;
+            surface.fill_rounded_rect(
+                rect,
+                8.0,
+                if active {
+                    ACCENT_CYAN.with_alpha(0.20)
+                } else {
+                    SURFACE_ELEVATED.with_alpha(0.65)
+                },
+            )?;
+            surface.stroke_rounded_rect(
+                rect,
+                8.0,
+                if active {
+                    ACCENT_CYAN.with_alpha(0.75)
+                } else {
+                    GLASS_BORDER
+                },
+                1.0,
+            )?;
+            surface.draw_text(
+                tab.label(),
+                rect,
+                11.5,
+                if active { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                TextAlign::Center,
+            )?;
+        }
+
         surface.draw_text(
             "X",
-            Rect::new(self.width - 42.0, 14.0, 28.0, 28.0),
+            self.close_rect(),
             13.0,
             TEXT_SECONDARY,
             TextAlign::Center,
         )?;
 
+        match self.active_tab {
+            DrawerTab::Chat => self.render_chat_tab(surface, panel.height)?,
+            DrawerTab::Translate => self.render_translate_tab(surface, panel.height)?,
+            DrawerTab::Workspace => self.render_workspace_tab(surface, panel.height)?,
+        }
+
+        Ok(())
+    }
+
+    fn render_chat_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
         // Attachments bar from FileShelf
         if !self.attachments.is_empty() {
             let attach_bar = Rect::new(20.0, 50.0, self.width - 40.0, 26.0);
@@ -303,7 +573,7 @@ impl AiDrawer {
             )?;
             surface.draw_text(
                 "Clear",
-                Rect::new(self.width - 110.0, 50.0, 90.0, 26.0),
+                self.clear_attachments_rect(),
                 11.5,
                 TEXT_SECONDARY,
                 TextAlign::Center,
@@ -353,7 +623,7 @@ impl AiDrawer {
             .iter()
             .filter(|c| c.status == ApprovalStatus::Pending)
         {
-            if card_y + 68.0 > panel.height - 56.0 {
+            if card_y + 68.0 > panel_height - 56.0 {
                 break;
             }
             let rect = Rect::new(20.0, card_y, self.width - 40.0, 68.0);
@@ -377,7 +647,7 @@ impl AiDrawer {
         }
 
         // Input footer
-        if panel.height >= 120.0 {
+        if panel_height >= 120.0 {
             let input_rect = Rect::new(20.0, self.height - 48.0, self.width - 116.0, 32.0);
             surface.fill_rounded_rect(input_rect, 10.0, SURFACE_ELEVATED)?;
             let prompt_display;
@@ -400,10 +670,284 @@ impl AiDrawer {
                 TextAlign::Leading,
             )?;
 
-            let send_rect = Rect::new(self.width - 88.0, self.height - 48.0, 68.0, 32.0);
+            let send_rect = self.send_button_rect();
             surface.fill_rounded_rect(send_rect, 10.0, ACCENT_CYAN)?;
             surface.draw_text("Send", send_rect, 12.0, GLASS_SURFACE, TextAlign::Center)?;
         }
+
+        Ok(())
+    }
+
+    fn render_translate_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
+        if panel_height < 140.0 {
+            return Ok(());
+        }
+
+        surface.draw_text(
+            "Selection Translate",
+            Rect::new(20.0, 56.0, 220.0, 26.0),
+            13.5,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+
+        let lang_badge = Rect::new(self.width - 130.0, 56.0, 110.0, 24.0);
+        surface.fill_rounded_rect(lang_badge, 8.0, ACCENT_CYAN.with_alpha(0.16))?;
+        surface.stroke_rounded_rect(lang_badge, 8.0, ACCENT_CYAN.with_alpha(0.45), 1.0)?;
+        surface.draw_text(
+            &format!("Target: {}", self.translation.target_lang.to_uppercase()),
+            lang_badge,
+            11.0,
+            ACCENT_CYAN,
+            TextAlign::Center,
+        )?;
+
+        let source_card = Rect::new(20.0, 92.0, self.width - 40.0, 112.0);
+        surface.fill_rounded_rect(source_card, 12.0, SURFACE_ELEVATED)?;
+        surface.stroke_rounded_rect(source_card, 12.0, GLASS_BORDER, 1.0)?;
+        surface.draw_text(
+            &format!("SOURCE ({})", self.translation.source_lang.to_uppercase()),
+            Rect::new(32.0, 100.0, self.width - 64.0, 18.0),
+            10.5,
+            TEXT_SECONDARY,
+            TextAlign::Leading,
+        )?;
+        let source_body = if self.translation.source_text.is_empty() {
+            "Highlight text and trigger Translate Selection"
+        } else {
+            self.translation.source_text.as_str()
+        };
+        let source_color = if self.translation.source_text.is_empty() {
+            TEXT_SECONDARY
+        } else {
+            TEXT_PRIMARY
+        };
+        surface.draw_text(
+            source_body,
+            Rect::new(32.0, 122.0, self.width - 64.0, 74.0),
+            12.0,
+            source_color,
+            TextAlign::Leading,
+        )?;
+
+        let result_card = Rect::new(20.0, 216.0, self.width - 40.0, 160.0);
+        surface.fill_rounded_rect(result_card, 12.0, SURFACE_ELEVATED)?;
+        surface.stroke_rounded_rect(result_card, 12.0, ACCENT_CYAN.with_alpha(0.35), 1.0)?;
+        let header_label = if self.translation.cached {
+            "TRANSLATION • CACHED"
+        } else {
+            "TRANSLATION"
+        };
+        surface.draw_text(
+            header_label,
+            Rect::new(32.0, 224.0, self.width - 64.0, 18.0),
+            10.5,
+            ACCENT_CYAN,
+            TextAlign::Leading,
+        )?;
+        let translated_body = if self.translation.translated_text.is_empty() {
+            "No translation yet"
+        } else {
+            self.translation.translated_text.as_str()
+        };
+        let translated_color = if self.translation.translated_text.is_empty() {
+            TEXT_SECONDARY
+        } else {
+            TEXT_PRIMARY
+        };
+        surface.draw_text(
+            translated_body,
+            Rect::new(32.0, 246.0, self.width - 64.0, 120.0),
+            13.0,
+            translated_color,
+            TextAlign::Leading,
+        )?;
+
+        let clear_rect = self.translate_clear_rect();
+        surface.fill_rounded_rect(clear_rect, 8.0, SURFACE_ELEVATED)?;
+        surface.stroke_rounded_rect(clear_rect, 8.0, GLASS_BORDER, 1.0)?;
+        surface.draw_text("Clear", clear_rect, 11.5, TEXT_SECONDARY, TextAlign::Center)?;
+
+        let copy_rect = self.translate_copy_rect();
+        let has_result = !self.translation.translated_text.is_empty();
+        surface.fill_rounded_rect(
+            copy_rect,
+            8.0,
+            if has_result {
+                ACCENT_CYAN.with_alpha(0.22)
+            } else {
+                STATUS_OFFLINE.with_alpha(0.22)
+            },
+        )?;
+        surface.stroke_rounded_rect(
+            copy_rect,
+            8.0,
+            if has_result {
+                ACCENT_CYAN.with_alpha(0.6)
+            } else {
+                GLASS_BORDER
+            },
+            1.0,
+        )?;
+        surface.draw_text("Copy", copy_rect, 11.5, TEXT_PRIMARY, TextAlign::Center)?;
+
+        if let Some(notice) = &self.translation.status_notice {
+            surface.draw_text(
+                notice,
+                Rect::new(20.0, 434.0, self.width - 40.0, 22.0),
+                11.0,
+                STATUS_SUCCESS,
+                TextAlign::Leading,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn render_workspace_tab(&self, surface: &NativeSurface, panel_height: f32) -> Result<()> {
+        if panel_height < 160.0 {
+            return Ok(());
+        }
+
+        // Developer card
+        let dev_card = Rect::new(20.0, 56.0, self.width - 40.0, 194.0);
+        surface.fill_rounded_rect(dev_card, 12.0, SURFACE_ELEVATED)?;
+        surface.stroke_rounded_rect(dev_card, 12.0, GLASS_BORDER, 1.0)?;
+        surface.draw_text(
+            "Developer",
+            Rect::new(34.0, 68.0, 180.0, 22.0),
+            13.5,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+
+        let branch_pill = Rect::new(self.width - 174.0, 66.0, 140.0, 24.0);
+        surface.fill_rounded_rect(branch_pill, 6.0, ACCENT_CYAN.with_alpha(0.16))?;
+        surface.draw_text(
+            &self.developer.branch,
+            branch_pill,
+            11.0,
+            ACCENT_CYAN,
+            TextAlign::Center,
+        )?;
+
+        let git_summary = if self.developer.is_clean {
+            "Git Status: Clean working tree".to_string()
+        } else {
+            format!(
+                "Git Status: {} staged • {} modified • {} untracked",
+                self.developer.staged_count,
+                self.developer.unstaged_count,
+                self.developer.untracked_count
+            )
+        };
+        surface.draw_text(
+            &git_summary,
+            Rect::new(34.0, 102.0, self.width - 68.0, 22.0),
+            11.5,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+
+        let scan_color = if self.developer.secret_findings_count == 0 {
+            STATUS_SUCCESS
+        } else {
+            STATUS_ALERT
+        };
+        let scan_summary = format!(
+            "Secret Scan: {} finding(s)",
+            self.developer.secret_findings_count
+        );
+        surface.draw_text(
+            &scan_summary,
+            Rect::new(34.0, 134.0, self.width - 68.0, 22.0),
+            11.5,
+            scan_color,
+            TextAlign::Leading,
+        )?;
+
+        if let Some(status) = &self.developer.last_check_status {
+            surface.draw_text(
+                status,
+                Rect::new(34.0, 202.0, self.width - 200.0, 24.0),
+                11.0,
+                TEXT_SECONDARY,
+                TextAlign::Leading,
+            )?;
+        }
+
+        let dev_btn = self.dev_check_rect();
+        surface.fill_rounded_rect(dev_btn, 8.0, ACCENT_CYAN.with_alpha(0.20))?;
+        surface.stroke_rounded_rect(dev_btn, 8.0, ACCENT_CYAN.with_alpha(0.55), 1.0)?;
+        surface.draw_text(
+            "Run Dev Check",
+            dev_btn,
+            11.5,
+            TEXT_PRIMARY,
+            TextAlign::Center,
+        )?;
+
+        // Documents card
+        let docs_card = Rect::new(20.0, 266.0, self.width - 40.0, 174.0);
+        surface.fill_rounded_rect(docs_card, 12.0, SURFACE_ELEVATED)?;
+        surface.stroke_rounded_rect(docs_card, 12.0, GLASS_BORDER, 1.0)?;
+        surface.draw_text(
+            "Documents",
+            Rect::new(34.0, 278.0, 180.0, 22.0),
+            13.5,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+
+        let total_jobs =
+            self.documents.active_jobs + self.documents.completed_jobs + self.documents.failed_jobs;
+        let jobs_pill = Rect::new(self.width - 144.0, 276.0, 110.0, 24.0);
+        surface.fill_rounded_rect(jobs_pill, 6.0, STATUS_SUCCESS.with_alpha(0.16))?;
+        surface.draw_text(
+            &format!("{total_jobs} job(s)"),
+            jobs_pill,
+            11.0,
+            STATUS_SUCCESS,
+            TextAlign::Center,
+        )?;
+
+        let jobs_summary = format!(
+            "Jobs: {} active • {} completed • {} failed",
+            self.documents.active_jobs,
+            self.documents.completed_jobs,
+            self.documents.failed_jobs
+        );
+        surface.draw_text(
+            &jobs_summary,
+            Rect::new(34.0, 314.0, self.width - 68.0, 22.0),
+            11.5,
+            TEXT_PRIMARY,
+            TextAlign::Leading,
+        )?;
+
+        let latest_doc = self
+            .documents
+            .latest_job_label
+            .as_deref()
+            .unwrap_or("No recent document jobs");
+        surface.draw_text(
+            latest_doc,
+            Rect::new(34.0, 346.0, self.width - 68.0, 22.0),
+            11.0,
+            TEXT_SECONDARY,
+            TextAlign::Leading,
+        )?;
+
+        let docs_btn = self.refresh_docs_rect();
+        surface.fill_rounded_rect(docs_btn, 8.0, STATUS_SUCCESS.with_alpha(0.20))?;
+        surface.stroke_rounded_rect(docs_btn, 8.0, STATUS_SUCCESS.with_alpha(0.55), 1.0)?;
+        surface.draw_text(
+            "Refresh Docs",
+            docs_btn,
+            11.5,
+            TEXT_PRIMARY,
+            TextAlign::Center,
+        )?;
 
         Ok(())
     }
@@ -493,6 +1037,164 @@ mod tests {
 
         // Escape closes drawer
         assert_eq!(drawer.handle_key_down(0x1B), Some(DrawerAction::Close));
+        assert!(!drawer.visible);
+    }
+
+    fn rect_in_bounds(r: Rect) -> bool {
+        r.x >= 0.0
+            && r.y >= 0.0
+            && r.x + r.width <= DRAWER_WIDTH
+            && r.y + r.height <= DRAWER_HEIGHT
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        a.x < b.x + b.width
+            && a.x + a.width > b.x
+            && a.y < b.y + b.height
+            && a.y + a.height > b.y
+    }
+
+    #[test]
+    fn drawer_tabs_switch_and_stay_within_440x500_bounds() {
+        let mut drawer = AiDrawer::new();
+        drawer.open();
+
+        let close = drawer.close_rect();
+        assert!(rect_in_bounds(close));
+
+        let tabs = drawer.tab_rects();
+        for (i, (tab, rect)) in tabs.iter().enumerate() {
+            assert!(rect_in_bounds(*rect), "tab {:?} out of bounds", tab);
+            assert!(!rects_overlap(*rect, close), "tab {:?} overlaps close", tab);
+            for j in (i + 1)..tabs.len() {
+                assert!(
+                    !rects_overlap(*rect, tabs[j].1),
+                    "tabs {:?} and {:?} overlap",
+                    tab,
+                    tabs[j].0
+                );
+            }
+
+            let cx = rect.x + rect.width * 0.5;
+            let cy = rect.y + rect.height * 0.5;
+            assert_eq!(drawer.handle_click(cx, cy), Some(DrawerAction::SelectTab(*tab)));
+            assert_eq!(drawer.active_tab, *tab);
+        }
+
+        // All action button rects fit inside 440x500
+        for r in [
+            drawer.clear_attachments_rect(),
+            drawer.send_button_rect(),
+            drawer.translate_clear_rect(),
+            drawer.translate_copy_rect(),
+            drawer.dev_check_rect(),
+            drawer.refresh_docs_rect(),
+        ] {
+            assert!(rect_in_bounds(r), "action rect out of bounds: {:?}", r);
+        }
+        assert!(!rects_overlap(
+            drawer.translate_clear_rect(),
+            drawer.translate_copy_rect()
+        ));
+        assert!(!rects_overlap(
+            drawer.dev_check_rect(),
+            drawer.refresh_docs_rect()
+        ));
+    }
+
+    #[test]
+    fn translate_tab_hit_test_and_clear_copy_actions() {
+        let mut drawer = AiDrawer::new();
+        drawer.open();
+        drawer.set_translation("Hello world", "Halo dunia", "id", true);
+
+        let translate_tab = drawer.tab_rects()[1].1;
+        assert_eq!(
+            drawer.handle_click(
+                translate_tab.x + translate_tab.width * 0.5,
+                translate_tab.y + translate_tab.height * 0.5
+            ),
+            Some(DrawerAction::SelectTab(DrawerTab::Translate))
+        );
+        assert_eq!(drawer.active_tab, DrawerTab::Translate);
+
+        // Typing is ignored outside Chat tab
+        assert_eq!(drawer.handle_char('x'), None);
+        assert!(drawer.draft_prompt.is_empty());
+
+        // Chat Send button does not fire on Translate tab
+        let send = drawer.send_button_rect();
+        assert_eq!(drawer.hit_test(send.x + 10.0, send.y + 10.0), None);
+
+        // Copy action
+        let copy = drawer.translate_copy_rect();
+        assert_eq!(
+            drawer.handle_click(copy.x + 10.0, copy.y + 10.0),
+            Some(DrawerAction::CopyTranslation)
+        );
+        assert_eq!(
+            drawer.translation.status_notice.as_deref(),
+            Some("Copied translation")
+        );
+
+        // Clear action
+        let clear = drawer.translate_clear_rect();
+        assert_eq!(
+            drawer.handle_click(clear.x + 10.0, clear.y + 10.0),
+            Some(DrawerAction::ClearTranslation)
+        );
+        assert!(drawer.translation.source_text.is_empty());
+        assert!(drawer.translation.translated_text.is_empty());
+        assert!(!drawer.translation.cached);
+    }
+
+    #[test]
+    fn workspace_tab_developer_and_documents_hit_testing() {
+        let mut drawer = AiDrawer::new();
+        drawer.open();
+        drawer.set_developer_summary(DeveloperWorkspaceSummary {
+            branch: "feat/native".to_string(),
+            staged_count: 1,
+            unstaged_count: 2,
+            untracked_count: 1,
+            is_clean: false,
+            secret_findings_count: 3,
+            last_check_status: Some("3 secret findings".to_string()),
+        });
+        drawer.set_documents_summary(DocumentsWorkspaceSummary {
+            active_jobs: 1,
+            completed_jobs: 4,
+            failed_jobs: 0,
+            latest_job_label: Some("merged_report.pdf".to_string()),
+        });
+
+        let ws_tab = drawer.tab_rects()[2].1;
+        assert_eq!(
+            drawer.handle_click(
+                ws_tab.x + ws_tab.width * 0.5,
+                ws_tab.y + ws_tab.height * 0.5
+            ),
+            Some(DrawerAction::SelectTab(DrawerTab::Workspace))
+        );
+
+        let dev_btn = drawer.dev_check_rect();
+        assert_eq!(
+            drawer.hit_test(dev_btn.x + 12.0, dev_btn.y + 12.0),
+            Some(DrawerAction::RunDevCheck)
+        );
+
+        let docs_btn = drawer.refresh_docs_rect();
+        assert_eq!(
+            drawer.hit_test(docs_btn.x + 12.0, docs_btn.y + 12.0),
+            Some(DrawerAction::RefreshDocs)
+        );
+
+        // Close works from Workspace tab too
+        let close = drawer.close_rect();
+        assert_eq!(
+            drawer.handle_click(close.x + 6.0, close.y + 6.0),
+            Some(DrawerAction::Close)
+        );
         assert!(!drawer.visible);
     }
 }

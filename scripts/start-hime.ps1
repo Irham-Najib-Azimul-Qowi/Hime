@@ -1,7 +1,8 @@
-# start-hime.ps1 - Start Hime Ecosystem with Self-Healing Supervisor (Native default)
-param([switch]$Autostart, [switch]$Native, [switch]$LegacyWebView)
+# start-hime.ps1 - Start Hime Pure-Rust Native Ecosystem with Self-Healing Supervisor
+param([switch]$Autostart, [switch]$Native)
 
 $ErrorActionPreference = "SilentlyContinue"
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $stateDir = "$env:APPDATA\ai.hime.desktop"
 $stateFile = "$stateDir\hime.active"
 $settingsFile = "$stateDir\settings.json"
@@ -47,10 +48,8 @@ if ($Autostart) {
         Write-Host "Hime was not active before reboot. Skipping autostart."
         exit 0
     }
-    # Preserve and refresh the active state flag
     Set-Content -Path $stateFile -Value ("active=" + (Get-Date).ToString("o")) -Force
 } else {
-    # Manual start: set active state flag
     Set-Content -Path $stateFile -Value ("active=" + (Get-Date).ToString("o")) -Force
 }
 
@@ -67,26 +66,18 @@ try {
     } catch {}
 }
 
-$himeRoot = "X:\folder_ai\Hime"
-
-$sh = $null
-try {
-    $sh = New-Object -ComObject Shell.Application
-} catch {}
-
-function Spawn-Detached($exePath, $args = "", $workDir = "", $showMode = 0) {
+function Spawn-Detached($exePath, $argList = "", $workDir = "", $showMode = 0) {
     $ws = if ($showMode -eq 0) { "Hidden" } else { "Normal" }
-    if ($args) {
-        Start-Process -FilePath $exePath -ArgumentList $args -WorkingDirectory $workDir -WindowStyle $ws
+    if ($argList) {
+        Start-Process -FilePath $exePath -ArgumentList $argList -WorkingDirectory $workDir -WindowStyle $ws
     } else {
         Start-Process -FilePath $exePath -WorkingDirectory $workDir -WindowStyle $ws
     }
 }
 
-# Helper to find release or debug executable
 function Find-Bin($subpath, $name) {
-    $rel = Join-Path $himeRoot "$subpath\target\release\$name"
-    $dbg = Join-Path $himeRoot "$subpath\target\debug\$name"
+    $rel = Join-Path $repoRoot "$subpath\target\release\$name"
+    $dbg = Join-Path $repoRoot "$subpath\target\debug\$name"
     if ((Test-Path $rel) -and (Test-Path $dbg)) {
         if ((Get-Item $rel).LastWriteTime -ge (Get-Item $dbg).LastWriteTime) { return $rel } else { return $dbg }
     }
@@ -95,7 +86,7 @@ function Find-Bin($subpath, $name) {
     return $null
 }
 
-# 3. Ensure 9Router Gateway is listening on 20128
+# 4. Ensure optional 9Router Gateway is listening on 20128 if installed
 $listening = Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue
 if (-not $listening) {
     $routerCmd = "$env:APPDATA\npm\9router.cmd"
@@ -104,92 +95,35 @@ if (-not $listening) {
     }
 }
 
-# 4. Start Hime Core if not running
+# 5. Start Hime Core (hime-core.exe) if not running
 $core = Get-Process -Name "hime-core" -ErrorAction SilentlyContinue
 if (-not $core) {
     $coreExe = Find-Bin "core" "hime-core.exe"
     if ($coreExe) {
-        Spawn-Detached $coreExe "" $himeRoot 0
+        Spawn-Detached $coreExe "" $repoRoot 0
     }
 }
 
-$useLegacy = [bool]$LegacyWebView
-$supervisorScript = "$himeRoot\scripts\hime-supervisor.ps1"
-$supervisorArgs = if ($useLegacy) { "-LegacyWebView" } else { "" }
-
-if (-not $useLegacy) {
-    # 5-Native (Default). Start Pure-Rust Direct2D Shell (built-in global hotkeys, no WebView2, no hime_hotkey.exe)
-    $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
-    if (-not $nativeShell) {
-        $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
-        if ($nativeExe) {
-            Spawn-Detached $nativeExe "" $himeRoot 0
-        }
+# 6. Start Pure-Rust Direct2D Native Shell (hime-island-native.exe; built-in global hotkeys)
+$nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
+if (-not $nativeShell) {
+    $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
+    if ($nativeExe) {
+        Spawn-Detached $nativeExe "" $repoRoot 0
     }
-
-    # Start Supervisor Watchdog in background (Native mode)
-    if (Test-Path $supervisorScript) {
-        $launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
-        $wscriptExe = "$env:SystemRoot\System32\wscript.exe"
-        if ((Test-Path $launcherVbs) -and (Test-Path $wscriptExe)) {
-            Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`"" $himeRoot 0
-        } else {
-            Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`"" $himeRoot 0
-        }
-    }
-
-    Write-Host "Hime Native Ecosystem Started (Pure-Rust Direct2D Shell + Core)." -ForegroundColor Green
-    exit 0
 }
 
-# 5-Legacy. Start Island Shell (hime-island.exe) if not running
-$shell = Get-Process -Name "hime-island" -ErrorAction SilentlyContinue
-if (-not $shell) {
-    $shellExe = Find-Bin "island\src-tauri" "hime-island.exe"
-    if ($shellExe) {
-        Spawn-Detached $shellExe "" "$himeRoot\island" 1
-    }
-} else {
-    # If already running, signal HimeShowIsland to wake / toggle the notch UI
-    try {
-        $evt = [System.Threading.EventWaitHandle]::OpenExisting("HimeShowIsland")
-        $evt.Set() | Out-Null
-        $evt.Dispose()
-    } catch {}
-}
-
-# 6. Start Hotkey Daemon (guarantee single up-to-date instance)
-$hotkeyExe = Find-Bin "island\src-tauri" "hime_hotkey.exe"
-$hotkeys = @(Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue)
-$restartHotkey = $false
-if ($hotkeys.Count -gt 1) {
-    $restartHotkey = $true
-} elseif ($hotkeys.Count -eq 1 -and $hotkeyExe) {
-    try {
-        $runningPath = $hotkeys[0].Path
-        if ($runningPath -and (($runningPath -ne $hotkeyExe) -or ((Get-Item $hotkeyExe).LastWriteTime -gt $hotkeys[0].StartTime))) {
-            $restartHotkey = $true
-        }
-    } catch {}
-}
-if ($restartHotkey) {
-    $hotkeys | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 150
-    $hotkeys = @()
-}
-if ($hotkeys.Count -eq 0 -and $hotkeyExe) {
-    Spawn-Detached $hotkeyExe "" $himeRoot 0
-}
-
-# 7. Start Supervisor Watchdog in background (Legacy WebView2 mode)
+# 7. Start Supervisor Watchdog in background
+$supervisorScript = Join-Path $repoRoot "scripts\hime-supervisor.ps1"
 if (Test-Path $supervisorScript) {
-    $launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
+    $launcherVbs = Join-Path $repoRoot "tools\hime_launcher.vbs"
     $wscriptExe = "$env:SystemRoot\System32\wscript.exe"
     if ((Test-Path $launcherVbs) -and (Test-Path $wscriptExe)) {
-        Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`" $supervisorArgs" $himeRoot 0
+        Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`"" $repoRoot 0
     } else {
-        Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`" $supervisorArgs" $himeRoot 0
+        Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`"" $repoRoot 0
     }
 }
 
-Write-Host "Hime Ecosystem Started (Active & Persistent)." -ForegroundColor Green
+Write-Host "Hime Native Ecosystem Started (Pure-Rust Direct2D Shell + Core)." -ForegroundColor Green
+exit 0

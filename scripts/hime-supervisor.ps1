@@ -1,10 +1,9 @@
-# hime-supervisor.ps1 - Background Supervisor for Hime Ecosystem (Native default)
-param([switch]$LegacyWebView)
+# hime-supervisor.ps1 - Background Supervisor for Hime Pure-Rust Native Ecosystem
 
 $ErrorActionPreference = "SilentlyContinue"
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $stateFile = "$env:APPDATA\ai.hime.desktop\hime.active"
-$himeRoot = "X:\folder_ai\Hime"
 $logFile = "$env:APPDATA\ai.hime.desktop\supervisor.log"
 
 # Named mutex to guarantee single supervisor instance
@@ -38,8 +37,8 @@ function Log-Msg($msg) {
 }
 
 function Find-Bin($subpath, $name) {
-    $rel = Join-Path $himeRoot "$subpath\target\release\$name"
-    $dbg = Join-Path $himeRoot "$subpath\target\debug\$name"
+    $rel = Join-Path $repoRoot "$subpath\target\release\$name"
+    $dbg = Join-Path $repoRoot "$subpath\target\debug\$name"
     if ((Test-Path $rel) -and (Test-Path $dbg)) {
         if ((Get-Item $rel).LastWriteTime -ge (Get-Item $dbg).LastWriteTime) { return $rel } else { return $dbg }
     }
@@ -48,16 +47,16 @@ function Find-Bin($subpath, $name) {
     return $null
 }
 
-function Spawn-Detached($exePath, $args = "", $workDir = "", $showMode = 0) {
+function Spawn-Detached($exePath, $argList = "", $workDir = "", $showMode = 0) {
     $ws = if ($showMode -eq 0) { "Hidden" } else { "Normal" }
-    if ($args) {
-        Start-Process -FilePath $exePath -ArgumentList $args -WorkingDirectory $workDir -WindowStyle $ws
+    if ($argList) {
+        Start-Process -FilePath $exePath -ArgumentList $argList -WorkingDirectory $workDir -WindowStyle $ws
     } else {
         Start-Process -FilePath $exePath -WorkingDirectory $workDir -WindowStyle $ws
     }
 }
 
-Log-Msg "Hime Supervisor started."
+Log-Msg "Hime Native Supervisor started (root: $repoRoot)."
 
 try {
     while ($true) {
@@ -67,7 +66,7 @@ try {
             break
         }
 
-        # 1. Ensure 9Router Gateway is listening on 20128
+        # 1. Ensure optional 9Router Gateway is listening on 20128 if installed
         $listening = Get-NetTCPConnection -LocalPort 20128 -State Listen -ErrorAction SilentlyContinue
         if (-not $listening) {
             $routerCmd = "$env:APPDATA\npm\9router.cmd"
@@ -83,39 +82,17 @@ try {
             $coreExe = Find-Bin "core" "hime-core.exe"
             if ($coreExe) {
                 Log-Msg "Hime Core not running. Starting from $coreExe..."
-                Spawn-Detached $coreExe "" $himeRoot 0
+                Spawn-Detached $coreExe "" $repoRoot 0
             }
         }
 
-        if ($LegacyWebView) {
-            # 3-Legacy. Ensure WebView2 Island Shell is running
-            $shell = Get-Process -Name "hime-island" -ErrorAction SilentlyContinue
-            if (-not $shell) {
-                $shellExe = Find-Bin "island\src-tauri" "hime-island.exe"
-                if ($shellExe) {
-                    Log-Msg "Island Shell not running. Starting from $shellExe..."
-                    Spawn-Detached $shellExe "" "$himeRoot\island" 1
-                }
-            }
-
-            # 4-Legacy. Ensure Hotkey Daemon is running
-            $hotkey = Get-Process -Name "hime_hotkey" -ErrorAction SilentlyContinue
-            if (-not $hotkey) {
-                $hotkeyExe = Find-Bin "island\src-tauri" "hime_hotkey.exe"
-                if ($hotkeyExe) {
-                    Log-Msg "hime_hotkey not running. Starting from $hotkeyExe..."
-                    Spawn-Detached $hotkeyExe "" $himeRoot 0
-                }
-            }
-        } else {
-            # 3-Native (Default). Ensure Pure-Rust Direct2D Native Shell is running
-            $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
-            if (-not $nativeShell) {
-                $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
-                if ($nativeExe) {
-                    Log-Msg "Native Island Shell not running. Starting from $nativeExe..."
-                    Spawn-Detached $nativeExe "" $himeRoot 0
-                }
+        # 3. Ensure Pure-Rust Direct2D Native Shell is running (includes embedded hotkeys)
+        $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
+        if (-not $nativeShell) {
+            $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
+            if ($nativeExe) {
+                Log-Msg "Native Island Shell not running. Starting from $nativeExe..."
+                Spawn-Detached $nativeExe "" $repoRoot 0
             }
         }
 

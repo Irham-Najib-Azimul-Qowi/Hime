@@ -30,6 +30,33 @@ fn strip_unc_prefix(path_str: &str) -> String {
     }
 }
 
+/// Canonicalize `path` if it exists on disk, or canonicalize its deepest existing
+/// ancestor and re-append the remaining components so Windows 8.3 short paths and
+/// symlinks resolve consistently even for not-yet-created target files.
+fn canonicalize_with_ancestors(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    let mut remainder = Vec::new();
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if let Ok(canon) = std::fs::canonicalize(p) {
+            let mut result = canon;
+            for comp in remainder.into_iter().rev() {
+                result.push(comp);
+            }
+            return result;
+        }
+        if let Some(name) = p.file_name() {
+            remainder.push(name.to_os_string());
+            cur = p.parent();
+        } else {
+            break;
+        }
+    }
+    path.to_path_buf()
+}
+
 pub struct WorkspaceManager {
     storage: Arc<Database>,
 }
@@ -110,13 +137,13 @@ impl WorkspaceManager {
             workspace_path.join(file_path)
         };
 
-        let canonical_target = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-        let canonical_ws = std::fs::canonicalize(workspace_path).unwrap_or_else(|_| workspace_path.to_path_buf());
+        let canonical_target = canonicalize_with_ancestors(&resolved);
+        let canonical_ws = canonicalize_with_ancestors(workspace_path);
 
         let ws_norm = strip_unc_prefix(&canonical_ws.to_string_lossy()).replace('\\', "/").to_lowercase();
         let res_norm = strip_unc_prefix(&canonical_target.to_string_lossy()).replace('\\', "/").to_lowercase();
 
-        if !res_norm.starts_with(&ws_norm) {
+        if !Path::new(&res_norm).starts_with(Path::new(&ws_norm)) {
             warn!(resolved = %canonical_target.display(), ws = %canonical_ws.display(), "Workspace boundary violation");
             return Err(WorkspaceError::PathBoundaryViolation(
                 target_str.to_string(),
@@ -131,5 +158,42 @@ impl WorkspaceManager {
         self.storage
             .list_developer_workspaces()
             .map_err(|e| WorkspaceError::DbError(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_file_access_blocks_sibling_prefix_and_allows_nonexistent_nested() {
+        let storage = Arc::new(Database::open_in_memory().unwrap());
+        let mgr = WorkspaceManager::new(storage);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let ws = std::env::temp_dir().join(format!("hime_ws_unit_{:x}", nonce));
+        let sibling = std::env::temp_dir().join(format!("hime_ws_unit_{:x}_evil", nonce));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        // Non-existent nested file inside workspace (even when temp_dir uses 8.3 short names)
+        let nested = ws.join("src").join("nested").join("mod.rs");
+        assert!(mgr.validate_file_access(&ws, &nested).is_ok());
+
+        // Relative path inside workspace
+        assert!(mgr.validate_file_access(&ws, Path::new("src/main.rs")).is_ok());
+
+        // Sibling directory sharing the same string prefix must be rejected
+        let sibling_file = sibling.join("secret.txt");
+        assert!(matches!(
+            mgr.validate_file_access(&ws, &sibling_file),
+            Err(WorkspaceError::PathBoundaryViolation(_, _))
+        ));
+
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&sibling);
     }
 }

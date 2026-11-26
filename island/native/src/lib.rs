@@ -11,6 +11,7 @@ pub mod hotkey;
 pub mod ipc_client;
 pub mod module_mgr;
 pub mod notch;
+pub mod notch_workspace;
 pub mod os_shell;
 pub mod overlay;
 pub mod settings_store;

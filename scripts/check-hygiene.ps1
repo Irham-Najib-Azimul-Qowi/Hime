@@ -2,11 +2,10 @@
 .SYNOPSIS
     Hime Island Code Hygiene & Quality Gate (scripts/check-hygiene.ps1)
 .DESCRIPTION
-    Enforces quality standards defined in 14-MODULARITY-AND-CODE-QUALITY.md §6:
+    Enforces quality standards across pure-Rust Core & Native Island:
     - No TODO/FIXME without issue ID (e.g., TODO(H-123))
-    - No bare debug console logs in production source
-    - No commented-out code blocks
-    - Validates Rust core and Island source integrity
+    - No production todo!() / unimplemented!() macros in Rust source
+    - No stray temporary log/dump artifacts in root or island/
 #>
 
 [CmdletBinding()]
@@ -21,13 +20,12 @@ Set-Location $repoRoot
 $violations = @()
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "  HIME ISLAND CODE HYGIENE AUDIT" -ForegroundColor Cyan
+Write-Host "  HIME ISLAND CODE HYGIENE AUDIT (PURE-RUST NATIVE)" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
 # 1. Check for unanchored task anchors (must have issue ID like TODO(H-101))
 $scanDirs = @(
-    "island/src",
-    "island/src-tauri/src",
+    "island/native/src",
     "core/crates",
     "modules",
     "contracts",
@@ -53,7 +51,7 @@ foreach ($dir in $scanDirs) {
         foreach ($line in $lines) {
             $lineNum++
             $trimmed = $line.Trim()
-            
+
             # Check for TODO / FIXME in comments without issue ID
             $isComment = $trimmed.StartsWith("//") -or $trimmed.StartsWith("/*") -or $trimmed.StartsWith("*") -or $trimmed.StartsWith("#")
             if ($isComment -and $trimmed -match '\b(TODO|FIXME)\b' -and $trimmed -notmatch '\b(TODO|FIXME)\([A-Za-z0-9_-]+\)') {
@@ -66,7 +64,7 @@ foreach ($dir in $scanDirs) {
 # 2. Check for leftover mock placeholders in production Rust source
 $rustScanDirs = @(
     "core/crates",
-    "island/src-tauri/src"
+    "island/native/src"
 )
 
 foreach ($rDir in $rustScanDirs) {
@@ -111,7 +109,7 @@ foreach ($sDir in $strayCheckDirs) {
     }
 }
 
-# 3. Report results
+# 4. Report results
 if ($violations.Count -eq 0) {
     Write-Host "[OK] Code hygiene check PASSED! Zero hygiene violations found." -ForegroundColor Green
     exit 0

@@ -2,10 +2,8 @@
 .SYNOPSIS
     Hime Island Brand Compliance Gate (scripts/check-brand.ps1)
 .DESCRIPTION
-    Scans the repository for unauthorized occurrences of "Bloom" in user-facing UI,
-    metadata, binary definitions, and strings.
-    Ensures that productName, identifier, window titles, and user-facing artifacts adhere strictly
-    to the Hime Island product identity (03-BRANDING-HIME-ISLAND.md).
+    Scans active pure-Rust source, contracts, modules, design, and scripts for
+    unauthorized occurrences of "Bloom" in user-facing UI, metadata, and strings.
 #>
 
 [CmdletBinding()]
@@ -20,43 +18,34 @@ Set-Location $repoRoot
 $violations = @()
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "  HIME ISLAND BRAND COMPLIANCE AUDIT" -ForegroundColor Cyan
+Write-Host "  HIME ISLAND BRAND COMPLIANCE AUDIT (PURE-RUST NATIVE)" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-# 1. Check tauri.conf.json identity
-$tauriConfPath = Join-Path $repoRoot "island/src-tauri/tauri.conf.json"
-if (Test-Path $tauriConfPath) {
-    $tauriConf = Get-Content $tauriConfPath -Raw | ConvertFrom-Json
-    if ($tauriConf.productName -ne "Hime Island") {
-        $violations += "tauri.conf.json productName is '$($tauriConf.productName)', expected 'Hime Island'"
+# 1. Check island/native/Cargo.toml identity
+$nativeCargoPath = Join-Path $repoRoot "island/native/Cargo.toml"
+if (Test-Path $nativeCargoPath) {
+    $nativeCargo = Get-Content $nativeCargoPath -Raw
+    if ($nativeCargo -notmatch 'name\s*=\s*"hime-island-native"') {
+        $violations += "island/native/Cargo.toml package name expected 'hime-island-native'"
     }
-    if ($tauriConf.identifier -ne "local.hime.island") {
-        $violations += "tauri.conf.json identifier is '$($tauriConf.identifier)', expected 'local.hime.island'"
-    }
-    foreach ($win in $tauriConf.app.windows) {
-        if ($win.title -like "*Bloom*") {
-            $violations += "tauri.conf.json window '$($win.label)' title contains 'Bloom': '$($win.title)'"
-        }
+    if ($nativeCargo -match '(?im)^description\s*=.*\bbloom\b') {
+        $violations += "island/native/Cargo.toml description contains 'Bloom'"
     }
 } else {
-    $violations += "Missing island/src-tauri/tauri.conf.json"
+    $violations += "Missing mandatory file: island/native/Cargo.toml"
 }
 
-# 2. Check island package.json identity
-$pkgJsonPath = Join-Path $repoRoot "island/package.json"
-if (Test-Path $pkgJsonPath) {
-    $pkgJson = Get-Content $pkgJsonPath -Raw | ConvertFrom-Json
-    if ($pkgJson.name -ne "hime-island") {
-        $violations += "island/package.json name is '$($pkgJson.name)', expected 'hime-island'"
-    }
-} else {
-    $violations += "Missing mandatory file: island/package.json"
+# 2. Check core/Cargo.toml presence
+$coreCargoPath = Join-Path $repoRoot "core/Cargo.toml"
+if (-not (Test-Path $coreCargoPath)) {
+    $violations += "Missing mandatory file: core/Cargo.toml"
 }
 
 # 3. Whitelisted paths for GPL-3.0 attribution and legacy reference
 $whitelist = @(
     "NOTICE",
     "LICENSE",
+    "Archive/",
     "docs/legal/",
     "docs/hime/harvest/",
     "docs/agent-pack/",
@@ -64,10 +53,9 @@ $whitelist = @(
     "scripts/check-brand.ps1"
 )
 
-# 4. Scan active source directories for user-facing UI and logic brand leaks
+# 4. Scan active pure-Rust source directories and metadata for brand leaks
 $targetDirs = @(
-    "island/src",
-    "island/src-tauri/src",
+    "island/native/src",
     "core/crates",
     "modules",
     "contracts",
@@ -86,7 +74,7 @@ foreach ($dir in $targetDirs) {
     $files = Get-ChildItem -Path $fullDir -Recurse -File -Exclude "*.lock", "*.png", "*.ico", "*.svg", "*.woff*", "*.ttf", "*.css"
     foreach ($file in $files) {
         $relPath = $file.FullName.Substring($repoRoot.Length + 1).Replace("\", "/")
-        
+
         $isWhitelisted = $false
         foreach ($w in $whitelist) {
             if ($relPath.StartsWith($w)) {
@@ -101,7 +89,7 @@ foreach ($dir in $targetDirs) {
         foreach ($line in $content) {
             $lineNum++
             $trimmed = $line.Trim()
-            
+
             # Allow code comments referencing upstream Bloom algorithms / attribution
             if ($trimmed.StartsWith("//") -or $trimmed.StartsWith("/*") -or $trimmed.StartsWith("*") -or $trimmed.StartsWith("///") -or $trimmed.StartsWith("#")) {
                 continue
@@ -109,11 +97,11 @@ foreach ($dir in $targetDirs) {
 
             if ($line -match "(?i)\bbloom\b") {
                 # Permissible GPL header or attribution text, or persona rejection tests
-                if ($line -match "derivative work based upon Bloom" -or $line -match "GPL-3.0" -or $line -match 'lower\.contains\("bloom"\)' -or $line -match 'Apakah kamu Bloom') {
+                if ($line -match "derivative work based upon Bloom" -or $line -match "Derivative of Bloom" -or $line -match "GNU General Public License v3\.0" -or $line -match "GPL-3\.0" -or $line -match 'lower\.contains\("bloom"\)' -or $line -match 'Apakah kamu Bloom') {
                     continue
                 }
-                # Internal bloom-* settings keys or legacy CSS class names migrating in phase U1 are permitted
-                if ($line -match '["'']bloom-' -or $line -match 'bloom-[a-z0-9_-]+' -or $line -match 'className=\{?`?bloom\b') {
+                # Internal legacy-compatible bloom-* settings keys are permitted
+                if ($line -match '["'']bloom-' -or $line -match 'bloom-[a-z0-9_-]+') {
                     continue
                 }
                 $violations += "${relPath}:${lineNum} - Found unwhitelisted brand token: $($trimmed)"

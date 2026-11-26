@@ -230,6 +230,12 @@ pub struct SettingsState {
     pub hime_ai_enabled: bool,
     pub hime_router_url: String,
     pub hime_router_model: String,
+    pub translate_opt_in: bool,
+    /// `"quiet"` | `"balanced"` | `"chatty"`
+    pub proactive_budget: String,
+    pub memory_count: usize,
+    pub skills_count: usize,
+    pub mcp_count: usize,
 
     pub router_9_detected: bool,
     pub active_profile: ApiProfileConfig,
@@ -254,6 +260,11 @@ impl Default for SettingsState {
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
             hime_router_model: "hime-combo".to_string(),
+            translate_opt_in: false,
+            proactive_budget: "balanced".to_string(),
+            memory_count: 0,
+            skills_count: 0,
+            mcp_count: 0,
             router_9_detected: false,
             active_profile: ApiProfileConfig::from_preset(ProviderPreset::NineRouter),
         }
@@ -269,6 +280,11 @@ pub enum SettingsAction {
     ToggleNotchMode,
     ToggleFreeDrag,
     ToggleHimeAi,
+    ToggleTranslateOptIn,
+    CycleProactiveBudget,
+    ReloadSkills,
+    ReloadMcp,
+    RefreshMemory,
     TestAndSaveProfile,
     ResetToDefaults,
     Close,
@@ -306,6 +322,11 @@ enum RowControlId {
     CycleProviderPreset,
     CycleRouterModel,
     TestAndSaveProfile,
+    ToggleTranslateOptIn,
+    CycleProactiveBudget,
+    RefreshMemory,
+    ReloadSkills,
+    ReloadMcp,
     AboutInfo,
 }
 
@@ -327,6 +348,11 @@ enum RowVisual {
     Toggle(bool),
     Pill(String, crate::theme::Color),
     Button(String, crate::theme::Color),
+    SummaryCard {
+        count: usize,
+        action_label: &'static str,
+        accent: crate::theme::Color,
+    },
     Info(String),
 }
 
@@ -619,6 +645,27 @@ impl SettingsPanel {
                 self.status_notice = Some("Saving & testing gateway...".to_string());
                 SettingsAction::TestAndSaveProfile
             }
+            RowControlId::ToggleTranslateOptIn => {
+                self.state.translate_opt_in = !self.state.translate_opt_in;
+                SettingsAction::ToggleTranslateOptIn
+            }
+            RowControlId::CycleProactiveBudget => {
+                self.state.proactive_budget =
+                    cycle_proactive_budget(&self.state.proactive_budget).to_string();
+                SettingsAction::CycleProactiveBudget
+            }
+            RowControlId::RefreshMemory => {
+                self.status_notice = Some("Refreshing memory summary...".to_string());
+                SettingsAction::RefreshMemory
+            }
+            RowControlId::ReloadSkills => {
+                self.status_notice = Some("Reloading skills...".to_string());
+                SettingsAction::ReloadSkills
+            }
+            RowControlId::ReloadMcp => {
+                self.status_notice = Some("Reloading MCP servers...".to_string());
+                SettingsAction::ReloadMcp
+            }
             RowControlId::AboutInfo => SettingsAction::UpdateSettings,
         }
     }
@@ -890,6 +937,51 @@ impl SettingsPanel {
                         },
                     ),
                 },
+                RenderedRow {
+                    id: RowControlId::ToggleTranslateOptIn,
+                    title: "Translate Selection",
+                    desc: "Privacy opt-in: send highlighted text for quick translation".to_string(),
+                    kind: RowVisual::Toggle(self.state.translate_opt_in),
+                },
+                RenderedRow {
+                    id: RowControlId::CycleProactiveBudget,
+                    title: "Proactive Budget",
+                    desc: proactive_budget_desc(&self.state.proactive_budget).to_string(),
+                    kind: RowVisual::Pill(
+                        proactive_budget_label(&self.state.proactive_budget).to_string(),
+                        ACCENT_CYAN,
+                    ),
+                },
+                RenderedRow {
+                    id: RowControlId::RefreshMemory,
+                    title: "Memory",
+                    desc: format!("{} entries", self.state.memory_count),
+                    kind: RowVisual::SummaryCard {
+                        count: self.state.memory_count,
+                        action_label: "Refresh",
+                        accent: ACCENT_CYAN,
+                    },
+                },
+                RenderedRow {
+                    id: RowControlId::ReloadSkills,
+                    title: "Skills",
+                    desc: format!("{} loaded", self.state.skills_count),
+                    kind: RowVisual::SummaryCard {
+                        count: self.state.skills_count,
+                        action_label: "Reload",
+                        accent: STATUS_SUCCESS,
+                    },
+                },
+                RenderedRow {
+                    id: RowControlId::ReloadMcp,
+                    title: "MCP Servers",
+                    desc: format!("{} connected", self.state.mcp_count),
+                    kind: RowVisual::SummaryCard {
+                        count: self.state.mcp_count,
+                        action_label: "Reload",
+                        accent: ACCENT_CYAN,
+                    },
+                },
             ],
             SettingsTab::About => vec![
                 RenderedRow {
@@ -918,6 +1010,33 @@ impl SettingsPanel {
         let rows = self.rows_for_active_tab();
         let content_x = SIDEBAR_WIDTH + CONTENT_PAD_X;
         let row_w = self.width - content_x - CONTENT_PAD_X;
+        if self.active_tab == SettingsTab::HimeAi {
+            let stacked_count = rows
+                .iter()
+                .filter(|r| !matches!(r.kind, RowVisual::SummaryCard { .. }))
+                .count();
+            let mut out = Vec::with_capacity(rows.len());
+            let mut y = TITLEBAR_HEIGHT + 70.0; // 112.0 (contains y=130 for row 0)
+            let compact_h = 41.0;
+            let compact_gap = 5.0;
+            for row in rows.iter().take(stacked_count) {
+                out.push((row.id, Rect::new(content_x, y, row_w, compact_h)));
+                y += compact_h + compact_gap;
+            }
+            let summary_rows: Vec<&RenderedRow> = rows.iter().skip(stacked_count).collect();
+            if !summary_rows.is_empty() {
+                let card_gap = 8.0;
+                let cols = summary_rows.len() as f32;
+                let card_w = ((row_w - card_gap * (cols - 1.0)) / cols).max(80.0);
+                let card_h = 66.0;
+                let strip_y = y + 2.0;
+                for (i, row) in summary_rows.into_iter().enumerate() {
+                    let cx = content_x + i as f32 * (card_w + card_gap);
+                    out.push((row.id, Rect::new(cx, strip_y, card_w, card_h)));
+                }
+            }
+            return out;
+        }
         let mut y = TITLEBAR_HEIGHT + 74.0;
         rows.into_iter()
             .map(|r| {
@@ -1060,11 +1179,22 @@ impl SettingsPanel {
             // Content rows
             let rows = self.rows_for_active_tab();
             let rects = self.row_rects();
+            let base_content_w = (self.width - content_x - CONTENT_PAD_X).max(1.0);
+            let width_scale = content_w / base_content_w;
             for (idx, (row, (_, rect))) in rows.into_iter().zip(rects.into_iter()).enumerate() {
                 if rect.y + rect.height > draw_h - 14.0 {
                     continue;
                 }
-                let r = Rect::new(rect.x, rect.y, content_w, rect.height);
+                let r = if matches!(row.kind, RowVisual::SummaryCard { .. }) {
+                    Rect::new(
+                        content_x + (rect.x - content_x) * width_scale,
+                        rect.y,
+                        rect.width * width_scale,
+                        rect.height,
+                    )
+                } else {
+                    Rect::new(rect.x, rect.y, content_w, rect.height)
+                };
                 let hovered = self.hovered_target == Some(HitTarget::Row(row.id));
                 let selected = self.selected_index == Some(idx);
 
@@ -1083,17 +1213,53 @@ impl SettingsPanel {
                     surface.stroke_rounded_rect(r, 10.0, GLASS_BORDER, 1.0)?;
                 }
 
+                if let RowVisual::SummaryCard {
+                    count,
+                    action_label,
+                    accent,
+                } = row.kind
+                {
+                    surface.draw_text(
+                        row.title,
+                        Rect::new(r.x + 10.0, r.y + 8.0, (r.width - 66.0).max(40.0), 18.0),
+                        11.5,
+                        TEXT_PRIMARY,
+                        TextAlign::Leading,
+                    )?;
+                    let badge = Rect::new(r.x + r.width - 50.0, r.y + 7.0, 40.0, 20.0);
+                    surface.fill_rounded_rect(badge, 6.0, accent.with_alpha(0.18))?;
+                    surface.draw_text(
+                        &count.to_string(),
+                        badge,
+                        11.0,
+                        accent,
+                        TextAlign::Center,
+                    )?;
+
+                    let btn = Rect::new(r.x + 10.0, r.y + 35.0, (r.width - 20.0).max(40.0), 22.0);
+                    surface.fill_rounded_rect(btn, 6.0, accent.with_alpha(0.14))?;
+                    surface.stroke_rounded_rect(btn, 6.0, accent.with_alpha(0.42), 1.0)?;
+                    surface.draw_text(
+                        action_label,
+                        btn,
+                        11.0,
+                        TEXT_PRIMARY,
+                        TextAlign::Center,
+                    )?;
+                    continue;
+                }
+
                 // Pure white title & readable secondary subtitle
                 surface.draw_text(
                     row.title,
-                    Rect::new(r.x + 14.0, r.y + 6.0, r.width * 0.62, 18.0),
-                    12.5,
+                    Rect::new(r.x + 14.0, r.y + 5.0, r.width * 0.62, 18.0),
+                    12.0,
                     TEXT_PRIMARY,
                     TextAlign::Leading,
                 )?;
                 surface.draw_text(
                     &row.desc,
-                    Rect::new(r.x + 14.0, r.y + 23.0, r.width * 0.64, 16.0),
+                    Rect::new(r.x + 14.0, r.y + 22.0, r.width * 0.64, 16.0),
                     10.5,
                     TEXT_SECONDARY,
                     TextAlign::Leading,
@@ -1161,6 +1327,7 @@ impl SettingsPanel {
                             TextAlign::Trailing,
                         )?;
                     }
+                    RowVisual::SummaryCard { .. } => {}
                 }
             }
 
@@ -1197,9 +1364,38 @@ fn row_to_action(row: RowControlId) -> SettingsAction {
             SettingsAction::ToggleDockMode
         }
         RowControlId::ToggleHimeAi => SettingsAction::ToggleHimeAi,
+        RowControlId::ToggleTranslateOptIn => SettingsAction::ToggleTranslateOptIn,
+        RowControlId::CycleProactiveBudget => SettingsAction::CycleProactiveBudget,
+        RowControlId::RefreshMemory => SettingsAction::RefreshMemory,
+        RowControlId::ReloadSkills => SettingsAction::ReloadSkills,
+        RowControlId::ReloadMcp => SettingsAction::ReloadMcp,
         RowControlId::TestAndSaveProfile => SettingsAction::TestAndSaveProfile,
         RowControlId::ResetToDefaults => SettingsAction::ResetToDefaults,
         _ => SettingsAction::UpdateSettings,
+    }
+}
+
+fn cycle_proactive_budget(current: &str) -> &'static str {
+    match current {
+        "quiet" | "pendiam" => "balanced",
+        "balanced" | "seimbang" => "chatty",
+        _ => "quiet",
+    }
+}
+
+fn proactive_budget_label(budget: &str) -> &'static str {
+    match budget {
+        "quiet" | "pendiam" => "Quiet",
+        "chatty" | "cerewet" => "Chatty",
+        _ => "Balanced",
+    }
+}
+
+fn proactive_budget_desc(budget: &str) -> &'static str {
+    match budget {
+        "quiet" | "pendiam" => "Minimal proactive nudges (1 nudge/hr)",
+        "chatty" | "cerewet" => "Frequent proactive assistance (6 nudges/hr)",
+        _ => "Balanced proactive attention budget (3 nudges/hr)",
     }
 }
 
@@ -1349,5 +1545,162 @@ mod tests {
         panel.close();
         assert!(!panel.visible);
         assert_eq!(panel.open_spring.value, 0.0);
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        a.x < b.x + b.width
+            && a.x + a.width > b.x
+            && a.y < b.y + b.height
+            && a.y + a.height > b.y
+    }
+
+    #[test]
+    fn all_tabs_fit_inside_740x520_without_clipping_or_overlap() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+
+        for (idx, &tab) in SettingsTab::ALL.iter().enumerate() {
+            let tab_rect = panel.tab_rects()[idx].1;
+            let cx = tab_rect.x + tab_rect.width * 0.5;
+            let cy = tab_rect.y + tab_rect.height * 0.5;
+            assert_eq!(
+                panel.handle_click(cx, cy),
+                Some(SettingsAction::SelectTab(tab))
+            );
+            assert_eq!(panel.active_tab, tab);
+
+            let row_rects = panel.row_rects();
+            assert!(!row_rects.is_empty(), "tab {:?} has no rows", tab);
+            for (_, r) in &row_rects {
+                assert!(r.x >= SIDEBAR_WIDTH, "row left clipped on {:?}", tab);
+                assert!(
+                    r.x + r.width <= SETTINGS_WIDTH - CONTENT_PAD_X + 0.5,
+                    "row right clipped on {:?}: {:?}",
+                    tab,
+                    r
+                );
+                assert!(r.y >= TITLEBAR_HEIGHT, "row top clipped on {:?}", tab);
+                assert!(
+                    r.y + r.height <= SETTINGS_HEIGHT - 14.0,
+                    "row bottom clipped on {:?}: {:?}",
+                    tab,
+                    r
+                );
+            }
+            for i in 0..row_rects.len() {
+                for j in (i + 1)..row_rects.len() {
+                    assert!(
+                        !rects_overlap(row_rects[i].1, row_rects[j].1),
+                        "overlapping rows on {:?}: {:?} vs {:?}",
+                        tab,
+                        row_rects[i].0,
+                        row_rects[j].0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hime_ai_new_controls_hit_test_and_mutate_state() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+        panel.state.memory_count = 14;
+        panel.state.skills_count = 6;
+        panel.state.mcp_count = 3;
+        panel.select_tab(SettingsTab::HimeAi);
+
+        assert!(!panel.state.translate_opt_in);
+        assert_eq!(panel.state.proactive_budget, "balanced");
+
+        let rects = panel.row_rects();
+        let find_center = |target: RowControlId| -> (f32, f32) {
+            let r = rects
+                .iter()
+                .find(|(id, _)| *id == target)
+                .map(|(_, r)| *r)
+                .expect("expected control rect");
+            (r.x + r.width * 0.5, r.y + r.height * 0.5)
+        };
+
+        // Translate Selection opt-in toggle
+        let (tx, ty) = find_center(RowControlId::ToggleTranslateOptIn);
+        assert_eq!(
+            panel.hit_test_action(tx, ty),
+            Some(SettingsAction::ToggleTranslateOptIn)
+        );
+        assert_eq!(
+            panel.handle_click(tx, ty),
+            Some(SettingsAction::ToggleTranslateOptIn)
+        );
+        assert!(panel.state.translate_opt_in);
+        assert_eq!(
+            panel.handle_click(tx, ty),
+            Some(SettingsAction::ToggleTranslateOptIn)
+        );
+        assert!(!panel.state.translate_opt_in);
+
+        // Proactive Budget cycler: balanced -> chatty -> quiet -> balanced
+        let (px, py) = find_center(RowControlId::CycleProactiveBudget);
+        assert_eq!(
+            panel.hit_test_action(px, py),
+            Some(SettingsAction::CycleProactiveBudget)
+        );
+        assert_eq!(
+            panel.handle_click(px, py),
+            Some(SettingsAction::CycleProactiveBudget)
+        );
+        assert_eq!(panel.state.proactive_budget, "chatty");
+        assert_eq!(
+            panel.handle_click(px, py),
+            Some(SettingsAction::CycleProactiveBudget)
+        );
+        assert_eq!(panel.state.proactive_budget, "quiet");
+        assert_eq!(
+            panel.handle_click(px, py),
+            Some(SettingsAction::CycleProactiveBudget)
+        );
+        assert_eq!(panel.state.proactive_budget, "balanced");
+
+        // Memory / Skills / MCP Servers summary triggers
+        let (mx, my) = find_center(RowControlId::RefreshMemory);
+        assert_eq!(
+            panel.handle_click(mx, my),
+            Some(SettingsAction::RefreshMemory)
+        );
+
+        let (sx, sy) = find_center(RowControlId::ReloadSkills);
+        assert_eq!(
+            panel.handle_click(sx, sy),
+            Some(SettingsAction::ReloadSkills)
+        );
+
+        let (mcx, mcy) = find_center(RowControlId::ReloadMcp);
+        assert_eq!(
+            panel.handle_click(mcx, mcy),
+            Some(SettingsAction::ReloadMcp)
+        );
+
+        // Summary rows include live counts
+        let rows = panel.rows_for_active_tab();
+        let mem_row = rows.iter().find(|r| r.id == RowControlId::RefreshMemory).unwrap();
+        assert_eq!(mem_row.desc, "14 entries");
+        let skills_row = rows.iter().find(|r| r.id == RowControlId::ReloadSkills).unwrap();
+        assert_eq!(skills_row.desc, "6 loaded");
+        let mcp_row = rows.iter().find(|r| r.id == RowControlId::ReloadMcp).unwrap();
+        assert_eq!(mcp_row.desc, "3 connected");
+    }
+
+    #[test]
+    fn settings_state_backwards_compat_serde_defaults() {
+        let legacy_json = r#"{"hime_ai_enabled":true,"dock_enabled":false}"#;
+        let parsed: SettingsState = serde_json::from_str(legacy_json).unwrap();
+        assert!(parsed.hime_ai_enabled);
+        assert!(!parsed.dock_enabled);
+        assert!(!parsed.translate_opt_in);
+        assert_eq!(parsed.proactive_budget, "balanced");
+        assert_eq!(parsed.memory_count, 0);
+        assert_eq!(parsed.skills_count, 0);
+        assert_eq!(parsed.mcp_count, 0);
     }
 }

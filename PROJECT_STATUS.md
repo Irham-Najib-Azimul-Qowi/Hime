@@ -1,81 +1,61 @@
-# PROJECT STATUS — HIME ISLAND
-**Diperbarui:** 2026-11-19 11:45 WIB  
-**Versi Target:** `v1.0.0-rc.1` (Release Candidate)  
-**Dokumen Induk:** `hime-island-update-pack/` (00 → 18), `02b-MONOREPO-LAYOUT-AND-MANAGEMENT.md`, `18-ROADMAP-UPDATE.md`  
+# PROJECT STATUS — HIME ECOSYSTEM (ADR-017 PHASE 4)
+
+**Updated:** 2026-11-26  
+**Architecture Baseline:** [ADR-017: Modular Two-Subsystem Native Rust Architecture](docs/adr/017-modular-two-subsystem-native-architecture.md)  
+**Active Phase:** **Phase 4 — Cutover & WebView2 Archival (`DONE` — `[VERIFIED]`)**
 
 ---
 
-## 1. POSISI SAAT INI
+## 1. CURRENT ARCHITECTURE SNAPSHOT
 
-- **Identitas Produk:** **Hime Island** (Desktop Shell) & **Hime** (Personal AI Assistant)
-- **Arsitektur:** Monorepo tunggal di `X:\folder_ai\Hime` (`island/`, `core/`, `mobile/`, `runtimes/`, `modules/`, `skills/`, `design/`, `contracts/`, `tools/`, `scripts/`, `docs/`)
-- **Tahap Berjalan:** **READY FOR OWNER ACCEPTANCE (v1.0 RC)**
-- **Kondisi Komponen Terverifikasi (`[VERIFIED]`):**
-  - **Stage H0, H1, & R0 Selesai 100%:** Rebrand total ke Hime Island, binary release `hime-island.exe`, `hime_hotkey.exe`, dan `hime-core.exe` terkompilasi optimal.
-  - **Branch Git:** `hime/h1-monorepo`.
-  - **Gerbang Kualitas:** `check-brand.ps1` (0 violations), `check-hygiene.ps1` (0 violations), `cargo test` Core (128/128 tests passing).
-  - **Stabilitas Shell:** Perbaikan setup hook non-blocking menuntaskan freeze white screen dan "Not Responding" dialog.
-  - **Persistensi & Hotkeys:** Autostart registry Windows, Desktop shortcuts, supervisor otomatis, dan hotkey daemon (`Ctrl+Shift+H` start, `Ctrl+Shift+Q` stop).
-  - **Pintu Tunggal (`scripts/hime.ps1`):** Subcommand `check`, `doctor`, `setup`, `test`, `build`, `clean` terverifikasi 100%.
-- **Target Segera (Stage H2):**
-  1. Integrasi maskot `HimeEyes` di notch pill tertutup dengan status ekspresi real-time (`netral`, `berpikir`, `senang`, `offline`).
-  2. Bubble approval vertikal dan status bridge IPC Core (`hime-core-status`).
-
----
-
-## 2. ROADMAP RESMI (18-ROADMAP-UPDATE.MD)
-
-| Tahap | Deskripsi | Status | Rujukan / Target |
-|:---:|:---|:---:|:---|
-| **H0** | Studi & Impor Bloom (ke `island/`) | **`DONE`** *(ACCEPTED)* | Baseline resource, komponen notch, spring, font |
-| **H1** | Monorepo + Panen (migrasi di tempat) | **`DONE`** *(ACCEPTED)* | `02b §4`: satu folder `Hime`, karantina dan panen tuntas |
-| **R0** | Rebrand + Fondasi Desain + Fondasi Modul | **`DONE`** *(ACCEPTED)* | `03`, `04`, `14`: check-brand, tokens, hime-modsdk, check-hygiene |
-| **H2** | Bridge + Irisan Vertikal Island | **`DONE`** *(ACCEPTED)* | Mata mini di pill, bubble approval, Presentation NCM dasar |
-| **U1** | Notch Compose Manager + Mata + Animasi + Pintasan + Settings baru | **`DONE`** *(ACCEPTED)* | `05`, `06`, `13`: 22 ekspresi, NCM, keybinds terintegrasi, Settings baru |
-| **08R** | AI Runtime + Chat (07) + Persona (17) | **`DONE`** *(ACCEPTED)* | `07`, `17`: Multi-run, pill `/`, persona Hime, idle-stop |
-| **U2** | Lirik (12) | **`DONE`** *(ACCEPTED)* | `12`: LRCLIB + local cache, sinkron waktu |
-| **09R** | Intelligence Core + Tugas (10 §1) + Terjemah (09) + Simpanan (08) | **`DONE`** *(ACCEPTED)* | `08`, `09`, `10`: Quick-add, UIA selection, Shelf global |
-| **U3** | Rutinitas, Komitmen, Penegakan, Screen-time | **`DONE`** *(VERIFIED)* | `10 §2–3`: Jadwal, penutupan anggun WM_CLOSE, Jeda Darurat, 291/291 routines tests & 96/96 screentime tests pass |
-| **10R** | Storage Intelligence + Hime Proaktif (11) | **`DONE`** *(VERIFIED)* | `11`: Interaction Engine, anggaran perhatian, katalog 1–22, 24/24 proactive tests pass, 5-tier pass |
-| **11R** | Mobile & Devices + Paritas + Penegakan HP (16) | **`DONE`** *(VERIFIED)* | `16`: Android Kotlin Compose, mTLS, overlay penegakan, 20/20 mobile parity tests pass, 5-tier pass |
-| **12R** | Dokumen & Produktivitas Lanjutan | **`DONE`** *(VERIFIED)* | Template akademik 4-3-3-3, DOCX/HTML, headless worker, operasional dokumen |
-| **13R** | Browser, Integrasi, Dev Workspace | **`DONE`** *(VERIFIED)* | SSRF defense, Git adapter, dev runner allowlisted, OAuth vault |
-| **U4** | Optimasi Resource (Pass Khusus) | **`DONE`** *(VERIFIED)* | `15`: Idle ≤ 350 MB, Mode Hemat ≤ 250 MB, 17/17 tests pass, 5-tier pass |
-| **15R** | Hardening & Rilis Kandidat v1.0 | **`DONE`** *(VERIFIED)* | `1.0.0-rc.1`, audit GPL-3.0, THIRD-PARTY.md, COMPATIBILITY.json, 16/16 tests pass, 5-tier pass |
+- **Product Identity:** **Hime Island** (Pure-Rust Desktop Shell) & **Hime** (Modular AI Runtime)
+- **Active Subsystems:**
+  1. **Subsystem 1 — `hime-island-native` (`island/native/`):** Pure-Rust Win32 + Direct2D + DirectWrite + DirectComposition shell (`hime-island-native.exe`, `3.74 MB` release).
+     - Zero WebView2 processes, zero Chromium/Bun runtime dependency.
+     - Absorbs global hotkey handling (`island/native/src/hotkey.rs`, replacing legacy `hime_hotkey.exe`).
+     - Includes 3-edge Dynamic Island Notch, Floating Dock, Dual Edge Overlays, File Shelf, Native Settings UI, AI Drawer, Module Manager, and live Win32 OS telemetry.
+  2. **Subsystem 2 — `hime-core` (`core/`):** Rust workspace (`hime-core`, `hime-ipc`, `hime-modsdk`, `hime-pal`, `hime-security`, `hime-storage`) compiling `hime-core.exe` (`9.76 MB` release).
+     - Connected via Win32 Named Pipe (`\\.\pipe\hime-ipc`).
+     - Supports adaptive AI providers (OpenAI-compatible / optional external 9Router on `127.0.0.1:20128`, Google Gemini native, Anthropic Messages), FTS5 self-learning memory, `SKILL.md` dynamic skills, MCP host client, lyrics, tasks, routines, screen-time, proactive engine, developer checks, and document tools.
+- **Legacy Archival (`Archive/legacy-webview2-island/`):**
+  - Previous Tauri 2.0 / WebView2 / React / Vite / Bun shell files (`island/src`, `island/src-tauri`, `island/public`, HTML entrypoints, `package.json`, `bun.lock`, `tsconfig*.json`, `vite.config.ts`) archived via `git mv`.
+  - `island/native/` and `island/scripts/` remain active in `island/`.
 
 ---
 
-## 3. KEWAJIBAN DIBAWA (CARRY-FORWARD REGISTER)
+## 2. ADR-017 PHASE STATUS
 
-| ID | Deskripsi Kewajiban | Target Penutupan | Status |
-|:---:|:---|:---:|:---|
-| **G18** | Rebrand total + gerbang `scripts/check-brand.ps1` | Stage R0 | IN PROGRESS |
-| **G19** | Design tokens + audit kontras + registry string + lint panjang | Stage R0 | IN PROGRESS |
-| **G20** | Registry modul (shell + Core) + scaffold + saklar nol-biaya terbukti | Stage R0 / U1 | IN PROGRESS |
-| **G21** | Baseline resource Bloom + anggaran Hime + skrip ukur | Stage H0 / R0 | IN PROGRESS |
-| **G22** | Gerbang higienitas kode (`scripts/check-hygiene.ps1`) | Stage R0 | IN PROGRESS |
-| **G23** | Persona Hime di Hermes + uji emas identitas | Stage 08R | PENDING |
-| **G24** | Verifikasi visual tiap milestone (VC-R0 s/d VC-U10) | Semua Milestone | PENDING |
+| Phase | Scope | Status | Notes |
+| :--- | :--- | :---: | :--- |
+| **Phase 1** | Core AI Upgrade (`core/`) | `DONE` | Multi-provider adapters, MCP host, `SKILL.md` loader, FTS5 memory, IPC handlers |
+| **Phase 2** | IPC & Module Installer Contract (`hime-ipc`, `hime-modsdk`, `module_mgr.rs`) | `DONE` | Versioned Named Pipe JSON-RPC contract & module management |
+| **Phase 3** | Native Rust Shell (`island/native/`) | `DONE` *(VERIFIED)* | Direct2D/DirectComposition Notch, Dock, Overlays, Settings, AI Drawer, embedded hotkeys, full `ipc_client.rs` & `main.rs` wiring (`96/96` tests pass) |
+| **Phase 4** | Cutover & Archive WebView2 (`Archive/legacy-webview2-island/`, `scripts/`, docs) | `DONE` *(VERIFIED)* | Legacy WebView2 shell archived; scripts & quality gates migrated to 100% pure-Rust native-first (`341/341` total tests pass, `11/11` live desktop checks pass) |
 
 ---
 
-## 4. BUKTI AUDIT TERKINI
+## 3. PURE-RUST TOOLING & QUALITY GATES
 
-- **Crate Tests Core (`core/crates/`):** 130+ passed, 0 failed (`[VERIFIED]`).
-- **Island Shell Tests (`island/src-tauri`):** 104 passed, 0 failed (`[VERIFIED]`).
-- **Stage U3 Routines Test Suite (`island/scripts/routines.test.ts`):** 291 passed, 0 failed (`[VERIFIED]`).
-- **Stage U3 Screen-Time Test Suite (`island/scripts/screentime.test.ts`):** 96 passed, 0 failed (`[VERIFIED]`).
-- **Stage 10R Proactive Test Suite (`island/scripts/proactive.test.ts`):** 24 passed, 0 failed (`[VERIFIED]`).
-- **Stage 11R Mobile Parity Test Suite (`island/scripts/mobile_parity.test.ts`):** 20 passed, 0 failed (`[VERIFIED]`).
-- **Stage 12R & 13R Docs/Dev Suite (`island/scripts/documents_developer.test.ts`):** 18 passed, 0 failed (`[VERIFIED]`).
-- **Stage U4 Resource Optimization Suite (`island/scripts/resource_optimization.test.ts`):** 17 passed, 0 failed (`[VERIFIED]`).
-- **Stage 15R Release Candidate Suite (`island/scripts/release_candidate.test.ts`):** 16 passed, 0 failed (`[VERIFIED]`).
-- **Total Frontend Test Suite (`island/scripts/`):** 649 passed, 0 failed across 26 test files via Bun (`[VERIFIED]`).
-- **Core Rust Workspace Suite (`core/crates/`):** 218+ passed, 0 failed across 6 crates & 10 integration suites (`[VERIFIED]`).
-- **Island Shell Unit Tests (`island/src-tauri`):** 104 passed, 0 failed (`[VERIFIED]`).
-- **Island Shell Build (`island/`):** TypeScript & Vite build 100% sukses, `tsc --noEmit` 0 errors.
-- **Brand Compliance Gate (`scripts/check-brand.ps1`):** PASSED (0 violations).
-- **Code Hygiene Gate (`scripts/check-hygiene.ps1`):** PASSED (0 violations).
-- **Automated E2E Verification (`scripts/verify-e2e.ps1`):** ALL 5 TIERS PASSED in 25.72s (100% green).
-- **CLI Pintu Tunggal:** `scripts/hime.ps1 doctor` lolos mendeteksi seluruh toolchain (Rust, Bun, NPM, Git, Cargo, Node.js).
-- **Status Akhir:** **READY FOR OWNER ACCEPTANCE (v1.0 RC)**.
+- **Unified CLI (`scripts/hime.ps1`):** Dynamic `$repoRoot` resolution; supports `doctor`, `setup`, `dev`, `build`, `test`, `check`, `restore-taskbar`, and `clean` targeting `core/Cargo.toml` and `island/native/Cargo.toml` without Bun or Tauri.
+- **Lifecycle & Watchdog Scripts:** `scripts/start-hime.ps1`, `scripts/hime-supervisor.ps1`, `scripts/stop-hime.ps1`, and `scripts/setup-shortcuts.ps1` updated to dynamic `$repoRoot` and pure-Rust binaries (`hime-core.exe`, `hime-island-native.exe`).
+- **Automated Gates:**
+  - `scripts/check-brand.ps1`: Audits `island/native/Cargo.toml`, `island/native/src`, `core/crates`, `modules`, `contracts`, `design`, `scripts`, `tools`.
+  - `scripts/check-hygiene.ps1`: Audits unanchored `TODO`/`FIXME`, production `todo!()`/`unimplemented!()`, and stray artifacts across `core/crates` and `island/native/src`.
+  - `scripts/verify-e2e.ps1`: 4-tier pure-Rust verification (Brand Gate, Hygiene Gate, `core/Cargo.toml` tests, `island/native/Cargo.toml` tests).
+  - `scripts/verify-desktop-live.ps1`: Live desktop verification for `hime-core`, `hime-island-native`, `hime-supervisor`, `hime.active`, top-center Notch HWND, `< 2000ms` `HimeQuit` shutdown, and taskbar restoration (without `hime_hotkey.exe`).
+
+---
+
+## 4. VERIFICATION STATUS (`[VERIFIED]` — 2026-11-26)
+
+- **Release Binaries:**
+  - `core/target/release/hime-core.exe`: `10,231,808` bytes (`9.76 MB`)
+  - `island/native/target/release/hime-island-native.exe`: `3,918,109` bytes (`3.74 MB`)
+- **Automated Quality & E2E Suite (`scripts/verify-e2e.ps1 -Detailed` — ALL PASSED in `116.57s`):**
+  - `scripts/check-brand.ps1`: PASSED (`0` violations)
+  - `scripts/check-hygiene.ps1`: PASSED (`0` violations)
+  - `core/Cargo.toml` (`cargo test --workspace`): **245 passed, 0 failed, 0 ignored**
+  - `island/native/Cargo.toml` (`cargo test`): **96 passed, 0 failed, 0 ignored** (`90` lib + `6` binary)
+  - **Total Automated Rust Tests:** **341 passed, 0 failed**
+- **Live Desktop Validation (`scripts/verify-desktop-live.ps1 -Detailed`):**
+  - **11/11 checkpoints PASSED**: `hime-core`, `hime-island-native`, `hime-supervisor`, `hime.active`, visible top-center `HimeNotch` HWND (`540x320`), synchronized `HimeQuit` shutdown (`189ms < 2000ms`), `hime.active` cleanup, and `Shell_TrayWnd` taskbar restoration.
