@@ -34,7 +34,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
     UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE,
-    TRACKMOUSEEVENT, VK_SHIFT,
+    TRACKMOUSEEVENT, VK_LBUTTON, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
@@ -902,6 +902,7 @@ struct AppShell {
     drag_moved: bool,
     drag_start_cursor: (i32, i32),
     notch_leave_at: Option<Instant>,
+    was_mouse_down: bool,
     suppressed_notif_hwnds: Vec<isize>,
     quit_event: Option<HANDLE>,
     tick_count: u64,
@@ -1042,6 +1043,7 @@ impl AppShell {
             drag_moved: false,
             drag_start_cursor: (0, 0),
             notch_leave_at: None,
+            was_mouse_down: false,
             suppressed_notif_hwnds: Vec::new(),
             quit_event,
             tick_count: 0,
@@ -1638,6 +1640,75 @@ impl AppShell {
             // Left & Right Edge Overlay hover guard (safety net in case cursor leaves quickly)
             self.sync_overlay_hover_cursor(true, cx, cy, primary);
             self.sync_overlay_hover_cursor(false, cx, cy, primary);
+
+            // Click-outside immediate collapse for awake Notch & Dock
+            let mouse_down = unsafe {
+                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 || GetAsyncKeyState(VK_RBUTTON.0 as i32) < 0
+            };
+            let clicked_now = mouse_down && !self.was_mouse_down;
+            self.was_mouse_down = mouse_down;
+            if clicked_now {
+                let over_settings = self.settings.visible
+                    && self.settings_surface.as_ref().is_some_and(|s| {
+                        let mut r = RECT::default();
+                        let ok = unsafe { GetWindowRect(s.hwnd(), &mut r).is_ok() };
+                        ok && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom
+                    });
+                let over_drawer = self.ai_drawer.visible
+                    && self.drawer_surface.as_ref().is_some_and(|s| {
+                        let mut r = RECT::default();
+                        let ok = unsafe { GetWindowRect(s.hwnd(), &mut r).is_ok() };
+                        ok && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom
+                    });
+
+                if !over_settings && !over_drawer {
+                    if !over_notch && !near_wake && !self.dragging_notch && !self.dragging_notch_slider {
+                        if self.notch.is_expanded {
+                            self.notch.set_expanded(false);
+                            self.dirty_notch = true;
+                        }
+                        if self.native_settings.notch_mode != "fixed"
+                            && !self.notch.is_hidden
+                            && !self.notch.has_active_banner()
+                            && self.notch.ncm_center_alert.is_none()
+                        {
+                            self.notch.set_hidden(true);
+                            self.notch_leave_at = None;
+                            self.dirty_notch = true;
+                            self.notch_surface.set_click_through(true);
+                        }
+                    }
+
+                    if self.dock.visible {
+                        let dock_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+                        let (dx, dy, _, _) = dock_surface_bounds(primary, dock_scale);
+                        let (dw_dip, dh_dip) = self.dock_surface.dip_size();
+                        let surf_rect = Rect::new(0.0, 0.0, dw_dip, dh_dip);
+                        let local_dx = (cx - dx) as f32 / dock_scale;
+                        let local_dy = (cy - dy) as f32 / dock_scale;
+                        let dock_rect = self.dock.dock_rect(surf_rect);
+                        let wake = self.dock.wake_hit_rect(surf_rect);
+                        let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
+                        let over_wake = os_shell::is_point_in_rect(local_dx, local_dy, wake);
+                        let over_flyout = self
+                            .dock
+                            .tray_flyout_rect(surf_rect, dock_rect)
+                            .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+
+                        if !over_dock && !over_flyout && !over_wake {
+                            if self.dock.tray_open {
+                                self.dock.set_tray_open(false);
+                                self.dirty_dock = true;
+                            }
+                            if self.dock.mode != DockMode::Fixed && !self.dock.is_hidden {
+                                self.dock.force_hide_now();
+                                self.dirty_dock = true;
+                                self.dock_surface.set_click_through(true);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(ref surf) = self.drawer_surface {
@@ -3614,12 +3685,18 @@ impl AppShell {
             self.dirty_drawer = true;
         }
 
+        let watch_outside_click = (self.native_settings.notch_mode != "fixed" && !self.notch.is_hidden)
+            || self.notch.is_expanded
+            || (self.dock.visible && self.dock.mode != DockMode::Fixed && !self.dock.is_hidden)
+            || self.dock.tray_open;
+
         let animating = notch_anim
             || dock_anim
             || vol_anim
             || bri_anim
             || set_anim
             || drw_anim
+            || watch_outside_click
             || self.notch.has_active_banner();
 
         self.sync_overlay_visibility();

@@ -1084,13 +1084,7 @@ impl NotchView {
         };
 
         if self.is_hidden && self.width_spring.is_settled() && self.height_spring.is_settled() {
-            let bar_color = if self.net.is_internet_down {
-                STATUS_ALERT
-            } else {
-                TEXT_PRIMARY.with_alpha(0.75)
-            };
-            surface.set_rounded_region(rect, 1.5);
-            surface.fill_rounded_rect(rect, 1.5, bar_color)?;
+            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
             return Ok(());
         }
 

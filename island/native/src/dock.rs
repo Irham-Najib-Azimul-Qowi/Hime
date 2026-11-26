@@ -21,7 +21,7 @@ use crate::d2d::{
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
 use crate::theme::{
-    Color, ACCENT_CYAN, CORNER_RADIUS, DOCK_SURFACE, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_ALERT,
+    ACCENT_CYAN, CORNER_RADIUS, DOCK_SURFACE, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_ALERT,
     SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
@@ -249,6 +249,22 @@ impl DockBar {
         self.hovered_target = None;
         if was_hovered && self.mode != DockMode::Fixed {
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+        }
+        self.recompute_hidden();
+    }
+
+    /// Immediately hides a non-fixed Dock (e.g. when the user clicks outside it).
+    pub fn force_hide_now(&mut self) {
+        if self.mode == DockMode::Fixed {
+            return;
+        }
+        self.hovered_index = None;
+        self.hovered_target = None;
+        self.is_edge_hovered = false;
+        self.tray_open = false;
+        self.hide_grace_timer = 0.0;
+        for item in &mut self.items {
+            item.hover_scale.snap_to(1.0);
         }
         self.recompute_hidden();
     }
@@ -1009,17 +1025,10 @@ impl DockBar {
         let (sw, sh) = surface.dip_size();
         let surface_rect = Rect::new(0.0, 0.0, sw, sh);
 
-        // Hidden mode: sleek 80px x 4px bottom-edge handle strip
+        // Hidden mode: completely invisible & click-through until bottom edge is hovered
         let show_t = self.show_progress.value.clamp(0.0, 1.0);
         if self.is_hidden && show_t <= 0.08 {
-            let strip = self.handle_strip_rect(surface_rect);
-            surface.set_rounded_region(strip, 2.0);
-            surface.fill_rounded_rect(
-                strip,
-                2.0,
-                Color::from_rgba_u8(255, 255, 255, 130).with_alpha(0.55 * alpha),
-            )?;
-            surface.stroke_rounded_rect(strip, 2.0, GLASS_BORDER.with_alpha(0.45 * alpha), 0.75)?;
+            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
             return Ok(());
         }
 
@@ -1612,7 +1621,7 @@ mod tests {
         let visible_rect = dock.dock_rect(surface_rect);
         assert!((visible_rect.y - 62.0).abs() < 2.0);
 
-        // 3. Hover-leave starts grace timer, then collapses back to 80x4 strip
+        // 3. Hover-leave starts grace timer, then collapses back to invisible
         dock.clear_hover();
         dock.set_edge_hovered(false);
         assert!(!dock.is_hidden);
@@ -1623,6 +1632,21 @@ mod tests {
         }
         assert!(dock.is_hidden);
         assert_eq!(dock.show_progress.value, 0.0);
+        assert_eq!(dock.hide_grace_timer(), 0.0);
+    }
+
+    #[test]
+    fn force_hide_now_collapses_auto_hide_dock_immediately_without_grace_delay() {
+        let mut dock = sample_dock();
+        dock.set_mode(DockMode::AutoHide);
+        dock.set_edge_hovered(true);
+        dock.set_tray_open(true);
+        assert!(!dock.is_hidden);
+        assert!(dock.hide_grace_timer() > 0.0);
+
+        dock.force_hide_now();
+        assert!(dock.is_hidden);
+        assert!(!dock.tray_open);
         assert_eq!(dock.hide_grace_timer(), 0.0);
     }
 }

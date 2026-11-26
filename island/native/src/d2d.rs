@@ -727,11 +727,17 @@ impl NativeSurface {
     /// Clips the window to a rounded rectangle in DIPs so areas outside the pill are transparent.
     pub fn set_rounded_region(&self, rect: Rect, radius: f32) {
         let scale = (self.dpi / 96.0).max(0.5);
-        let left = (rect.x * scale).round() as i32;
-        let top = (rect.y * scale).round() as i32;
-        let right = ((rect.x + rect.width) * scale).round() as i32 + 1;
-        let bottom = ((rect.y + rect.height) * scale).round() as i32 + 1;
-        let diam = ((radius * 2.0) * scale).round().max(0.0) as i32;
+        let (left, top, right, bottom, diam) = if rect.width <= 0.0 || rect.height <= 0.0 {
+            (0, 0, 0, 0, 0)
+        } else {
+            (
+                (rect.x * scale).round() as i32,
+                (rect.y * scale).round() as i32,
+                ((rect.x + rect.width) * scale).round() as i32 + 1,
+                ((rect.y + rect.height) * scale).round() as i32 + 1,
+                ((radius * 2.0) * scale).round().max(0.0) as i32,
+            )
+        };
         let key = RegionKey::Rounded {
             left,
             top,
