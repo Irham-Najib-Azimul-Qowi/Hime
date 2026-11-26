@@ -77,14 +77,26 @@ impl Color {
 /// Primary notch surface background (`#0A0B0E`).
 pub const NOTCH_SURFACE: Color = Color::from_rgb_u8(0x0A, 0x0B, 0x0E);
 
+/// Near-black notch surface matching original Tauri EdgeSurface (`rgba(6, 7, 10, 0.96)`).
+pub const NOTCH_BG_SOLID: Color = Color::from_rgba_u8(6, 7, 10, 245);
+
 /// Translucent glassmorphic panel surface (`#0A0B0E` at ~92% opacity).
 pub const GLASS_SURFACE: Color = Color::from_rgba_u8(0x0A, 0x0B, 0x0E, 0xEB);
+
+/// Floating Dock surface (`rgba(16, 17, 22, 0.92)`).
+pub const DOCK_SURFACE: Color = Color::from_rgba_u8(16, 17, 22, 235);
 
 /// Elevated card / chip surface inside expanded notch (`#14171F` at 90% opacity).
 pub const SURFACE_ELEVATED: Color = Color::from_rgba_u8(0x14, 0x17, 0x1F, 0xE6);
 
-/// Subtle glassmorphic border stroke (`#FFFFFF` at 12% opacity).
-pub const GLASS_BORDER: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x1F);
+/// Subtle glassmorphic border stroke (`rgba(255, 255, 255, 0.14)`).
+pub const GLASS_BORDER: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 36);
+
+/// Primary edge accent (`#00D2FF`).
+pub const EDGE_ACCENT: Color = Color::from_rgb_u8(0x00, 0xD2, 0xFF);
+
+/// Alert/recording edge accent (`#E50914`).
+pub const EDGE_ACCENT_RED: Color = Color::from_rgb_u8(0xE5, 0x09, 0x14);
 
 /// Primary text color (`#FFFFFF`).
 pub const TEXT_PRIMARY: Color = Color::from_rgb_u8(0xFF, 0xFF, 0xFF);

@@ -9,18 +9,19 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use windows::core::{s, w, HRESULT, PCWSTR, Result};
 use windows_numerics::Vector2 as D2D_POINT_2F;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
-    D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1PathGeometry,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LAYER_PARAMETERS, D2D1_PRESENT_OPTIONS_NONE,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES1,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -29,15 +30,23 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn, ValidateRect};
+use windows::Win32::Graphics::Gdi::{
+    BeginPath, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC, DeleteObject,
+    EndPath, LineTo, MoveToEx, PathToRegion, PolyBezierTo, SelectObject, SetWindowRgn,
+    ValidateRect, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongW, PostMessageW, RegisterClassExW,
-    SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DrawIconEx, GetClassLongPtrW,
+    GetIconInfo, GetWindowLongW, PostMessageW, RegisterClassExW, SendMessageTimeoutW,
+    SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, DI_NORMAL, GCLP_HICON,
+    GCLP_HICONSM, GWL_EXSTYLE, HICON, HWND_TOPMOST, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
+    SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
@@ -117,6 +126,310 @@ pub enum TextAlign {
     Leading,
     Center,
     Trailing,
+}
+
+/// Screen edge orientation for [`edge_contour_points`] and [`NativeSurface::draw_edge_surface`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Path operation produced by [`edge_contour_points`] (shared by Direct2D and GDI `PathToRegion`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContourOp {
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    CubicTo {
+        cp1: (f32, f32),
+        cp2: (f32, f32),
+        end: (f32, f32),
+    },
+    Close,
+}
+
+/// Extracted 32-bit premultiplied BGRA application icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IconRgba {
+    pub width: u32,
+    pub height: u32,
+    pub bgra_premul: Vec<u8>,
+}
+
+/// Computes exact `edgeSurfaceContour` Bezier + rounded-corner path operations for `rect`.
+pub fn edge_contour_points(
+    rect: Rect,
+    ear_w: f32,
+    radius: f32,
+    edge: EdgeSide,
+    flares: bool,
+) -> Vec<ContourOp> {
+    let (lw, lh) = match edge {
+        EdgeSide::Top | EdgeSide::Bottom => (rect.width.max(1.0), rect.height.max(1.0)),
+        EdgeSide::Left | EdgeSide::Right => (rect.height.max(1.0), rect.width.max(1.0)),
+    };
+
+    let ear = if flares {
+        ear_w.max(0.0).min(lw * 0.25)
+    } else {
+        0.0
+    };
+    let left = ear;
+    let right = (lw - ear).max(left);
+    let r = radius.max(0.0).min(lh * 0.5).min((right - left) * 0.5);
+    let k = 0.552_284_8 * r;
+    let c_off = ear * (10.0 / 13.0);
+
+    let mut local_ops = Vec::with_capacity(10);
+    if edge == EdgeSide::Bottom && !flares && r > 0.0 {
+        local_ops.push(ContourOp::MoveTo(left, r));
+        local_ops.push(ContourOp::CubicTo {
+            cp1: (left, r - k),
+            cp2: (left + r - k, 0.0),
+            end: (left + r, 0.0),
+        });
+        local_ops.push(ContourOp::LineTo(right - r, 0.0));
+        local_ops.push(ContourOp::CubicTo {
+            cp1: (right - r + k, 0.0),
+            cp2: (right, r - k),
+            end: (right, r),
+        });
+        local_ops.push(ContourOp::LineTo(right, lh - r));
+        local_ops.push(ContourOp::CubicTo {
+            cp1: (right, lh - r + k),
+            cp2: (right - r + k, lh),
+            end: (right - r, lh),
+        });
+        local_ops.push(ContourOp::LineTo(left + r, lh));
+        local_ops.push(ContourOp::CubicTo {
+            cp1: (left + r - k, lh),
+            cp2: (left, lh - r + k),
+            end: (left, lh - r),
+        });
+        local_ops.push(ContourOp::Close);
+    } else {
+        if flares && ear > 0.0 {
+            local_ops.push(ContourOp::MoveTo(0.0, 0.0));
+            local_ops.push(ContourOp::CubicTo {
+                cp1: (c_off, 0.0),
+                cp2: (ear, ear - c_off),
+                end: (ear, ear),
+            });
+        } else {
+            local_ops.push(ContourOp::MoveTo(left, 0.0));
+        }
+
+        local_ops.push(ContourOp::LineTo(left, lh - r));
+        if r > 0.0 {
+            local_ops.push(ContourOp::CubicTo {
+                cp1: (left, lh - r + k),
+                cp2: (left + r - k, lh),
+                end: (left + r, lh),
+            });
+        }
+        local_ops.push(ContourOp::LineTo(right - r, lh));
+        if r > 0.0 {
+            local_ops.push(ContourOp::CubicTo {
+                cp1: (right - r + k, lh),
+                cp2: (right, lh - r + k),
+                end: (right, lh - r),
+            });
+        }
+        if flares && ear > 0.0 {
+            local_ops.push(ContourOp::LineTo(right, ear));
+            local_ops.push(ContourOp::CubicTo {
+                cp1: (right, ear - c_off),
+                cp2: (lw - c_off, 0.0),
+                end: (lw, 0.0),
+            });
+        } else {
+            local_ops.push(ContourOp::LineTo(right, 0.0));
+        }
+        local_ops.push(ContourOp::Close);
+    }
+
+    let map_pt = |(lx, ly): (f32, f32)| -> (f32, f32) {
+        match edge {
+            EdgeSide::Top => (rect.x + lx, rect.y + ly),
+            EdgeSide::Bottom => (rect.x + lx, rect.y + (lh - ly)),
+            EdgeSide::Left => (rect.x + ly, rect.y + lx),
+            EdgeSide::Right => (rect.x + (lh - ly), rect.y + lx),
+        }
+    };
+
+    local_ops
+        .into_iter()
+        .map(|op| match op {
+            ContourOp::MoveTo(x, y) => {
+                let (mx, my) = map_pt((x, y));
+                ContourOp::MoveTo(mx, my)
+            }
+            ContourOp::LineTo(x, y) => {
+                let (mx, my) = map_pt((x, y));
+                ContourOp::LineTo(mx, my)
+            }
+            ContourOp::CubicTo { cp1, cp2, end } => ContourOp::CubicTo {
+                cp1: map_pt(cp1),
+                cp2: map_pt(cp2),
+                end: map_pt(end),
+            },
+            ContourOp::Close => ContourOp::Close,
+        })
+        .collect()
+}
+
+/// Extracts a 32-bit premultiplied BGRA icon from a Win32 `HWND` or executable path.
+pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Option<IconRgba> {
+    let target_size = size.clamp(16, 128);
+    unsafe {
+        let mut owned_icon = false;
+        let mut hicon = HICON::default();
+
+        if hwnd != 0 {
+            let wnd = HWND(hwnd as *mut std::ffi::c_void);
+            for icon_kind in [ICON_BIG, ICON_SMALL2, ICON_SMALL] {
+                let mut res: usize = 0;
+                let ok = SendMessageTimeoutW(
+                    wnd,
+                    WM_GETICON,
+                    WPARAM(icon_kind as usize),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    50,
+                    Some(&mut res),
+                );
+                if ok.0 != 0 && res != 0 {
+                    hicon = HICON(res as *mut std::ffi::c_void);
+                    break;
+                }
+            }
+            if hicon.0.is_null() {
+                let gcl = GetClassLongPtrW(wnd, GCLP_HICON);
+                if gcl != 0 {
+                    hicon = HICON(gcl as *mut std::ffi::c_void);
+                } else {
+                    let gcl_sm = GetClassLongPtrW(wnd, GCLP_HICONSM);
+                    if gcl_sm != 0 {
+                        hicon = HICON(gcl_sm as *mut std::ffi::c_void);
+                    }
+                }
+            }
+        }
+
+        if hicon.0.is_null() && !exe_path.is_empty() {
+            let wide_path = to_wide_null(exe_path);
+            let mut large_icon = HICON::default();
+            let count = ExtractIconExW(
+                PCWSTR(wide_path.as_ptr()),
+                0,
+                Some(&mut large_icon),
+                None,
+                1,
+            );
+            if count > 0 && !large_icon.0.is_null() {
+                hicon = large_icon;
+                owned_icon = true;
+            }
+        }
+
+        if hicon.0.is_null() {
+            return None;
+        }
+
+        let extracted = icon_to_bgra_premul(hicon, target_size);
+        if owned_icon {
+            let _ = DestroyIcon(hicon);
+        }
+        extracted
+    }
+}
+
+unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
+    let mut info = ICONINFO::default();
+    if GetIconInfo(hicon, &mut info).is_err() {
+        return None;
+    }
+    if !info.hbmColor.0.is_null() {
+        let _ = DeleteObject(info.hbmColor.into());
+    }
+    if !info.hbmMask.0.is_null() {
+        let _ = DeleteObject(info.hbmMask.into());
+    }
+
+    let mem_dc = CreateCompatibleDC(None);
+    if mem_dc.0.is_null() {
+        return None;
+    }
+
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size as i32,
+            biHeight: -(size as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let Ok(dib) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+        let _ = DeleteDC(mem_dc);
+        return None;
+    };
+    let old = SelectObject(mem_dc, dib.into());
+    let byte_len = (size * size * 4) as usize;
+    std::ptr::write_bytes(bits as *mut u8, 0, byte_len);
+
+    let drawn = DrawIconEx(
+        mem_dc,
+        0,
+        0,
+        hicon,
+        size as i32,
+        size as i32,
+        0,
+        None,
+        DI_NORMAL,
+    )
+    .is_ok();
+
+    let mut out = if drawn && !bits.is_null() {
+        std::slice::from_raw_parts(bits as *const u8, byte_len).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let _ = SelectObject(mem_dc, old);
+    let _ = DeleteObject(dib.into());
+    let _ = DeleteDC(mem_dc);
+
+    if out.is_empty() {
+        return None;
+    }
+
+    let has_alpha = out.chunks_exact(4).any(|px| px[3] > 0);
+    if !has_alpha {
+        let mut any_rgb = false;
+        for px in out.chunks_exact_mut(4) {
+            if px[0] != 0 || px[1] != 0 || px[2] != 0 {
+                px[3] = 255;
+                any_rgb = true;
+            }
+        }
+        if !any_rgb {
+            return None;
+        }
+    }
+
+    Some(IconRgba {
+        width: size,
+        height: size,
+        bgra_premul: out,
+    })
 }
 
 /// Hime mascot eye expression states.
@@ -576,6 +889,341 @@ impl NativeSurface {
         }
     }
 
+    /// Draws the exact `EdgeSurface` contour (`ID2D1PathGeometry`) with optional 1px border.
+    pub fn draw_edge_surface(
+        &self,
+        rect: Rect,
+        ear_w: f32,
+        radius: f32,
+        edge: EdgeSide,
+        flares: bool,
+        fill: Color,
+        border_color: Option<Color>,
+    ) -> Result<()> {
+        let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
+        unsafe {
+            let geo = self.build_contour_geometry(&ops)?;
+            let fill_brush = self.create_brush(fill)?;
+            self.d2d_target.FillGeometry(&geo, &fill_brush, None);
+            if let Some(bc) = border_color {
+                let border_brush = self.create_brush(bc)?;
+                self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+            }
+            Ok(())
+        }
+    }
+
+    /// Clips the window via GDI `BeginPath` + `PolyBezierTo` + `PathToRegion` + `SetWindowRgn`
+    /// to match the exact `EdgeSurface` contour (including concave top/side ears).
+    pub fn set_edge_surface_region(
+        &self,
+        rect: Rect,
+        ear_w: f32,
+        radius: f32,
+        edge: EdgeSide,
+        flares: bool,
+    ) {
+        let scale = (self.dpi / 96.0).max(0.5);
+        let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
+        let to_px = |x: f32, y: f32| POINT {
+            x: (x * scale).round() as i32,
+            y: (y * scale).round() as i32,
+        };
+        unsafe {
+            let hdc = CreateCompatibleDC(None);
+            if hdc.0.is_null() {
+                return;
+            }
+            if BeginPath(hdc).as_bool() {
+                for op in &ops {
+                    match *op {
+                        ContourOp::MoveTo(x, y) => {
+                            let p = to_px(x, y);
+                            let _ = MoveToEx(hdc, p.x, p.y, None);
+                        }
+                        ContourOp::LineTo(x, y) => {
+                            let p = to_px(x, y);
+                            let _ = LineTo(hdc, p.x, p.y);
+                        }
+                        ContourOp::CubicTo { cp1, cp2, end } => {
+                            let pts = [
+                                to_px(cp1.0, cp1.1),
+                                to_px(cp2.0, cp2.1),
+                                to_px(end.0, end.1),
+                            ];
+                            let _ = PolyBezierTo(hdc, &pts);
+                        }
+                        ContourOp::Close => {}
+                    }
+                }
+                if EndPath(hdc).as_bool() {
+                    let rgn = PathToRegion(hdc);
+                    if !rgn.is_invalid() {
+                        let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+                    }
+                }
+            }
+            let _ = DeleteDC(hdc);
+        }
+    }
+
+    /// Draws a premultiplied BGRA bitmap inside `rect` with optional rounded corner clipping.
+    pub fn draw_bgra_bitmap(
+        &self,
+        rect: Rect,
+        width: u32,
+        height: u32,
+        bgra_premul: &[u8],
+        corner_radius: f32,
+    ) -> Result<()> {
+        if width == 0 || height == 0 || bgra_premul.len() < (width * height * 4) as usize {
+            return Ok(());
+        }
+        unsafe {
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+            };
+            let bitmap = self.d2d_target.CreateBitmap(
+                D2D_SIZE_U { width, height },
+                Some(bgra_premul.as_ptr() as *const _),
+                width * 4,
+                &props,
+            )?;
+            let dest = rect.to_d2d();
+            if corner_radius > 0.0 {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: dest,
+                    radiusX: corner_radius,
+                    radiusY: corner_radius,
+                };
+                let clip_geo = self.d2d_factory.CreateRoundedRectangleGeometry(&rr)?;
+                let layer = self.d2d_target.CreateLayer(None)?;
+                let layer_params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: dest,
+                    geometricMask: std::mem::ManuallyDrop::new(Some(clip_geo.into())),
+                    maskAntialiasMode: Default::default(),
+                    maskTransform: windows_numerics::Matrix3x2::identity(),
+                    opacity: 1.0,
+                    opacityBrush: std::mem::ManuallyDrop::new(None),
+                    layerOptions: Default::default(),
+                };
+                self.d2d_target.PushLayer(&layer_params, &layer);
+                self.d2d_target.DrawBitmap(
+                    &bitmap,
+                    Some(&dest),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+                self.d2d_target.PopLayer();
+            } else {
+                self.d2d_target.DrawBitmap(
+                    &bitmap,
+                    Some(&dest),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// Draws a crisp vector Wi-Fi icon centered at `(cx, cy)`.
+    pub fn draw_wifi_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        connected: bool,
+        off: bool,
+        color: Color,
+    ) -> Result<()> {
+        let s = size.max(8.0);
+        let stroke_w = (s * 0.12).max(1.2);
+        let base_y = cy + s * 0.34;
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let dim_brush = self.create_brush(color.with_alpha(color.a * 0.3))?;
+            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                ..Default::default()
+            };
+            let round_cap: ID2D1StrokeStyle =
+                self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into();
+
+            let active_brush = if connected && !off { &brush } else { &dim_brush };
+
+            // Center dot
+            self.d2d_target.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: pt(cx, base_y),
+                    radiusX: stroke_w * 0.75,
+                    radiusY: stroke_w * 0.75,
+                },
+                active_brush,
+            );
+
+            // Two concentric Wi-Fi arcs
+            for factor in [0.36_f32, 0.66_f32] {
+                let r = s * factor;
+                let arc = self.build_quadratic_arc(
+                    pt(cx - r * 0.72, base_y - r * 0.52),
+                    pt(cx, base_y - r * 1.15),
+                    pt(cx + r * 0.72, base_y - r * 0.52),
+                )?;
+                self.d2d_target
+                    .DrawGeometry(&arc, active_brush, stroke_w, Some(&round_cap));
+            }
+
+            if off {
+                self.d2d_target.DrawLine(
+                    pt(cx - s * 0.38, cy + s * 0.34),
+                    pt(cx + s * 0.38, cy - s * 0.34),
+                    &brush,
+                    stroke_w,
+                    Some(&round_cap),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// Draws a crisp vector battery icon inside `(x, y, w, h)` with optional charging bolt.
+    pub fn draw_battery_icon(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        percent: u8,
+        charging: bool,
+    ) -> Result<()> {
+        let bw = (w - 2.5).max(8.0);
+        let bh = h.max(6.0);
+        let pct = (percent.min(100) as f32) / 100.0;
+        let fill_color = if charging {
+            STATUS_SUCCESS
+        } else if percent <= 20 {
+            STATUS_WARNING
+        } else {
+            Color::from_rgb_u8(0xFF, 0xFF, 0xFF)
+        };
+
+        unsafe {
+            let border_brush = self.create_brush(Color::from_rgba_u8(255, 255, 255, 160))?;
+            let fill_brush = self.create_brush(fill_color)?;
+
+            let body = D2D1_ROUNDED_RECT {
+                rect: Rect::new(x, y, bw, bh).to_d2d(),
+                radiusX: 2.5,
+                radiusY: 2.5,
+            };
+            self.d2d_target.DrawRoundedRectangle(&body, &border_brush, 1.2, None);
+
+            // Positive terminal nub
+            let nub_h = (bh * 0.45).max(3.0);
+            let nub = D2D1_ROUNDED_RECT {
+                rect: Rect::new(x + bw + 0.5, y + (bh - nub_h) * 0.5, 2.0, nub_h).to_d2d(),
+                radiusX: 0.8,
+                radiusY: 0.8,
+            };
+            self.d2d_target.FillRoundedRectangle(&nub, &border_brush);
+
+            // Inner charge bar
+            let pad = 2.0;
+            let max_fill_w = (bw - pad * 2.0).max(1.0);
+            let fill_w = (max_fill_w * pct).max(if percent > 0 { 2.0 } else { 0.0 });
+            if fill_w > 0.0 {
+                let inner = D2D1_ROUNDED_RECT {
+                    rect: Rect::new(x + pad, y + pad, fill_w, (bh - pad * 2.0).max(2.0)).to_d2d(),
+                    radiusX: 1.2,
+                    radiusY: 1.2,
+                };
+                self.d2d_target.FillRoundedRectangle(&inner, &fill_brush);
+            }
+            Ok(())
+        }
+    }
+
+    /// Draws an equalizer/music visualizer of vertical pill bars.
+    pub fn draw_music_visualizer(
+        &self,
+        x: f32,
+        y: f32,
+        h: f32,
+        bars: &[f32],
+        is_playing: bool,
+    ) -> Result<()> {
+        if bars.is_empty() {
+            return Ok(());
+        }
+        let bar_w = 2.5_f32;
+        let gap = 2.0_f32;
+        let color = if is_playing { ACCENT_CYAN } else { STATUS_OFFLINE };
+        unsafe {
+            let brush = self.create_brush(color)?;
+            for (i, &level) in bars.iter().enumerate() {
+                let norm = if is_playing {
+                    level.clamp(0.18, 1.0)
+                } else {
+                    0.22
+                };
+                let bh = (h * norm).max(3.0);
+                let bx = x + (i as f32) * (bar_w + gap);
+                let by = y + (h - bh) * 0.5;
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: Rect::new(bx, by, bar_w, bh).to_d2d(),
+                    radiusX: bar_w * 0.5,
+                    radiusY: bar_w * 0.5,
+                };
+                self.d2d_target.FillRoundedRectangle(&rr, &brush);
+            }
+            Ok(())
+        }
+    }
+
+    unsafe fn build_contour_geometry(&self, ops: &[ContourOp]) -> Result<ID2D1PathGeometry> {
+        let geo = self.d2d_factory.CreatePathGeometry()?;
+        let sink = geo.Open()?;
+        let mut started = false;
+        for op in ops {
+            match *op {
+                ContourOp::MoveTo(x, y) => {
+                    sink.BeginFigure(pt(x, y), D2D1_FIGURE_BEGIN_FILLED);
+                    started = true;
+                }
+                ContourOp::LineTo(x, y) => {
+                    sink.AddLine(pt(x, y));
+                }
+                ContourOp::CubicTo { cp1, cp2, end } => {
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: pt(cp1.0, cp1.1),
+                        point2: pt(cp2.0, cp2.1),
+                        point3: pt(end.0, end.1),
+                    });
+                }
+                ContourOp::Close => {
+                    if started {
+                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                        started = false;
+                    }
+                }
+            }
+        }
+        if started {
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+        sink.Close()?;
+        Ok(geo.into())
+    }
+
     unsafe fn create_brush(&self, color: Color) -> Result<ID2D1SolidColorBrush> {
         let d2d_color: D2D1_COLOR_F = color.to_d2d();
         self.d2d_target.CreateSolidColorBrush(&d2d_color, None)
@@ -830,5 +1478,44 @@ mod tests {
         surface.begin_draw();
         dock.render(&surface).expect("DockBar::render should succeed");
         surface.end_draw_and_present().expect("dock end_draw_and_present");
+    }
+
+    #[test]
+    fn edge_contour_points_match_top_flares_and_transforms() {
+        let ops = edge_contour_points(Rect::new(0.0, 0.0, 320.0, 38.0), 13.0, 18.0, EdgeSide::Top, true);
+        assert_eq!(ops.first(), Some(&ContourOp::MoveTo(0.0, 0.0)));
+        assert_eq!(
+            ops.get(1),
+            Some(&ContourOp::CubicTo {
+                cp1: (10.0, 0.0),
+                cp2: (13.0, 3.0),
+                end: (13.0, 13.0),
+            })
+        );
+        assert_eq!(ops.last(), Some(&ContourOp::Close));
+
+        let left_ops =
+            edge_contour_points(Rect::new(0.0, 0.0, 54.0, 220.0), 13.0, 18.0, EdgeSide::Left, true);
+        assert_eq!(left_ops.first(), Some(&ContourOp::MoveTo(0.0, 0.0)));
+        assert_eq!(
+            left_ops.get(1),
+            Some(&ContourOp::CubicTo {
+                cp1: (0.0, 10.0),
+                cp2: (3.0, 13.0),
+                end: (13.0, 13.0),
+            })
+        );
+    }
+
+    #[test]
+    fn extract_window_or_exe_icon_reads_system_executable() {
+        let icon = extract_window_or_exe_icon(0, r"C:\Windows\explorer.exe", 32)
+            .or_else(|| extract_window_or_exe_icon(0, r"C:\Windows\System32\notepad.exe", 32));
+        if let Some(ic) = icon {
+            assert_eq!(ic.width, 32);
+            assert_eq!(ic.height, 32);
+            assert_eq!(ic.bgra_premul.len(), 32 * 32 * 4);
+            assert!(ic.bgra_premul.chunks_exact(4).any(|px| px[3] > 0));
+        }
     }
 }
