@@ -13,6 +13,7 @@ pub mod module_mgr;
 pub mod notch;
 pub mod os_shell;
 pub mod overlay;
+pub mod settings_store;
 pub mod settings_ui;
 pub mod shelf;
 pub mod telemetry;

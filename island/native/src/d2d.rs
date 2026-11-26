@@ -25,9 +25,9 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -698,7 +698,7 @@ impl NativeSurface {
         }
     }
 
-    /// Draws UTF-8 text inside `rect` using DirectWrite.
+    /// Draws UTF-8 text inside `rect` using DirectWrite (semi-bold).
     pub fn draw_text(
         &self,
         text: &str,
@@ -707,9 +707,33 @@ impl NativeSurface {
         color: Color,
         align: TextAlign,
     ) -> Result<()> {
+        self.draw_text_weighted(text, rect, font_size, color, align, false)
+    }
+
+    /// Draws bold UTF-8 text inside `rect` using DirectWrite.
+    pub fn draw_text_bold(
+        &self,
+        text: &str,
+        rect: Rect,
+        font_size: f32,
+        color: Color,
+        align: TextAlign,
+    ) -> Result<()> {
+        self.draw_text_weighted(text, rect, font_size, color, align, true)
+    }
+
+    fn draw_text_weighted(
+        &self,
+        text: &str,
+        rect: Rect,
+        font_size: f32,
+        color: Color,
+        align: TextAlign,
+        bold: bool,
+    ) -> Result<()> {
         unsafe {
             let brush = self.create_brush(color)?;
-            let format = self.create_text_format(font_size, align)?;
+            let format = self.create_text_format_weighted(font_size, align, bold)?;
             let wide: Vec<u16> = text.encode_utf16().collect();
             let d2d_rect = rect.to_d2d();
             self.d2d_target.DrawText(
@@ -720,6 +744,83 @@ impl NativeSurface {
                 Default::default(),
                 Default::default(),
             );
+            Ok(())
+        }
+    }
+
+    /// Draws a straight line between `(x1, y1)` and `(x2, y2)` with round caps.
+    pub fn draw_line(
+        &self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: Color,
+        stroke_width: f32,
+    ) -> Result<()> {
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let round_cap = self.create_round_cap_stroke()?;
+            self.d2d_target.DrawLine(
+                pt(x1, y1),
+                pt(x2, y2),
+                &brush,
+                stroke_width.max(0.5),
+                Some(&round_cap),
+            );
+            Ok(())
+        }
+    }
+
+    /// Draws a filled or stroked circle centered at `(cx, cy)`.
+    pub fn draw_circle(
+        &self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+        filled: bool,
+        stroke_width: f32,
+    ) -> Result<()> {
+        if filled {
+            self.fill_circle(cx, cy, radius, color)
+        } else {
+            self.stroke_circle(cx, cy, radius, color, stroke_width)
+        }
+    }
+
+    /// Fills a circle centered at `(cx, cy)`.
+    pub fn fill_circle(&self, cx: f32, cy: f32, radius: f32, color: Color) -> Result<()> {
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let ellipse = D2D1_ELLIPSE {
+                point: pt(cx, cy),
+                radiusX: radius.max(0.5),
+                radiusY: radius.max(0.5),
+            };
+            self.d2d_target.FillEllipse(&ellipse, &brush);
+            Ok(())
+        }
+    }
+
+    /// Strokes a circle outline centered at `(cx, cy)`.
+    pub fn stroke_circle(
+        &self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+        stroke_width: f32,
+    ) -> Result<()> {
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let ellipse = D2D1_ELLIPSE {
+                point: pt(cx, cy),
+                radiusX: radius.max(0.5),
+                radiusY: radius.max(0.5),
+            };
+            self.d2d_target
+                .DrawEllipse(&ellipse, &brush, stroke_width.max(0.5), None);
             Ok(())
         }
     }
@@ -1189,6 +1290,289 @@ impl NativeSurface {
         }
     }
 
+    /// Draws a crisp sun icon (brightness) centered at `(cx, cy)`.
+    pub fn draw_sun_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let r = (size * 0.24).max(2.0);
+        let sw = (size * 0.1).max(1.1);
+        self.stroke_circle(cx, cy, r, color, sw)?;
+        let inner = r + size * 0.12;
+        let outer = size * 0.48;
+        for i in 0..8 {
+            let angle = (i as f32) * std::f32::consts::FRAC_PI_4;
+            let (sin_a, cos_a) = angle.sin_cos();
+            self.draw_line(
+                cx + cos_a * inner,
+                cy + sin_a * inner,
+                cx + cos_a * outer,
+                cy + sin_a * outer,
+                color,
+                sw,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Draws a crisp speaker/volume icon centered at `(cx, cy)`.
+    pub fn draw_volume_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        muted: bool,
+        level: f32,
+        color: Color,
+    ) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.11).max(1.1);
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let round_cap = self.create_round_cap_stroke()?;
+
+            // Speaker cone polygon
+            let cone = self.d2d_factory.CreatePathGeometry()?;
+            let sink = cone.Open()?;
+            sink.BeginFigure(pt(cx - s * 0.38, cy - s * 0.16), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(pt(cx - s * 0.18, cy - s * 0.16));
+            sink.AddLine(pt(cx + s * 0.04, cy - s * 0.36));
+            sink.AddLine(pt(cx + s * 0.04, cy + s * 0.36));
+            sink.AddLine(pt(cx - s * 0.18, cy + s * 0.16));
+            sink.AddLine(pt(cx - s * 0.38, cy + s * 0.16));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.d2d_target.FillGeometry(&cone, &brush, None);
+
+            if muted || level <= 0.01 {
+                self.d2d_target.DrawLine(
+                    pt(cx + s * 0.18, cy - s * 0.18),
+                    pt(cx + s * 0.44, cy + s * 0.18),
+                    &brush,
+                    sw,
+                    Some(&round_cap),
+                );
+                self.d2d_target.DrawLine(
+                    pt(cx + s * 0.44, cy - s * 0.18),
+                    pt(cx + s * 0.18, cy + s * 0.18),
+                    &brush,
+                    sw,
+                    Some(&round_cap),
+                );
+            } else {
+                let arc1 = self.build_quadratic_arc(
+                    pt(cx + s * 0.18, cy - s * 0.18),
+                    pt(cx + s * 0.32, cy),
+                    pt(cx + s * 0.18, cy + s * 0.18),
+                )?;
+                self.d2d_target
+                    .DrawGeometry(&arc1, &brush, sw, Some(&round_cap));
+                if level > 0.45 {
+                    let arc2 = self.build_quadratic_arc(
+                        pt(cx + s * 0.28, cy - s * 0.30),
+                        pt(cx + s * 0.48, cy),
+                        pt(cx + s * 0.28, cy + s * 0.30),
+                    )?;
+                    self.d2d_target
+                        .DrawGeometry(&arc2, &brush, sw, Some(&round_cap));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Draws a crisp Bluetooth rune icon centered at `(cx, cy)`.
+    pub fn draw_bluetooth_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.11).max(1.1);
+        let w = s * 0.26;
+        let h = s * 0.42;
+        self.draw_line(cx, cy - h, cx, cy + h, color, sw)?;
+        self.draw_line(cx, cy - h, cx + w, cy - h * 0.45, color, sw)?;
+        self.draw_line(cx + w, cy - h * 0.45, cx - w, cy + h * 0.45, color, sw)?;
+        self.draw_line(cx, cy + h, cx + w, cy + h * 0.45, color, sw)?;
+        self.draw_line(cx + w, cy + h * 0.45, cx - w, cy - h * 0.45, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a crisp calendar icon centered at `(cx, cy)`.
+    pub fn draw_calendar_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.11).max(1.1);
+        let rect = Rect::new(cx - s * 0.4, cy - s * 0.34, s * 0.8, s * 0.72);
+        self.stroke_rounded_rect(rect, 2.0, color, sw)?;
+        self.draw_line(rect.x, rect.y + s * 0.24, rect.x + rect.width, rect.y + s * 0.24, color, sw)?;
+        self.draw_line(cx - s * 0.18, rect.y - s * 0.1, cx - s * 0.18, rect.y + s * 0.08, color, sw)?;
+        self.draw_line(cx + s * 0.18, rect.y - s * 0.1, cx + s * 0.18, rect.y + s * 0.08, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a `<` or `>` chevron icon centered at `(cx, cy)`.
+    pub fn draw_chevron_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        dir_right: bool,
+        color: Color,
+    ) -> Result<()> {
+        let s = size.max(6.0);
+        let sw = (s * 0.15).max(1.2);
+        let dx = if dir_right { s * 0.22 } else { -s * 0.22 };
+        self.draw_line(cx - dx, cy - s * 0.32, cx + dx, cy, color, sw)?;
+        self.draw_line(cx + dx, cy, cx - dx, cy + s * 0.32, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a play triangle or pause double-bar icon centered at `(cx, cy)`.
+    pub fn draw_play_pause_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        is_playing: bool,
+        color: Color,
+    ) -> Result<()> {
+        let s = size.max(8.0);
+        if is_playing {
+            let bar_w = (s * 0.22).max(2.0);
+            let bar_h = s * 0.76;
+            self.fill_rounded_rect(
+                Rect::new(cx - bar_w * 1.4, cy - bar_h * 0.5, bar_w, bar_h),
+                1.0,
+                color,
+            )?;
+            self.fill_rounded_rect(
+                Rect::new(cx + bar_w * 0.4, cy - bar_h * 0.5, bar_w, bar_h),
+                1.0,
+                color,
+            )?;
+            return Ok(());
+        }
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let geo = self.d2d_factory.CreatePathGeometry()?;
+            let sink = geo.Open()?;
+            sink.BeginFigure(pt(cx - s * 0.28, cy - s * 0.38), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(pt(cx + s * 0.38, cy));
+            sink.AddLine(pt(cx - s * 0.28, cy + s * 0.38));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.d2d_target.FillGeometry(&geo, &brush, None);
+            Ok(())
+        }
+    }
+
+    /// Draws a skip-next (`>>|`) or skip-previous (`|<<`) icon centered at `(cx, cy)`.
+    pub fn draw_skip_icon(
+        &self,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        next: bool,
+        color: Color,
+    ) -> Result<()> {
+        let s = size.max(8.0);
+        let dir = if next { 1.0_f32 } else { -1.0_f32 };
+        let bar_w = (s * 0.14).max(1.6);
+        let bar_x = if next { cx + s * 0.24 } else { cx - s * 0.24 - bar_w };
+        self.fill_rounded_rect(Rect::new(bar_x, cy - s * 0.32, bar_w, s * 0.64), 0.8, color)?;
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let geo = self.d2d_factory.CreatePathGeometry()?;
+            let sink = geo.Open()?;
+            sink.BeginFigure(pt(cx - dir * s * 0.32, cy - s * 0.32), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(pt(cx + dir * s * 0.18, cy));
+            sink.AddLine(pt(cx - dir * s * 0.32, cy + s * 0.32));
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.d2d_target.FillGeometry(&geo, &brush, None);
+            Ok(())
+        }
+    }
+
+    /// Draws a compact keyboard icon centered at `(cx, cy)`.
+    pub fn draw_keyboard_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.1).max(1.0);
+        let rect = Rect::new(cx - s * 0.45, cy - s * 0.28, s * 0.9, s * 0.56);
+        self.stroke_rounded_rect(rect, 2.0, color, sw)?;
+        for dx in [-0.25_f32, 0.0, 0.25] {
+            self.fill_circle(cx + s * dx, cy - s * 0.08, 0.9, color)?;
+        }
+        self.draw_line(cx - s * 0.22, cy + s * 0.12, cx + s * 0.22, cy + s * 0.12, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a music note icon centered at `(cx, cy)`.
+    pub fn draw_music_note_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.12).max(1.2);
+        self.fill_circle(cx - s * 0.14, cy + s * 0.22, s * 0.16, color)?;
+        self.draw_line(cx - s * 0.01, cy + s * 0.22, cx - s * 0.01, cy - s * 0.32, color, sw)?;
+        self.draw_line(cx - s * 0.01, cy - s * 0.32, cx + s * 0.26, cy - s * 0.22, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a compact settings gear icon centered at `(cx, cy)`.
+    pub fn draw_settings_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.12).max(1.1);
+        self.stroke_circle(cx, cy, s * 0.22, color, sw)?;
+        for i in 0..6 {
+            let a = (i as f32) * (std::f32::consts::TAU / 6.0);
+            let (sa, ca) = a.sin_cos();
+            self.draw_line(cx + ca * s * 0.28, cy + sa * s * 0.28, cx + ca * s * 0.42, cy + sa * s * 0.42, color, sw)?;
+        }
+        Ok(())
+    }
+
+    /// Draws a file-shelf inbox tray icon centered at `(cx, cy)`.
+    pub fn draw_shelf_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.11).max(1.0);
+        let rect = Rect::new(cx - s * 0.4, cy - s * 0.32, s * 0.8, s * 0.64);
+        self.stroke_rounded_rect(rect, 2.0, color, sw)?;
+        self.draw_line(rect.x, cy + s * 0.06, rect.x + rect.width, cy + s * 0.06, color, sw)?;
+        Ok(())
+    }
+
+    /// Draws a 4-point sparkle icon for Hime AI centered at `(cx, cy)`.
+    pub fn draw_sparkles_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.12).max(1.1);
+        self.draw_line(cx, cy - s * 0.42, cx, cy + s * 0.42, color, sw)?;
+        self.draw_line(cx - s * 0.42, cy, cx + s * 0.42, cy, color, sw)?;
+        self.fill_circle(cx, cy, s * 0.14, color)?;
+        Ok(())
+    }
+
+    /// Draws a notification bell icon centered at `(cx, cy)`.
+    pub fn draw_bell_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.11).max(1.0);
+        self.stroke_circle(cx, cy - s * 0.05, s * 0.25, color, sw)?;
+        self.draw_line(cx - s * 0.34, cy + s * 0.22, cx + s * 0.34, cy + s * 0.22, color, sw)?;
+        self.fill_circle(cx, cy + s * 0.34, s * 0.08, color)?;
+        Ok(())
+    }
+
+    /// Draws a 2x2 / dock pill grid icon centered at `(cx, cy)`.
+    pub fn draw_dock_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
+        let s = size.max(8.0);
+        let sw = (s * 0.1).max(1.0);
+        let rect = Rect::new(cx - s * 0.42, cy - s * 0.32, s * 0.84, s * 0.64);
+        self.stroke_rounded_rect(rect, 2.2, color, sw)?;
+        self.draw_line(cx - s * 0.22, cy + s * 0.14, cx + s * 0.22, cy + s * 0.14, color, sw * 1.3)?;
+        Ok(())
+    }
+
+    unsafe fn create_round_cap_stroke(&self) -> Result<ID2D1StrokeStyle> {
+        let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
+            startCap: D2D1_CAP_STYLE_ROUND,
+            endCap: D2D1_CAP_STYLE_ROUND,
+            ..Default::default()
+        };
+        Ok(self.d2d_factory.CreateStrokeStyle(&stroke_props, None)?.into())
+    }
+
     unsafe fn build_contour_geometry(&self, ops: &[ContourOp]) -> Result<ID2D1PathGeometry> {
         let geo = self.d2d_factory.CreatePathGeometry()?;
         let sink = geo.Open()?;
@@ -1229,17 +1613,23 @@ impl NativeSurface {
         self.d2d_target.CreateSolidColorBrush(&d2d_color, None)
     }
 
-    unsafe fn create_text_format(
+    unsafe fn create_text_format_weighted(
         &self,
         font_size: f32,
         align: TextAlign,
+        bold: bool,
     ) -> Result<IDWriteTextFormat> {
         let family = to_wide_null(FONT_FAMILY);
         let locale = to_wide_null("en-US");
+        let weight = if bold {
+            DWRITE_FONT_WEIGHT_BOLD
+        } else {
+            DWRITE_FONT_WEIGHT_SEMI_BOLD
+        };
         let format = self.dwrite_factory.CreateTextFormat(
             PCWSTR(family.as_ptr()),
             None,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            weight,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
             font_size.max(1.0),
@@ -1478,6 +1868,18 @@ mod tests {
         surface.begin_draw();
         dock.render(&surface).expect("DockBar::render should succeed");
         surface.end_draw_and_present().expect("dock end_draw_and_present");
+
+        surface.begin_draw();
+        surface.draw_line(10.0, 10.0, 40.0, 40.0, crate::theme::TEXT_PRIMARY, 1.5).unwrap();
+        surface.fill_circle(60.0, 24.0, 8.0, crate::theme::ACCENT_CYAN).unwrap();
+        surface.stroke_circle(84.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, 1.2).unwrap();
+        surface.draw_circle(108.0, 24.0, 8.0, crate::theme::TEXT_PRIMARY, false, 1.0).unwrap();
+        surface.draw_sun_icon(132.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
+        surface.draw_volume_icon(156.0, 24.0, 14.0, false, 0.8, crate::theme::TEXT_PRIMARY).unwrap();
+        surface.draw_bluetooth_icon(180.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
+        surface.draw_calendar_icon(204.0, 24.0, 14.0, crate::theme::TEXT_PRIMARY).unwrap();
+        surface.draw_text_bold("16:50", Rect::new(220.0, 10.0, 60.0, 28.0), 14.0, crate::theme::TEXT_PRIMARY, TextAlign::Center).unwrap();
+        surface.end_draw_and_present().expect("vector icon helpers");
     }
 
     #[test]
