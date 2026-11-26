@@ -10,14 +10,26 @@ if (-not (Test-Path $stateDir)) {
     New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 }
 
-# 1. Update settings to ensure Dock is enabled and fixed (visible on launch)
+# 1. Ensure default Dock/Notch settings exist without overwriting user preferences
 if (Test-Path $settingsFile) {
     try {
         $json = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json
-        $json."bloom-dock-enabled" = "true"
-        $json."bloom-dock-mode" = "fixed"
-        $json."bloom-notch-mode" = "fixed"
-        $json | ConvertTo-Json -Compress | Set-Content -Path $settingsFile -Force
+        $changed = $false
+        if (-not $json.PSObject.Properties["bloom-dock-enabled"] -or [string]::IsNullOrWhiteSpace($json."bloom-dock-enabled")) {
+            $json | Add-Member -NotePropertyName "bloom-dock-enabled" -NotePropertyValue "true" -Force
+            $changed = $true
+        }
+        if (-not $json.PSObject.Properties["bloom-dock-mode"] -or [string]::IsNullOrWhiteSpace($json."bloom-dock-mode")) {
+            $json | Add-Member -NotePropertyName "bloom-dock-mode" -NotePropertyValue "fixed" -Force
+            $changed = $true
+        }
+        if (-not $json.PSObject.Properties["bloom-notch-mode"] -or [string]::IsNullOrWhiteSpace($json."bloom-notch-mode")) {
+            $json | Add-Member -NotePropertyName "bloom-notch-mode" -NotePropertyValue "fixed" -Force
+            $changed = $true
+        }
+        if ($changed) {
+            $json | ConvertTo-Json -Compress | Set-Content -Path $settingsFile -Force
+        }
     } catch {}
 } else {
     @{

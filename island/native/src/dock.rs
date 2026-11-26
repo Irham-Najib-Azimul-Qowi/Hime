@@ -232,6 +232,19 @@ impl DockBar {
         self.hovered_target.is_some()
     }
 
+    /// Returns the remaining auto-hide grace timer in seconds.
+    pub fn hide_grace_timer(&self) -> f32 {
+        self.hide_grace_timer
+    }
+
+    /// Returns `true` if any Dock spring or auto-hide grace timer is still active.
+    pub fn is_animating(&self) -> bool {
+        !self.visibility.is_settled()
+            || !self.show_progress.is_settled()
+            || self.hide_grace_timer > 0.0
+            || self.items.iter().any(|it| !it.hover_scale.is_settled())
+    }
+
     /// Clears hover state across app items, utility buttons, and tray items.
     pub fn clear_hover(&mut self) {
         let was_hovered = self.hovered_target.is_some();
@@ -1599,5 +1612,56 @@ mod tests {
         dock.sync_running_windows(&windows);
         assert_eq!(dock.hovered_index(), Some(0));
         assert_eq!(dock.icon_cache_len(), 1);
+    }
+
+    #[test]
+    fn auto_hide_startup_collapse_wake_on_bottom_hover_and_leave_lifecycle() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 960.0, 124.0);
+
+        // 1. Startup with AutoHide and cursor away: immediately targets hidden (0.0)
+        dock.set_mode(DockMode::AutoHide);
+        assert!(dock.is_hidden);
+        assert_eq!(dock.hide_grace_timer(), 0.0);
+        assert!(dock.is_animating());
+
+        // Tick ~0.67s: show_progress settles to 0.0, dock_rect slides off-bottom, 80x4 strip active
+        for _ in 0..40 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!(dock.is_hidden);
+        assert_eq!(dock.show_progress.value, 0.0);
+        let hidden_rect = dock.dock_rect(surface_rect);
+        assert!(hidden_rect.y > surface_rect.height);
+
+        let strip = dock.handle_strip_rect(surface_rect);
+        assert_eq!(strip.width, 80.0);
+        assert_eq!(strip.height, 4.0);
+        let wake = dock.wake_hit_rect(surface_rect);
+        assert!(point_in_rect(strip.x + 40.0, strip.y + 2.0, wake));
+
+        // 2. Wake on bottom-edge hover (over handle strip)
+        dock.set_hovered_at(strip.x + 40.0, strip.y + 2.0, surface_rect);
+        assert!(!dock.is_hidden);
+        assert!(dock.is_edge_hovered);
+        for _ in 0..60 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!((dock.show_progress.value - 1.0).abs() < 0.05);
+        let visible_rect = dock.dock_rect(surface_rect);
+        assert!((visible_rect.y - 62.0).abs() < 2.0);
+
+        // 3. Hover-leave starts 2.5s grace timer, then collapses back to 80x4 strip
+        dock.clear_hover();
+        dock.set_edge_hovered(false);
+        assert!(!dock.is_hidden);
+        assert!(dock.hide_grace_timer() > 2.0);
+
+        for _ in 0..240 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!(dock.is_hidden);
+        assert_eq!(dock.show_progress.value, 0.0);
+        assert_eq!(dock.hide_grace_timer(), 0.0);
     }
 }

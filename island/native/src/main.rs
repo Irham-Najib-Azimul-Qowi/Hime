@@ -681,7 +681,7 @@ impl AppShell {
         let mut dwin = RECT::default();
         let _ = unsafe { GetWindowRect(self.dock_surface.hwnd(), &mut dwin) };
         log_diag(&format!(
-            "{label}: notch(hwnd={:?}, vis={}, win=({},{},{},{}), dip=({nw:.1},{nh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), hidden={}) dock(hwnd={:?}, vis={}, enabled={}, win=({},{},{},{}), dip=({dw:.1},{dh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), spring={:.2}, items={})",
+            "{label}: notch(hwnd={:?}, vis={}, win=({},{},{},{}), dip=({nw:.1},{nh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), hidden={}) dock(hwnd={:?}, vis={}, enabled={}, mode={:?}, hidden={}, show={:.2}, grace={:.2}, edge_hov={}, has_hov={}, win=({},{},{},{}), dip=({dw:.1},{dh:.1}), rect=({:.1},{:.1},{:.1},{:.1}), spring={:.2}, items={})",
             self.notch_surface.hwnd(),
             nvis,
             nwin.left, nwin.top, nwin.right, nwin.bottom,
@@ -690,6 +690,12 @@ impl AppShell {
             self.dock_surface.hwnd(),
             dvis,
             self.dock.visible,
+            self.dock.mode,
+            self.dock.is_hidden,
+            self.dock.show_progress.value,
+            self.dock.hide_grace_timer(),
+            self.dock.is_edge_hovered,
+            self.dock.has_hover(),
             dwin.left, dwin.top, dwin.right, dwin.bottom,
             drect.x, drect.y, drect.width, drect.height,
             self.dock.visibility.value,
@@ -980,9 +986,10 @@ impl AppShell {
                 let overlapped = self.is_foreground_overlapping_dock(primary);
                 self.dock.set_overlapped(overlapped);
 
+                let wake = self.dock.wake_hit_rect(surf_rect);
+                let over_wake = os_shell::is_point_in_rect(local_dx, local_dy, wake);
+
                 if self.dock.is_hidden && self.dock.show_progress.value <= 0.2 {
-                    let wake = self.dock.wake_hit_rect(surf_rect);
-                    let over_wake = os_shell::is_point_in_rect(local_dx, local_dy, wake);
                     self.dock.set_edge_hovered(over_wake);
                     self.dock_surface.set_click_through(!over_wake);
                 } else {
@@ -993,10 +1000,12 @@ impl AppShell {
                         .tray_flyout_rect(surf_rect, dock_rect)
                         .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
                     let over_any = over_dock || over_flyout;
+                    let keep_awake =
+                        over_any || (self.dock.mode != DockMode::Fixed && over_wake);
                     if !over_any && self.dock.has_hover() {
                         self.dock.clear_hover();
                     }
-                    self.dock.set_edge_hovered(over_any);
+                    self.dock.set_edge_hovered(keep_awake);
                     self.dock_surface.set_click_through(!over_any);
                 }
             } else {
@@ -1418,8 +1427,12 @@ impl AppShell {
             SurfaceEventKind::MouseMove { x, y } => {
                 let prev_hidden = self.dock.is_hidden;
                 let prev_hover = self.dock.hovered_index();
+                let prev_has_hover = self.dock.has_hover();
                 let next_hover = self.dock.set_hovered_at(x / scale, y / scale, rect);
-                if prev_hidden != self.dock.is_hidden || prev_hover != next_hover || self.dock.has_hover()
+                if prev_hidden != self.dock.is_hidden
+                    || prev_hover != next_hover
+                    || prev_has_hover != self.dock.has_hover()
+                    || self.dock.has_hover()
                 {
                     render_now = true;
                 }
@@ -2902,14 +2915,20 @@ fn main() {
 
     add_tray_icon(ctrl_hwnd);
 
-    let shell = AppShell::new(ctrl_hwnd).expect("initialize AppShell");
+    let mut shell = AppShell::new(ctrl_hwnd).expect("initialize AppShell");
+    let start_fast = shell.dock.is_animating();
+    if start_fast {
+        shell.ensure_fast_timer(ctrl_hwnd);
+    }
     APP_SHELL.with(|cell| *cell.borrow_mut() = Some(shell));
 
     let hk_mgr = HotkeyManager::register(ctrl_hwnd, true);
     HOTKEY_MGR.with(|cell| *cell.borrow_mut() = Some(hk_mgr));
 
     unsafe {
-        let _ = SetTimer(Some(ctrl_hwnd), TIMER_ANIM_ID, ANIM_INTERVAL_IDLE_MS, None);
+        if !start_fast {
+            let _ = SetTimer(Some(ctrl_hwnd), TIMER_ANIM_ID, ANIM_INTERVAL_IDLE_MS, None);
+        }
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
             let _ = TranslateMessage(&msg);
@@ -3184,5 +3203,48 @@ mod tests {
         assert!(items[0].exe_path.is_empty());
         assert_eq!(items[1].id, "code.exe");
         assert_eq!(items[1].exe_path, r"C:\Program Files\Microsoft VS Code\Code.exe");
+    }
+
+    #[test]
+    fn auto_hide_settings_startup_and_wake_on_hover_regression() {
+        let ns = SettingsStore::from_json_str(r#"{"bloom-dock-mode":"auto-hide"}"#).unwrap();
+        assert_eq!(ns.dock_mode, "auto-hide");
+        assert_eq!(parse_dock_mode(&ns.dock_mode), DockMode::AutoHide);
+
+        let mut dock = DockBar::new();
+        dock.set_mode(parse_dock_mode(&ns.dock_mode));
+        assert!(dock.is_hidden);
+        assert!(dock.is_animating());
+
+        let surf_rect = Rect::new(0.0, 0.0, DOCK_DIP_WIDTH, DOCK_DIP_HEIGHT);
+        for _ in 0..45 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert_eq!(dock.show_progress.value, 0.0);
+        let strip = dock.handle_strip_rect(surf_rect);
+        assert_eq!(strip.width, 80.0);
+        assert_eq!(strip.height, 4.0);
+
+        // Hover wake at bottom edge brings Dock back to visible
+        let wake = dock.wake_hit_rect(surf_rect);
+        assert!(os_shell::is_point_in_rect(
+            strip.x + 40.0,
+            strip.y + 2.0,
+            wake
+        ));
+        dock.set_edge_hovered(true);
+        assert!(!dock.is_hidden);
+        for _ in 0..45 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!((dock.show_progress.value - 1.0).abs() < 0.05);
+
+        // Leaving bottom edge starts grace timer and collapses back to 80x4
+        dock.set_edge_hovered(false);
+        for _ in 0..240 {
+            dock.tick(1.0 / 60.0);
+        }
+        assert!(dock.is_hidden);
+        assert_eq!(dock.show_progress.value, 0.0);
     }
 }

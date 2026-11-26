@@ -363,13 +363,13 @@ impl SettingsPanel {
         if self.selected_index.is_none() {
             self.selected_index = Some(0);
         }
-        self.open_spring.set_target(1.0);
+        self.open_spring.snap_to(1.0);
     }
 
     pub fn close(&mut self) {
         self.visible = false;
         self.hovered_target = None;
-        self.open_spring.set_target(0.0);
+        self.open_spring.snap_to(0.0);
     }
 
     pub fn toggle(&mut self) {
@@ -945,19 +945,19 @@ impl SettingsPanel {
         None
     }
 
+    fn render_size_for_surface(&self, sw: f32, sh: f32) -> (f32, f32) {
+        let draw_w = if sw > 10.0 { sw.min(self.width) } else { self.width };
+        let draw_h = if sh > 10.0 { sh.min(self.height) } else { self.height };
+        (draw_w, draw_h)
+    }
+
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
-        let progress = self.open_spring.value.clamp(0.0, 1.0);
-        if progress <= 0.01 && !self.visible {
+        if !self.visible {
             return Ok(());
         }
 
         let (sw, sh) = surface.dip_size();
-        let draw_w = if sw > 10.0 { sw.min(self.width) } else { self.width };
-        let draw_h = if sh > 10.0 {
-            (sh.min(self.height) * progress.max(0.25)).max(80.0)
-        } else {
-            self.height * progress.max(0.25)
-        };
+        let (draw_w, draw_h) = self.render_size_for_surface(sw, sh);
 
         let panel_rect = Rect::new(0.0, 0.0, draw_w, draw_h);
         surface.set_rounded_region(panel_rect, 14.0);
@@ -1319,5 +1319,35 @@ mod tests {
             Some(SettingsControl::ToggleNotifSuppression)
         );
         assert_eq!(panel.handle_key_down(0x1B), Some(SettingsControl::Close));
+    }
+
+    #[test]
+    fn open_renders_full_size_on_first_frame_without_clipping() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+
+        assert!(panel.visible);
+        assert_eq!(panel.open_spring.value, 1.0);
+        assert!(!panel.is_animating());
+        assert_eq!(
+            panel.render_size_for_surface(SETTINGS_WIDTH, SETTINGS_HEIGHT),
+            (SETTINGS_WIDTH, SETTINGS_HEIGHT)
+        );
+        assert_eq!(
+            panel.render_size_for_surface(0.0, 0.0),
+            (SETTINGS_WIDTH, SETTINGS_HEIGHT)
+        );
+
+        // All sidebar tabs and content rows fit inside the full 520px height.
+        for (_, rect) in panel.tab_rects() {
+            assert!(rect.y + rect.height <= SETTINGS_HEIGHT - 8.0);
+        }
+        for (_, rect) in panel.row_rects() {
+            assert!(rect.y + rect.height <= SETTINGS_HEIGHT - 14.0);
+        }
+
+        panel.close();
+        assert!(!panel.visible);
+        assert_eq!(panel.open_spring.value, 0.0);
     }
 }
