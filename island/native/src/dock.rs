@@ -21,15 +21,14 @@ use crate::d2d::{
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
 use crate::theme::{
-    ACCENT_CYAN, CORNER_RADIUS, DOCK_SURFACE, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_ALERT,
+    Color, ACCENT_CYAN, CORNER_RADIUS, GLASS_BORDER, NOTCH_BG_SOLID, STATUS_ALERT,
     SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 const DOCK_HEIGHT: f32 = 54.0;
-const ICON_BASE_SIZE: f32 = 34.0;
-const ICON_CORNER_RADIUS: f32 = 8.0;
-const ITEM_SLOT_SIZE: f32 = 38.0;
-const ITEM_GAP: f32 = 8.0;
+const ICON_BASE_SIZE: f32 = 36.0;
+const ICON_CORNER_RADIUS: f32 = 9.0;
+const ITEM_GAP: f32 = 6.0;
 const DOCK_PAD_X: f32 = 12.0;
 const DIVIDER_WIDTH: f32 = 1.0;
 const DIVIDER_GAP: f32 = 8.0;
@@ -38,7 +37,10 @@ const TRAY_BTN_BASE_WIDTH: f32 = 34.0;
 const TRAY_BTN_BADGE_WIDTH: f32 = 44.0;
 const HANDLE_STRIP_WIDTH: f32 = 80.0;
 const HANDLE_STRIP_HEIGHT: f32 = 4.0;
-const HOVER_SCALE_TARGET: f32 = 1.22;
+const MIN_MAGNIFY_SCALE: f32 = 1.0;
+const MAX_MAGNIFY_SCALE: f32 = 1.65;
+const MAGNIFY_EFFECT_WIDTH: f32 = 190.0;
+const BOUNCE_DURATION_SECS: f32 = 0.38;
 const MAX_RUNNING_GROUPS: usize = 12;
 const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
 const TRAY_ITEM_SIZE: f32 = 24.0;
@@ -132,6 +134,10 @@ pub struct DockItem {
     pub icon: Option<IconRgba>,
     #[serde(skip, default = "default_item_scale")]
     pub hover_scale: SpringValue,
+    #[serde(skip, default)]
+    pub bounce_timer: f32,
+    #[serde(skip, default)]
+    pub bounce_amplitude: f32,
 }
 
 fn default_item_scale() -> SpringValue {
@@ -157,6 +163,8 @@ impl DockItem {
             hwnds: Vec::new(),
             icon: None,
             hover_scale: SpringValue::snappy(1.0),
+            bounce_timer: 0.0,
+            bounce_amplitude: 0.0,
         }
     }
 }
@@ -180,6 +188,7 @@ pub struct DockBar {
     pub show_progress: SpringValue,
     hovered_index: Option<usize>,
     hovered_target: Option<DockHoverTarget>,
+    hover_mouse_x: Option<f32>,
     hide_grace_timer: f32,
 }
 
@@ -208,6 +217,7 @@ impl DockBar {
             show_progress: SpringValue::snappy(1.0),
             hovered_index: None,
             hovered_target: None,
+            hover_mouse_x: None,
             hide_grace_timer: 0.0,
         }
     }
@@ -224,9 +234,9 @@ impl DockBar {
         self.hovered_index
     }
 
-    /// Returns `true` when any app item, utility button, tray item, or handle strip is hovered.
+    /// Returns `true` when any app item, magnification band, utility button, tray item, or handle strip is hovered.
     pub fn has_hover(&self) -> bool {
-        self.hovered_target.is_some()
+        self.hovered_target.is_some() || self.hover_mouse_x.is_some()
     }
 
     /// Returns the remaining auto-hide grace timer in seconds.
@@ -234,19 +244,37 @@ impl DockBar {
         self.hide_grace_timer
     }
 
-    /// Returns `true` if any Dock spring or auto-hide grace timer is still active.
+    /// Returns `true` if any Dock spring, magnification lerp, click bounce, or auto-hide grace timer is still active.
     pub fn is_animating(&self) -> bool {
         !self.visibility.is_settled()
             || !self.show_progress.is_settled()
             || self.hide_grace_timer > 0.0
-            || self.items.iter().any(|it| !it.hover_scale.is_settled())
+            || self.items.iter().any(|it| {
+                (it.hover_scale.target - it.hover_scale.value).abs() > 0.002
+                    || it.bounce_timer > 0.0
+            })
+    }
+
+    /// Triggers a macOS-style vertical click bounce animation on the item at `index`.
+    pub fn trigger_bounce(&mut self, index: usize) {
+        if let Some(item) = self.items.get_mut(index) {
+            let scale = item.hover_scale.value;
+            item.bounce_amplitude = if scale > 1.3 {
+                ICON_BASE_SIZE * 0.24
+            } else {
+                ICON_BASE_SIZE * 0.17
+            };
+            item.bounce_timer = BOUNCE_DURATION_SECS;
+        }
     }
 
     /// Clears hover state across app items, utility buttons, and tray items.
     pub fn clear_hover(&mut self) {
-        let was_hovered = self.hovered_target.is_some();
-        self.set_hovered(None);
+        let was_hovered = self.hovered_target.is_some() || self.hover_mouse_x.is_some();
+        self.hovered_index = None;
         self.hovered_target = None;
+        self.hover_mouse_x = None;
+        self.update_magnification_targets();
         if was_hovered && self.mode != DockMode::Fixed {
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
         }
@@ -260,11 +288,13 @@ impl DockBar {
         }
         self.hovered_index = None;
         self.hovered_target = None;
+        self.hover_mouse_x = None;
         self.is_edge_hovered = false;
         self.tray_open = false;
         self.hide_grace_timer = 0.0;
         for item in &mut self.items {
             item.hover_scale.snap_to(1.0);
+            item.bounce_timer = 0.0;
         }
         self.recompute_hidden();
     }
@@ -380,7 +410,7 @@ impl DockBar {
             return cached.clone();
         }
 
-        let extracted = extract_window_or_exe_icon(hwnd, trimmed, 48);
+        let extracted = extract_window_or_exe_icon(hwnd, trimmed, 64);
         self.icon_cache.insert(cache_key, extracted.clone());
         extracted
     }
@@ -613,26 +643,115 @@ impl DockBar {
         self.system_tray_count = count;
     }
 
-    /// Sets the hovered item index and updates item spring targets.
-    pub fn set_hovered(&mut self, index: Option<usize>) {
-        let valid = index.filter(|&i| i < self.items.len());
-        self.hovered_index = valid;
-        self.hovered_target = valid.map(DockHoverTarget::App);
-        if valid.is_some() {
-            self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-            self.recompute_hidden();
-        }
+    fn resting_item_center_x(&self, index: usize) -> f32 {
+        let has_group_div = self.has_pinned_running_divider();
+        let pinned_len = self.pinned_count();
+        let group_extra = if has_group_div && index >= pinned_len {
+            DIVIDER_GAP + DIVIDER_WIDTH
+        } else {
+            0.0
+        };
+        (index as f32) * (ICON_BASE_SIZE + ITEM_GAP) + group_extra + ICON_BASE_SIZE * 0.5
+    }
+
+    fn resting_item_span(&self, index: usize) -> (f32, f32) {
+        let has_group_div = self.has_pinned_running_divider();
+        let pinned_len = self.pinned_count();
+        let group_extra = if has_group_div && index >= pinned_len {
+            DIVIDER_GAP + DIVIDER_WIDTH
+        } else {
+            0.0
+        };
+        let left = (index as f32) * (ICON_BASE_SIZE + ITEM_GAP) + group_extra;
+        (left, left + ICON_BASE_SIZE)
+    }
+
+    /// Authentic macOS cosine-based magnification targets across `MAGNIFY_EFFECT_WIDTH`.
+    fn update_magnification_targets(&mut self) {
+        let Some(mouse_pos) = self.hover_mouse_x else {
+            for item in &mut self.items {
+                item.hover_scale.set_target(MIN_MAGNIFY_SCALE);
+            }
+            return;
+        };
+
+        let min_x = mouse_pos - MAGNIFY_EFFECT_WIDTH * 0.5;
+        let max_x = mouse_pos + MAGNIFY_EFFECT_WIDTH * 0.5;
+        let has_group_div = self.has_pinned_running_divider();
+        let pinned_len = self.pinned_count();
+
         for (i, item) in self.items.iter_mut().enumerate() {
-            let target = match valid {
-                Some(h) if h == i => HOVER_SCALE_TARGET,
-                Some(h) if h.abs_diff(i) == 1 => 1.08,
-                _ => 1.0,
+            let group_extra = if has_group_div && i >= pinned_len {
+                DIVIDER_GAP + DIVIDER_WIDTH
+            } else {
+                0.0
+            };
+            let normal_center =
+                (i as f32) * (ICON_BASE_SIZE + ITEM_GAP) + group_extra + ICON_BASE_SIZE * 0.5;
+            let target = if normal_center < min_x || normal_center > max_x {
+                MIN_MAGNIFY_SCALE
+            } else {
+                let theta = (((normal_center - min_x) / MAGNIFY_EFFECT_WIDTH)
+                    * 2.0
+                    * std::f32::consts::PI)
+                    .clamp(0.0, 2.0 * std::f32::consts::PI);
+                let scale_factor = (1.0 - theta.cos()) * 0.5;
+                MIN_MAGNIFY_SCALE + scale_factor * (MAX_MAGNIFY_SCALE - MIN_MAGNIFY_SCALE)
             };
             item.hover_scale.set_target(target);
         }
     }
 
-    /// Performs hit-testing at `(x, y)` and updates hover state (items, utility buttons, tray items, and handle strip).
+    /// Maps screen cursor `x` inside `surface_rect` back onto resting item X coordinates
+    /// so peak magnification tracks accurately under the cursor with zero layout oscillation.
+    fn map_cursor_x_to_resting_x(&self, x: f32, surface_rect: Rect) -> f32 {
+        let rects = self.item_rects(surface_rect);
+        if rects.is_empty() {
+            return 0.0;
+        }
+        let first_r = rects[0];
+        let (first_rest_l, _) = self.resting_item_span(0);
+        if x <= first_r.x {
+            return first_rest_l - (first_r.x - x);
+        }
+        for i in 0..rects.len() {
+            let r = rects[i];
+            let (rest_l, rest_r) = self.resting_item_span(i);
+            if x <= r.x + r.width {
+                let u = ((x - r.x) / r.width.max(1.0)).clamp(0.0, 1.0);
+                return rest_l + u * (rest_r - rest_l);
+            }
+            if i + 1 < rects.len() {
+                let next_r = rects[i + 1];
+                if x < next_r.x {
+                    let (next_rest_l, _) = self.resting_item_span(i + 1);
+                    let gap_u = ((x - (r.x + r.width)) / (next_r.x - (r.x + r.width)).max(1.0))
+                        .clamp(0.0, 1.0);
+                    return rest_r + gap_u * (next_rest_l - rest_r);
+                }
+            }
+        }
+        let last_idx = rects.len() - 1;
+        let last_r = rects[last_idx];
+        let (_, last_rest_r) = self.resting_item_span(last_idx);
+        last_rest_r + (x - (last_r.x + last_r.width))
+    }
+
+    /// Sets the hovered item index and updates cosine magnification wave targets.
+    pub fn set_hovered(&mut self, index: Option<usize>) {
+        let valid = index.filter(|&i| i < self.items.len());
+        self.hovered_index = valid;
+        self.hovered_target = valid.map(DockHoverTarget::App);
+        self.hover_mouse_x = valid.map(|i| self.resting_item_center_x(i));
+        if valid.is_some() {
+            self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+            self.recompute_hidden();
+        }
+        self.update_magnification_targets();
+    }
+
+    /// Performs hit-testing at `(x, y)` and updates hover state, continuous cosine wave magnification,
+    /// utility buttons, tray items, and wake handle strip.
     pub fn set_hovered_at(&mut self, x: f32, y: f32, surface_rect: Rect) -> Option<usize> {
         if self.is_hidden && self.show_progress.value <= 0.2 {
             if point_in_rect(x, y, self.wake_hit_rect(surface_rect)) {
@@ -647,33 +766,47 @@ impl DockBar {
 
         match self.hit_test_action(x, y, surface_rect) {
             Some(DockAction::App(idx)) => {
-                self.set_hovered(Some(idx));
+                let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
+                self.hovered_index = Some(idx);
+                self.hovered_target = Some(DockHoverTarget::App(idx));
+                self.hover_mouse_x = Some(rest_x);
+                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                self.recompute_hidden();
+                self.update_magnification_targets();
                 Some(idx)
             }
             Some(DockAction::ToggleAiDrawer) => {
-                self.set_hovered(None);
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
                 self.hovered_target = Some(DockHoverTarget::AiDrawer);
+                self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 None
             }
             Some(DockAction::ToggleSettings) => {
-                self.set_hovered(None);
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
                 self.hovered_target = Some(DockHoverTarget::Settings);
+                self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 None
             }
             Some(DockAction::ToggleTray) => {
-                self.set_hovered(None);
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
                 self.hovered_target = Some(DockHoverTarget::Tray);
+                self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 None
             }
             Some(DockAction::ActivateTrayItem(idx)) => {
-                self.set_hovered(None);
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
                 self.hovered_target = Some(DockHoverTarget::TrayItem(idx));
+                self.update_magnification_targets();
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
                 self.recompute_hidden();
                 None
@@ -684,14 +817,34 @@ impl DockBar {
                 None
             }
             Some(DockAction::TogglePin(_)) | None => {
-                self.clear_hover();
+                let dock = self.dock_rect(surface_rect);
+                let rects = self.item_rects(surface_rect);
+                let in_items_band = !rects.is_empty() && {
+                    let left = rects.first().map(|r| r.x - 6.0).unwrap_or(dock.x);
+                    let right = rects.last().map(|r| r.x + r.width + 6.0).unwrap_or(dock.x);
+                    let top = dock.y - (MAX_MAGNIFY_SCALE - 1.0) * ICON_BASE_SIZE - 8.0;
+                    let bottom = dock.y + dock.height;
+                    x >= left && x <= right && y >= top && y <= bottom
+                };
+                if in_items_band {
+                    let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
+                    self.hovered_index = None;
+                    self.hovered_target = None;
+                    self.hover_mouse_x = Some(rest_x);
+                    self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                    self.recompute_hidden();
+                    self.update_magnification_targets();
+                } else {
+                    self.clear_hover();
+                }
                 None
             }
         }
     }
 
-    /// Advances visibility, auto-hide grace timer, `show_progress`, and all item hover springs by `dt` seconds.
-    /// Returns `true` if any spring or grace timer is still active.
+    /// Advances visibility, auto-hide grace timer, `show_progress`, cosine scale lerp,
+    /// and click bounce animation by `dt` seconds.
+    /// Returns `true` if any animation or grace timer is still active.
     pub fn tick(&mut self, dt: f32) -> bool {
         if dt > 0.0
             && dt.is_finite()
@@ -712,10 +865,33 @@ impl DockBar {
         let mut animating = !self.visibility.is_settled()
             || !self.show_progress.is_settled()
             || self.hide_grace_timer > 0.0;
+
+        let lerp_base = if self.hover_mouse_x.is_some() {
+            0.20_f32
+        } else {
+            0.12_f32
+        };
+        let alpha = if dt > 0.0 && dt.is_finite() {
+            1.0 - (1.0 - lerp_base).powf((dt * 60.0).clamp(0.05, 4.0))
+        } else {
+            0.0
+        };
+
         for item in &mut self.items {
-            item.hover_scale.tick(dt);
-            if !item.hover_scale.is_settled() {
+            let diff = item.hover_scale.target - item.hover_scale.value;
+            if diff.abs() > 0.002 && alpha > 0.0 {
+                item.hover_scale.value += diff * alpha;
                 animating = true;
+            } else {
+                item.hover_scale.value = item.hover_scale.target;
+            }
+            item.hover_scale.velocity = 0.0;
+
+            if item.bounce_timer > 0.0 && dt > 0.0 && dt.is_finite() {
+                item.bounce_timer = (item.bounce_timer - dt).max(0.0);
+                if item.bounce_timer > 0.0 {
+                    animating = true;
+                }
             }
         }
         animating
@@ -739,18 +915,55 @@ impl DockBar {
         }
     }
 
+    fn layout_items_internal(&self, dock_x: f32, dock_y: f32) -> (Vec<Rect>, Option<f32>, f32) {
+        if self.items.is_empty() {
+            return (Vec::new(), None, 0.0);
+        }
+        let has_group_div = self.has_pinned_running_divider();
+        let pinned_len = self.pinned_count();
+        let bottom_y = dock_y + DOCK_HEIGHT - 10.5;
+        let mut rects = Vec::with_capacity(self.items.len());
+        let mut pinned_div_x = None;
+        let mut cursor = 0.0_f32;
+
+        for (i, item) in self.items.iter().enumerate() {
+            if has_group_div && i == pinned_len {
+                pinned_div_x =
+                    Some(dock_x + DOCK_PAD_X + cursor - ITEM_GAP * 0.5 + DIVIDER_GAP * 0.5);
+                cursor += DIVIDER_GAP + DIVIDER_WIDTH;
+            }
+            let scale = item.hover_scale.value.clamp(0.8, MAX_MAGNIFY_SCALE + 0.05);
+            let size = ICON_BASE_SIZE * scale;
+            let bounce_offset = if item.bounce_timer > 0.0 {
+                let p = 1.0 - (item.bounce_timer / BOUNCE_DURATION_SECS).clamp(0.0, 1.0);
+                item.bounce_amplitude * (p * std::f32::consts::PI).sin()
+            } else {
+                0.0
+            };
+            let x = dock_x + DOCK_PAD_X + cursor;
+            let y = bottom_y - size - bounce_offset;
+            rects.push(Rect::new(x, y, size, size));
+            cursor += size + ITEM_GAP;
+        }
+        let span_width = (cursor - ITEM_GAP).max(0.0);
+        (rects, pinned_div_x, span_width)
+    }
+
     fn items_span_width(&self) -> f32 {
         if self.items.is_empty() {
-            0.0
-        } else {
-            let count = self.items.len() as f32;
-            let base = count * ITEM_SLOT_SIZE + (count - 1.0) * ITEM_GAP;
-            if self.has_pinned_running_divider() {
-                base + DIVIDER_GAP + DIVIDER_WIDTH
-            } else {
-                base
-            }
+            return 0.0;
         }
+        let has_group_div = self.has_pinned_running_divider();
+        let pinned_len = self.pinned_count();
+        let mut cursor = 0.0_f32;
+        for (i, item) in self.items.iter().enumerate() {
+            if has_group_div && i == pinned_len {
+                cursor += DIVIDER_GAP + DIVIDER_WIDTH;
+            }
+            let scale = item.hover_scale.value.clamp(0.8, MAX_MAGNIFY_SCALE + 0.05);
+            cursor += ICON_BASE_SIZE * scale + ITEM_GAP;
+        }
+        (cursor - ITEM_GAP).max(0.0)
     }
 
     fn utilities_width(&self) -> f32 {
@@ -798,44 +1011,16 @@ impl DockBar {
         Rect::new(x, y, width, height)
     }
 
-    /// Returns the bounding rectangles for each application item in order.
+    /// Returns the bounding rectangles for each application item using dynamic bottom-origin macOS magnification.
     pub fn item_rects(&self, surface_rect: Rect) -> Vec<Rect> {
         let dock = self.dock_rect(surface_rect);
-        let mut rects = Vec::with_capacity(self.items.len());
-        let base_y = dock.y + 7.0;
-        let has_group_div = self.has_pinned_running_divider();
-        let pinned_len = self.pinned_count();
-
-        for (i, item) in self.items.iter().enumerate() {
-            let scale = item.hover_scale.value.clamp(0.8, 1.4);
-            let size = ICON_BASE_SIZE * scale;
-            let group_extra = if has_group_div && i >= pinned_len {
-                DIVIDER_GAP + DIVIDER_WIDTH
-            } else {
-                0.0
-            };
-            let cx = dock.x
-                + DOCK_PAD_X
-                + (i as f32) * (ITEM_SLOT_SIZE + ITEM_GAP)
-                + group_extra
-                + ITEM_SLOT_SIZE * 0.5;
-            let x = cx - size * 0.5;
-            let y = base_y + (ICON_BASE_SIZE - size) * 0.65;
-            rects.push(Rect::new(x, y, size, size));
-        }
-        rects
+        self.layout_items_internal(dock.x, dock.y).0
     }
 
     /// Returns `(pinned_divider_x, utils_divider_x, ai_rect, settings_rect, tray_rect)`.
     fn utility_rects(&self, dock: Rect) -> (Option<f32>, Option<f32>, Option<Rect>, Rect, Rect) {
-        let pinned_div_x = if self.has_pinned_running_divider() {
-            let p = self.pinned_count() as f32;
-            Some(dock.x + DOCK_PAD_X + p * ITEM_SLOT_SIZE + (p - 1.0) * ITEM_GAP + ITEM_GAP * 0.5 + DIVIDER_GAP * 0.5)
-        } else {
-            None
-        };
+        let (_, pinned_div_x, items_w) = self.layout_items_internal(dock.x, dock.y);
 
-        let items_w = self.items_span_width();
         let (utils_div_x, utils_start_x) = if self.items.is_empty() {
             (None, dock.x + DOCK_PAD_X)
         } else {
@@ -1006,7 +1191,7 @@ impl DockBar {
         let anchor_y = if matches!(self.hovered_target, Some(DockHoverTarget::TrayItem(_))) {
             target_rect.y
         } else {
-            dock.y
+            target_rect.y.min(dock.y)
         };
         let tip_y = (anchor_y - tip_h - 6.0).max(2.0);
         let cx = target_rect.x + target_rect.width * 0.5;
@@ -1015,7 +1200,7 @@ impl DockBar {
         Some((Rect::new(tip_x, tip_y, text_w, tip_h), label))
     }
 
-    /// Renders either the `80x4` bottom handle strip (when auto-hidden) or the full Dock capsule.
+    /// Renders either the invisible collapsed state (when auto-hidden) or the macOS glassmorphic Dock capsule.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let alpha = self.visibility.value.clamp(0.0, 1.0);
         if alpha <= 0.01 {
@@ -1033,11 +1218,20 @@ impl DockBar {
         }
 
         let dock = self.dock_rect(surface_rect);
+        let rects = self.item_rects(surface_rect);
         let tray_flyout = self.tray_flyout_rect(surface_rect, dock);
         let tooltip = self.active_tooltip(surface_rect, dock);
 
-        let mut regions = Vec::with_capacity(3);
+        let mut regions = Vec::with_capacity(3 + rects.len());
         regions.push((dock, CORNER_RADIUS));
+        for r in &rects {
+            if r.y < dock.y {
+                regions.push((
+                    Rect::new(r.x - 2.0, r.y - 2.0, r.width + 4.0, r.height + 4.0),
+                    ICON_CORNER_RADIUS,
+                ));
+            }
+        }
         if let Some(fly) = tray_flyout {
             regions.push((fly, 10.0));
         }
@@ -1046,23 +1240,43 @@ impl DockBar {
         }
         set_dock_regions(surface, &regions);
 
-        // Main floating dark capsule (`DOCK_SURFACE`, height 54px, radius 18px)
-        surface.fill_rounded_rect(
-            dock,
-            CORNER_RADIUS,
-            DOCK_SURFACE.with_alpha(DOCK_SURFACE.a * alpha),
-        )?;
+        // macOS glassmorphic capsule (`rgba(45, 45, 48, 0.82)` + crisp inner top rim highlight & outer border)
+        let glass_bg = Color::from_rgba_u8(45, 45, 48, 210).with_alpha(0.82 * alpha);
+        surface.fill_rounded_rect(dock, CORNER_RADIUS, glass_bg)?;
         surface.stroke_rounded_rect(
             dock,
             CORNER_RADIUS,
-            GLASS_BORDER.with_alpha(0.22 * alpha),
+            Color::from_rgba_u8(255, 255, 255, 40).with_alpha(0.16 * alpha),
+            1.0,
+        )?;
+        surface.draw_line(
+            dock.x + CORNER_RADIUS,
+            dock.y + 1.0,
+            dock.x + dock.width - CORNER_RADIUS,
+            dock.y + 1.0,
+            Color::from_rgba_u8(255, 255, 255, 46).with_alpha(0.18 * alpha),
             1.0,
         )?;
 
-        // Application items (real Win32 BGRA icons + fallback letter tiles)
-        let rects = self.item_rects(surface_rect);
+        // Application items (real Win32 BGRA icons + fallback letter tiles + magnification shadow)
         for (i, (item, rect)) in self.items.iter().zip(rects.iter()).enumerate() {
             let is_hovered = self.hovered_target == Some(DockHoverTarget::App(i));
+            let scale = item.hover_scale.value;
+            if scale > 1.04 || item.bounce_timer > 0.0 {
+                let elev = ((scale - 1.0) / (MAX_MAGNIFY_SCALE - 1.0)).clamp(0.0, 1.0);
+                let shadow_a = (0.28 * elev + if item.bounce_timer > 0.0 { 0.12 } else { 0.0 }) * alpha;
+                let shadow_rect = Rect::new(
+                    rect.x + 1.0,
+                    rect.y + 4.0,
+                    rect.width,
+                    rect.height,
+                );
+                surface.fill_rounded_rect(
+                    shadow_rect,
+                    ICON_CORNER_RADIUS,
+                    Color::rgba(0.0, 0.0, 0.0, shadow_a),
+                )?;
+            }
 
             if let Some(ref icon_rgba) = item.icon {
                 surface.draw_bgra_bitmap(
@@ -1099,16 +1313,18 @@ impl DockBar {
                 surface.draw_text(
                     &initial,
                     *rect,
-                    15.0,
+                    (15.0 * scale.clamp(1.0, 1.35)).round(),
                     TEXT_PRIMARY.with_alpha(alpha),
                     TextAlign::Center,
                 )?;
             }
 
-            // Active white/cyan indicator pill centered underneath running apps
+            // macOS-style active indicator dot centered underneath running apps
             if item.running {
                 let multi = item.hwnds.len() > 1;
-                let dot_w = if multi { 10.0 } else { 5.0 };
+                let dot_w = if multi { 10.0 } else { 4.5 };
+                let dot_h = if multi { 2.8 } else { 4.5 };
+                let dot_r = dot_h * 0.5;
                 let dot_color = if multi {
                     ACCENT_CYAN.with_alpha(alpha)
                 } else {
@@ -1116,11 +1332,11 @@ impl DockBar {
                 };
                 let dot = Rect::new(
                     rect.x + rect.width * 0.5 - dot_w * 0.5,
-                    dock.y + dock.height - 6.5,
+                    dock.y + dock.height - 6.5 - (dot_h - 2.8) * 0.5,
                     dot_w,
-                    2.5,
+                    dot_h,
                 );
-                surface.fill_rounded_rect(dot, 1.25, dot_color)?;
+                surface.fill_rounded_rect(dot, dot_r, dot_color)?;
             }
 
             // Multi-window / notification count badge
@@ -1507,15 +1723,29 @@ mod tests {
         for _ in 0..90 {
             dock.tick(1.0 / 60.0);
         }
-        assert!(dock.items()[1].hover_scale.value > 1.18);
-        assert!(dock.items()[0].hover_scale.value > 1.05);
-        assert!((dock.items()[2].hover_scale.value - 1.08).abs() < 0.05);
+        assert!(
+            dock.items()[1].hover_scale.value > 1.60,
+            "hovered item should reach cosine peak ~1.65, got {}",
+            dock.items()[1].hover_scale.value
+        );
+        assert!(
+            dock.items()[0].hover_scale.value > 1.25 && dock.items()[0].hover_scale.value < dock.items()[1].hover_scale.value,
+            "left neighbor should follow cosine bell curve, got {}",
+            dock.items()[0].hover_scale.value
+        );
+        assert!(
+            dock.items()[2].hover_scale.value > 1.15 && dock.items()[2].hover_scale.value < dock.items()[1].hover_scale.value,
+            "right neighbor should follow cosine bell curve, got {}",
+            dock.items()[2].hover_scale.value
+        );
 
         dock.set_hovered(None);
         for _ in 0..90 {
             dock.tick(1.0 / 60.0);
         }
-        assert!((dock.items()[1].hover_scale.value - 1.0).abs() < 0.02);
+        assert!((dock.items()[1].hover_scale.value - 1.0).abs() < 0.01);
+        assert!((dock.items()[0].hover_scale.value - 1.0).abs() < 0.01);
+        assert!((dock.items()[2].hover_scale.value - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -1648,5 +1878,67 @@ mod tests {
         assert!(dock.is_hidden);
         assert!(!dock.tray_open);
         assert_eq!(dock.hide_grace_timer(), 0.0);
+    }
+
+    #[test]
+    fn macos_magnification_expands_dock_width_and_anchors_bottom_origin() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
+        let rest_dock = dock.dock_rect(surface_rect);
+        let rest_rects = dock.item_rects(surface_rect);
+        let rest_bottom = rest_rects[1].y + rest_rects[1].height;
+
+        dock.set_hovered(Some(1));
+        for _ in 0..60 {
+            dock.tick(1.0 / 60.0);
+        }
+
+        let mag_dock = dock.dock_rect(surface_rect);
+        let mag_rects = dock.item_rects(surface_rect);
+        let mag_bottom = mag_rects[1].y + mag_rects[1].height;
+
+        // Container expands dynamically to accommodate magnified icons
+        assert!(
+            mag_dock.width > rest_dock.width + 20.0,
+            "dock width should expand on magnification: rest={} mag={}",
+            rest_dock.width,
+            mag_dock.width
+        );
+        // Bottom edge stays anchored while icon grows upward above dock.y
+        assert!((mag_bottom - rest_bottom).abs() < 0.05);
+        assert!(mag_rects[1].y < mag_dock.y);
+        // Adjacent icons never overlap
+        assert!(mag_rects[0].x + mag_rects[0].width < mag_rects[1].x);
+        assert!(mag_rects[1].x + mag_rects[1].width < mag_rects[2].x);
+    }
+
+    #[test]
+    fn click_bounce_lifts_icon_upward_and_settles_back_to_baseline() {
+        let mut dock = sample_dock();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
+        let base_y = dock.item_rects(surface_rect)[0].y;
+
+        dock.trigger_bounce(0);
+        assert!(dock.is_animating());
+
+        // Advance to half of bounce duration (~peak lift)
+        for _ in 0..11 {
+            dock.tick(1.0 / 60.0);
+        }
+        let peak_y = dock.item_rects(surface_rect)[0].y;
+        assert!(
+            peak_y < base_y - 3.0,
+            "icon should bounce upward above baseline: base={} peak={}",
+            base_y,
+            peak_y
+        );
+
+        // Advance past bounce end -> settles cleanly back to baseline
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+        let end_y = dock.item_rects(surface_rect)[0].y;
+        assert!((end_y - base_y).abs() < 0.01);
+        assert!(!dock.is_animating());
     }
 }

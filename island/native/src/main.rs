@@ -104,8 +104,8 @@ const ANIM_INTERVAL_IDLE_MS: u32 = 250;
 
 const OVERLAY_DIP_WIDTH: f32 = 80.0;
 const OVERLAY_DIP_HEIGHT: f32 = 240.0;
-const DOCK_DIP_WIDTH: f32 = 960.0;
-const DOCK_DIP_HEIGHT: f32 = 124.0;
+const DOCK_DIP_WIDTH: f32 = 1080.0;
+const DOCK_DIP_HEIGHT: f32 = 136.0;
 
 const MENU_TOGGLE_NOTCH: usize = 1001;
 const MENU_TOGGLE_DOCK: usize = 1002;
@@ -2375,6 +2375,7 @@ impl AppShell {
     fn execute_dock_action(&mut self, action: DockAction, ctrl_hwnd: HWND) {
         match action {
             DockAction::App(idx) => {
+                self.dock.trigger_bounce(idx);
                 if let Some(item) = self.dock.items().get(idx).cloned() {
                     focus_or_launch_dock_item(&item);
                 }
@@ -3176,6 +3177,7 @@ impl AppShell {
             }
             HotkeyAction::FocusDockSlot(slot) => {
                 self.dock.set_hovered(Some(slot as usize));
+                self.dock.trigger_bounce(slot as usize);
                 self.dirty_dock = true;
                 if let Some(item) = self.dock.items().get(slot as usize).cloned() {
                     focus_or_launch_dock_item(&item);
@@ -5064,8 +5066,8 @@ mod tests {
         assert_eq!(ory, (1080 - 240) / 2);
 
         let (_, dy, dw, dh) = dock_surface_bounds(screen, 1.0);
-        assert_eq!(dw, 960);
-        assert_eq!(dh, 124);
+        assert_eq!(dw, 1080);
+        assert_eq!(dh, 136);
         assert_eq!(dy + dh as i32, 1080);
     }
 
