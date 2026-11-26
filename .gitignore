@@ -110,6 +110,7 @@ captures/
 *.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite*
 .9router/
 .hermes/
 

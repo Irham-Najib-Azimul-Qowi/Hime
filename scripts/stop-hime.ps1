@@ -1,5 +1,5 @@
-# stop-hime.ps1 - Cleanly stop Hime Ecosystem and restore Windows taskbar
-param([switch]$IncludeHotkey, [switch]$Native)
+# stop-hime.ps1 - Cleanly stop Hime Ecosystem and restore Windows taskbar (Native default)
+param([switch]$IncludeHotkey, [switch]$Native, [switch]$LegacyWebView)
 
 $ErrorActionPreference = "SilentlyContinue"
 
@@ -24,7 +24,8 @@ try {
 }
 
 # 3. Wait up to 3 seconds for graceful exit before fallback force-kill
-$targetProcs = if ($Native) { @("hime-island-native", "hime-core") } else { @("hime-island", "hime-core") }
+$useLegacy = [bool]$LegacyWebView
+$targetProcs = if ($useLegacy) { @("hime-island", "hime-core") } else { @("hime-island-native", "hime-core") }
 $timeoutMs = 3000
 $intervalMs = 100
 $elapsed = 0
@@ -39,10 +40,10 @@ while ($elapsed -lt $timeoutMs) {
 
 # 4. Fallback force termination only if processes did not exit cleanly within 3 seconds
 Get-Process -Name "hime-core" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-if ($Native) {
-    Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-} else {
+if ($useLegacy) {
     Get-Process -Name "hime-island" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+} else {
+    Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 # 5a. Only kill hotkey daemon when -IncludeHotkey is explicitly passed (e.g. before rebuilding).

@@ -13,17 +13,18 @@ if (-not (Test-Path $startMenuDir)) {
 
 $himeRoot = "X:\folder_ai\Hime"
 $iconHime = "$himeRoot\island\src-tauri\icons\icon.ico"
-$psExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$wscriptExe = "$env:SystemRoot\System32\wscript.exe"
+$launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
 
 $hotkeyExe = "$himeRoot\island\src-tauri\target\release\hime_hotkey.exe"
 if (-not (Test-Path $hotkeyExe)) {
     $hotkeyExe = "$himeRoot\island\src-tauri\target\debug\hime_hotkey.exe"
 }
 
-# 1. Desktop: Hidupkan Hime
+# 1. Desktop: Hidupkan Hime (Zero console flash via wscript runner)
 $scStartDesktop = $WshShell.CreateShortcut((Join-Path $desktopDir "Hidupkan Hime.lnk"))
-$scStartDesktop.TargetPath = $psExe
-$scStartDesktop.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\start-hime.ps1`""
+$scStartDesktop.TargetPath = $wscriptExe
+$scStartDesktop.Arguments = "`"$launcherVbs`" start"
 $scStartDesktop.WorkingDirectory = $himeRoot
 $scStartDesktop.WindowStyle = 7
 $scStartDesktop.Hotkey = ""
@@ -31,21 +32,32 @@ if (Test-Path $iconHime) { $scStartDesktop.IconLocation = $iconHime }
 $scStartDesktop.Description = "Hidupkan Hime Ecosystem (Ctrl+Shift+H / Ctrl+Alt+Space)"
 $scStartDesktop.Save()
 
-# 2. Desktop: Matikan Hime
+# 1b. Desktop: Hime (Zero console flash via wscript runner)
+$scHimeDesktop = $WshShell.CreateShortcut((Join-Path $desktopDir "Hime.lnk"))
+$scHimeDesktop.TargetPath = $wscriptExe
+$scHimeDesktop.Arguments = "`"$launcherVbs`" start"
+$scHimeDesktop.WorkingDirectory = $himeRoot
+$scHimeDesktop.WindowStyle = 7
+$scHimeDesktop.Hotkey = ""
+if (Test-Path $iconHime) { $scHimeDesktop.IconLocation = $iconHime }
+$scHimeDesktop.Description = "Hime Ecosystem (Ctrl+Shift+H / Ctrl+Alt+Space)"
+$scHimeDesktop.Save()
+
+# 2. Desktop: Matikan Hime (Zero console flash via wscript runner)
 $scStopDesktop = $WshShell.CreateShortcut((Join-Path $desktopDir "Matikan Hime.lnk"))
-$scStopDesktop.TargetPath = $psExe
-$scStopDesktop.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\stop-hime.ps1`""
+$scStopDesktop.TargetPath = $wscriptExe
+$scStopDesktop.Arguments = "`"$launcherVbs`" stop"
 $scStopDesktop.WorkingDirectory = $himeRoot
 $scStopDesktop.WindowStyle = 7
 $scStopDesktop.Hotkey = ""
 $scStopDesktop.IconLocation = "$env:SystemRoot\System32\shell32.dll,27"
-$scStopDesktop.Description = "Matikan Hime Ecosystem (Ctrl+Shift+Q / Ctrl+Alt+Q)"
+$scStopDesktop.Description = "Matikan Hime Ecosystem (Ctrl+Shift+Q)"
 $scStopDesktop.Save()
 
 # 3. Start Menu Programs\Hime
 $scStartMenu = $WshShell.CreateShortcut((Join-Path $startMenuDir "Hidupkan Hime.lnk"))
-$scStartMenu.TargetPath = $psExe
-$scStartMenu.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\start-hime.ps1`""
+$scStartMenu.TargetPath = $wscriptExe
+$scStartMenu.Arguments = "`"$launcherVbs`" start"
 $scStartMenu.WorkingDirectory = $himeRoot
 $scStartMenu.WindowStyle = 7
 $scStartMenu.Hotkey = ""
@@ -54,26 +66,30 @@ $scStartMenu.Description = "Hidupkan Hime Ecosystem (Ctrl+Shift+H / Ctrl+Alt+Spa
 $scStartMenu.Save()
 
 $scStopMenu = $WshShell.CreateShortcut((Join-Path $startMenuDir "Matikan Hime.lnk"))
-$scStopMenu.TargetPath = $psExe
-$scStopMenu.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\stop-hime.ps1`""
+$scStopMenu.TargetPath = $wscriptExe
+$scStopMenu.Arguments = "`"$launcherVbs`" stop"
 $scStopMenu.WorkingDirectory = $himeRoot
 $scStopMenu.WindowStyle = 7
 $scStopMenu.Hotkey = ""
 $scStopMenu.IconLocation = "$env:SystemRoot\System32\shell32.dll,27"
-$scStopMenu.Description = "Matikan Hime Ecosystem (Ctrl+Shift+Q / Ctrl+Alt+Q)"
+$scStopMenu.Description = "Matikan Hime Ecosystem (Ctrl+Shift+Q)"
 $scStopMenu.Save()
 
-# 4. Startup Folder: Autostart Hime & Hotkey Daemon
+# 4. Startup Folder: Autostart Hime
+$staleHotkeyLnk = Join-Path $startupDir "HimeHotkey.lnk"
+if (Test-Path $staleHotkeyLnk) {
+    Remove-Item $staleHotkeyLnk -Force -ErrorAction SilentlyContinue
+}
 $scStartup = $WshShell.CreateShortcut((Join-Path $startupDir "Hime.lnk"))
-$scStartup.TargetPath = $psExe
-$scStartup.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\start-hime.ps1`" -Autostart"
+$scStartup.TargetPath = $wscriptExe
+$scStartup.Arguments = "`"$launcherVbs`" start-autostart"
 $scStartup.WorkingDirectory = $himeRoot
 if (Test-Path $iconHime) { $scStartup.IconLocation = $iconHime }
 $scStartup.Description = "Hime Ecosystem Persistent Autostart"
 $scStartup.Save()
 
 # 5. Registry HKCU Run
-Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "Hime" -Value "`"$psExe`" -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$himeRoot\scripts\start-hime.ps1`" -Autostart"
+Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "Hime" -Value 'wscript.exe "X:\folder_ai\Hime\tools\hime_launcher.vbs" start-autostart'
 if (Test-Path $hotkeyExe) {
     Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "HimeHotkey" -Value "`"$hotkeyExe`""
 }

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "description": "Locked external AI runtimes manifest for Hime managed background services",
+  "runtimes": {
+    "hermes": {
+      "name": "Hermes Agent",
+      "version": "0.1.0",
+      "repository": "https://github.com/NousResearch/Hermes-Agent",
+      "runtimeType": "python",
+      "license": "Apache-2.0",
+      "installCommand": "pip install -r requirements.txt",
+      "sha256": "locked"
+    },
+    "9router": {
+      "name": "9Router",
+      "version": "1.0.0",
+      "repository": "https://github.com/decolua/9router",
+      "runtimeType": "node",
+      "license": "MIT",
+      "installCommand": "npm install",
+      "sha256": "locked"
+    }
+  }
+}

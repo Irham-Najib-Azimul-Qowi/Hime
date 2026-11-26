@@ -1,5 +1,5 @@
-# start-hime.ps1 - Start Hime Ecosystem with Self-Healing Supervisor
-param([switch]$Autostart, [switch]$Native)
+# start-hime.ps1 - Start Hime Ecosystem with Self-Healing Supervisor (Native default)
+param([switch]$Autostart, [switch]$Native, [switch]$LegacyWebView)
 
 $ErrorActionPreference = "SilentlyContinue"
 $stateDir = "$env:APPDATA\ai.hime.desktop"
@@ -101,8 +101,12 @@ if (-not $core) {
     }
 }
 
-if ($Native) {
-    # 5-Native. Start Pure-Rust Direct2D Shell (includes built-in global hotkeys, no WebView2, no hime_hotkey.exe)
+$useLegacy = [bool]$LegacyWebView
+$supervisorScript = "$himeRoot\scripts\hime-supervisor.ps1"
+$supervisorArgs = if ($useLegacy) { "-LegacyWebView" } else { "" }
+
+if (-not $useLegacy) {
+    # 5-Native (Default). Start Pure-Rust Direct2D Shell (built-in global hotkeys, no WebView2, no hime_hotkey.exe)
     $nativeShell = Get-Process -Name "hime-island-native" -ErrorAction SilentlyContinue
     if (-not $nativeShell) {
         $nativeExe = Find-Bin "island\native" "hime-island-native.exe"
@@ -110,11 +114,23 @@ if ($Native) {
             Spawn-Detached $nativeExe "" $himeRoot 0
         }
     }
+
+    # Start Supervisor Watchdog in background (Native mode)
+    if (Test-Path $supervisorScript) {
+        $launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
+        $wscriptExe = "$env:SystemRoot\System32\wscript.exe"
+        if ((Test-Path $launcherVbs) -and (Test-Path $wscriptExe)) {
+            Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`"" $himeRoot 0
+        } else {
+            Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`"" $himeRoot 0
+        }
+    }
+
     Write-Host "Hime Native Ecosystem Started (Pure-Rust Direct2D Shell + Core)." -ForegroundColor Green
     exit 0
 }
 
-# 5. Start Island Shell (hime-island.exe) if not running
+# 5-Legacy. Start Island Shell (hime-island.exe) if not running
 $shell = Get-Process -Name "hime-island" -ErrorAction SilentlyContinue
 if (-not $shell) {
     $shellExe = Find-Bin "island\src-tauri" "hime-island.exe"
@@ -153,15 +169,14 @@ if ($hotkeys.Count -eq 0 -and $hotkeyExe) {
     Spawn-Detached $hotkeyExe "" $himeRoot 0
 }
 
-# 7. Start Supervisor Watchdog in background
-$supervisorScript = "$himeRoot\scripts\hime-supervisor.ps1"
+# 7. Start Supervisor Watchdog in background (Legacy WebView2 mode)
 if (Test-Path $supervisorScript) {
     $launcherVbs = "$himeRoot\tools\hime_launcher.vbs"
     $wscriptExe = "$env:SystemRoot\System32\wscript.exe"
     if ((Test-Path $launcherVbs) -and (Test-Path $wscriptExe)) {
-        Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`"" $himeRoot 0
+        Spawn-Detached $wscriptExe "`"$launcherVbs`" `"$supervisorScript`" $supervisorArgs" $himeRoot 0
     } else {
-        Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`"" $himeRoot 0
+        Spawn-Detached "powershell.exe" "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisorScript`" $supervisorArgs" $himeRoot 0
     }
 }
 

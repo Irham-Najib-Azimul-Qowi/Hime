@@ -162,7 +162,7 @@ export function useChatSession(options: UseChatSessionOptions = {}) {
           const activeModel =
             (typeof localStorage !== "undefined" &&
               localStorage.getItem("hime-9router-model")) ||
-            undefined;
+            "hime-combo";
 
           let attachmentContext = "";
           if (run.attachments && run.attachments.length > 0) {

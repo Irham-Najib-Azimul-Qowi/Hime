@@ -59,7 +59,7 @@ export const HimeSettingsTab: React.FC<HimeSettingsTabProps> = ({ status, onRefr
 		return localStorage.getItem("hime-9router-key") || "";
 	});
 	const [selectedModel, setSelectedModel] = useState<string>(() => {
-		return localStorage.getItem("hime-9router-model") || "openrouter/deepseek/deepseek-chat";
+		return localStorage.getItem("hime-9router-model") || "hime-combo";
 	});
 	const [customModel, setCustomModel] = useState<string>(() => {
 		return localStorage.getItem("hime-9router-custom-model") || "";

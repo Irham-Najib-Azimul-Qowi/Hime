@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Hime Island Code Hygiene & Quality Gate (scripts/check-hygiene.ps1)
 .DESCRIPTION
@@ -24,21 +24,30 @@ Write-Host "=================================================================" -
 Write-Host "  HIME ISLAND CODE HYGIENE AUDIT" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-# 1. Check for unanchored TODO / FIXME (must have issue ID like TODO(H-101))
+# 1. Check for unanchored task anchors (must have issue ID like TODO(H-101))
 $scanDirs = @(
+    "island/src",
+    "island/src-tauri/src",
     "core/crates",
     "modules",
     "contracts",
-    "design"
+    "design",
+    "scripts",
+    "tools"
 )
 
 foreach ($dir in $scanDirs) {
     $fullDir = Join-Path $repoRoot $dir
-    if (-not (Test-Path $fullDir)) { continue }
+    if (-not (Test-Path $fullDir)) {
+        $violations += "Mandatory scan directory does not exist: $dir"
+        continue
+    }
 
-    $files = Get-ChildItem -Path $fullDir -Recurse -File -Exclude "*.lock", "*.png", "*.ico", "*.svg"
+    $files = Get-ChildItem -Path $fullDir -Recurse -File -Exclude "*.lock", "*.png", "*.ico", "*.svg", "*.woff*", "*.ttf", "*.css"
     foreach ($file in $files) {
         $relPath = $file.FullName.Substring($repoRoot.Length + 1).Replace("\", "/")
+        if ($relPath -eq "scripts/check-hygiene.ps1") { continue }
+
         $lines = Get-Content -Path $file.FullName
         $lineNum = 0
         foreach ($line in $lines) {
@@ -54,10 +63,20 @@ foreach ($dir in $scanDirs) {
     }
 }
 
-# 2. Check for leftover mock placeholders in production crates
-$coreSrc = Join-Path $repoRoot "core/crates"
-if (Test-Path $coreSrc) {
-    $rustFiles = Get-ChildItem -Path $coreSrc -Recurse -Filter "*.rs"
+# 2. Check for leftover mock placeholders in production Rust source
+$rustScanDirs = @(
+    "core/crates",
+    "island/src-tauri/src"
+)
+
+foreach ($rDir in $rustScanDirs) {
+    $fullRDir = Join-Path $repoRoot $rDir
+    if (-not (Test-Path $fullRDir)) {
+        $violations += "Mandatory Rust scan directory does not exist: $rDir"
+        continue
+    }
+
+    $rustFiles = Get-ChildItem -Path $fullRDir -Recurse -Filter "*.rs"
     foreach ($file in $rustFiles) {
         $relPath = $file.FullName.Substring($repoRoot.Length + 1).Replace("\", "/")
         if ($relPath -match "/tests/" -or $relPath -match "tests\.rs") { continue }
@@ -70,6 +89,24 @@ if (Test-Path $coreSrc) {
             if ($trimmed -match 'unimplemented!\(' -or $trimmed -match 'todo!\(') {
                 $violations += "${relPath}:${lineNum} - Production unhandled macro: $($trimmed)"
             }
+        }
+    }
+}
+
+# 3. Check for stray temporary log/dump files in root and island
+$strayCheckPatterns = @("*.log", "stderr.txt", "stdout.txt", "*_survey.png")
+$strayCheckDirs = @($repoRoot, (Join-Path $repoRoot "island"))
+foreach ($sDir in $strayCheckDirs) {
+    if (-not (Test-Path $sDir)) {
+        $relSDir = if ($sDir -eq $repoRoot) { "." } else { $sDir.Substring($repoRoot.Length + 1).Replace("\", "/") }
+        $violations += "Mandatory scan directory does not exist: $relSDir"
+        continue
+    }
+    foreach ($pattern in $strayCheckPatterns) {
+        $foundStrays = Get-ChildItem -Path $sDir -Filter $pattern -File -ErrorAction SilentlyContinue
+        foreach ($sFile in $foundStrays) {
+            $relPath = $sFile.FullName.Substring($repoRoot.Length + 1).Replace("\", "/")
+            $violations += "${relPath} - Stray temporary debug artifact detected"
         }
     }
 }

@@ -49,6 +49,8 @@ if (Test-Path $pkgJsonPath) {
     if ($pkgJson.name -ne "hime-island") {
         $violations += "island/package.json name is '$($pkgJson.name)', expected 'hime-island'"
     }
+} else {
+    $violations += "Missing mandatory file: island/package.json"
 }
 
 # 3. Whitelisted paths for GPL-3.0 attribution and legacy reference
@@ -65,16 +67,21 @@ $whitelist = @(
 # 4. Scan active source directories for user-facing UI and logic brand leaks
 $targetDirs = @(
     "island/src",
+    "island/src-tauri/src",
     "core/crates",
     "modules",
     "contracts",
     "design",
-    "scripts"
+    "scripts",
+    "tools"
 )
 
 foreach ($dir in $targetDirs) {
     $fullDir = Join-Path $repoRoot $dir
-    if (-not (Test-Path $fullDir)) { continue }
+    if (-not (Test-Path $fullDir)) {
+        $violations += "Mandatory scan directory does not exist: $dir"
+        continue
+    }
 
     $files = Get-ChildItem -Path $fullDir -Recurse -File -Exclude "*.lock", "*.png", "*.ico", "*.svg", "*.woff*", "*.ttf", "*.css"
     foreach ($file in $files) {
@@ -101,8 +108,8 @@ foreach ($dir in $targetDirs) {
             }
 
             if ($line -match "(?i)\bbloom\b") {
-                # Permissible GPL header or attribution text
-                if ($line -match "derivative work based upon Bloom" -or $line -match "GPL-3.0") {
+                # Permissible GPL header or attribution text, or persona rejection tests
+                if ($line -match "derivative work based upon Bloom" -or $line -match "GPL-3.0" -or $line -match 'lower\.contains\("bloom"\)' -or $line -match 'Apakah kamu Bloom') {
                     continue
                 }
                 # Internal bloom-* settings keys or legacy CSS class names migrating in phase U1 are permitted

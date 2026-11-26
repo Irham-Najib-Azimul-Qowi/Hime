@@ -18,13 +18,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use windows::core::{BOOL, GUID, PCWSTR};
+use windows::core::{BOOL, GUID};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, PROPERTYKEY};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
@@ -39,10 +39,11 @@ use windows::Win32::NetworkManagement::WiFi::{
     WLAN_INTERFACE_STATE,
 };
 use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6};
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
+use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
@@ -568,6 +569,14 @@ fn read_network_status(prev_sample: &mut Option<(Instant, u64, u64)>) -> Network
     }
 }
 
+/// Sanitizes an audio endpoint name, falling back to `"Audio Output"` when empty or a raw GUID.
+pub fn sanitize_audio_device_name(raw: Option<&str>) -> String {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() && !s.starts_with('{') => s.to_string(),
+        _ => "Audio Output".to_string(),
+    }
+}
+
 fn read_volume_status(enumerator: Option<&IMMDeviceEnumerator>) -> VolumeStatus {
     let Some(enum_ref) = enumerator else {
         return VolumeStatus::default();
@@ -580,14 +589,24 @@ fn read_volume_status(enumerator: Option<&IMMDeviceEnumerator>) -> VolumeStatus 
         return VolumeStatus::default();
     };
 
-    let device_name = unsafe {
-        device.GetId().ok().map(|id| {
-            let s = PCWSTR::from_raw(id.0).to_string().unwrap_or_default();
-            CoTaskMemFree(Some(id.0 as *const _));
-            s
+    const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+        pid: 14,
+    };
+
+    let raw_friendly: Option<String> = unsafe {
+        device.OpenPropertyStore(STGM_READ).ok().and_then(|store| {
+            let mut prop: PROPVARIANT = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME).ok()?;
+            let name = if prop.Anonymous.Anonymous.vt == VT_LPWSTR {
+                prop.Anonymous.Anonymous.Anonymous.pwszVal.to_string().ok()
+            } else {
+                None
+            };
+            let _ = PropVariantClear(&mut prop);
+            name
         })
-    }
-    .filter(|s| !s.is_empty());
+    };
+    let device_name = Some(sanitize_audio_device_name(raw_friendly.as_deref()));
 
     let scalar = unsafe { endpoint.GetMasterVolumeLevelScalar() }.unwrap_or(0.0);
     let muted: bool = unsafe { endpoint.GetMute() }
@@ -810,6 +829,20 @@ mod tests {
         assert!(!desktop.present);
         assert!(!desktop.charging);
         assert_eq!(desktop.percent, 0);
+    }
+
+    #[test]
+    fn sanitize_audio_device_name_rejects_guids_and_empty() {
+        assert_eq!(
+            sanitize_audio_device_name(Some("{0.0.0.00000000}.{12345678-1234-1234-1234-1234567890ab}")),
+            "Audio Output"
+        );
+        assert_eq!(sanitize_audio_device_name(Some("   ")), "Audio Output");
+        assert_eq!(sanitize_audio_device_name(None), "Audio Output");
+        assert_eq!(
+            sanitize_audio_device_name(Some("  Speakers (Realtek High Definition Audio)  ")),
+            "Speakers (Realtek High Definition Audio)"
+        );
     }
 
     #[test]
