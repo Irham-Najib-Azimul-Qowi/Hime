@@ -14,9 +14,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
-use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HRGN, RGN_OR,
-};
 
 use crate::animation::SpringValue;
 use crate::d2d::{
@@ -43,7 +40,7 @@ const HANDLE_STRIP_WIDTH: f32 = 80.0;
 const HANDLE_STRIP_HEIGHT: f32 = 4.0;
 const HOVER_SCALE_TARGET: f32 = 1.22;
 const MAX_RUNNING_GROUPS: usize = 12;
-const AUTO_HIDE_GRACE_SECS: f32 = 2.5;
+const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
 const TRAY_ITEM_SIZE: f32 = 24.0;
 const TRAY_FLYOUT_PAD: f32 = 6.0;
 const TRAY_FLYOUT_GAP: f32 = 6.0;
@@ -1310,43 +1307,7 @@ fn point_in_rect(x: f32, y: f32, r: Rect) -> bool {
 }
 
 fn set_dock_regions(surface: &NativeSurface, rects: &[(Rect, f32)]) {
-    if rects.is_empty() {
-        return;
-    }
-    if rects.len() == 1 {
-        surface.set_rounded_region(rects[0].0, rects[0].1);
-        return;
-    }
-
-    let scale = (surface.dpi() / 96.0).max(0.5);
-    let make_rgn = |r: Rect, rad: f32| unsafe {
-        let left = (r.x * scale).round() as i32;
-        let top = (r.y * scale).round() as i32;
-        let right = ((r.x + r.width) * scale).round() as i32 + 1;
-        let bottom = ((r.y + r.height) * scale).round() as i32 + 1;
-        let diam = ((rad * 2.0) * scale).round().max(0.0) as i32;
-        CreateRoundRectRgn(left, top, right, bottom, diam, diam)
-    };
-
-    unsafe {
-        let mut combined: Option<HRGN> = None;
-        for &(r, rad) in rects {
-            let next = make_rgn(r, rad);
-            if next.is_invalid() {
-                continue;
-            }
-            match combined {
-                None => combined = Some(next),
-                Some(acc) => {
-                    let _ = CombineRgn(Some(acc), Some(acc), Some(next), RGN_OR);
-                    let _ = DeleteObject(next.into());
-                }
-            }
-        }
-        if let Some(acc) = combined {
-            let _ = SetWindowRgn(surface.hwnd(), Some(acc), true);
-        }
-    }
+    surface.set_rounded_regions(rects);
 }
 
 #[cfg(test)]
@@ -1651,11 +1612,11 @@ mod tests {
         let visible_rect = dock.dock_rect(surface_rect);
         assert!((visible_rect.y - 62.0).abs() < 2.0);
 
-        // 3. Hover-leave starts 2.5s grace timer, then collapses back to 80x4 strip
+        // 3. Hover-leave starts grace timer, then collapses back to 80x4 strip
         dock.clear_hover();
         dock.set_edge_hovered(false);
         assert!(!dock.is_hidden);
-        assert!(dock.hide_grace_timer() > 2.0);
+        assert!(dock.hide_grace_timer() >= AUTO_HIDE_GRACE_SECS - 0.05);
 
         for _ in 0..240 {
             dock.tick(1.0 / 60.0);

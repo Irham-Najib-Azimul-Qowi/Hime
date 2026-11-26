@@ -53,7 +53,7 @@ impl Default for NativeSettings {
             music_mode_enabled: true,
             suppress_native_notifications: true,
             dock_enabled: true,
-            dock_mode: "fixed".to_string(),
+            dock_mode: "auto-hide".to_string(),
             dock_pinned: Vec::new(),
             dock_win_number_enabled: true,
             volume_overlay_enabled: true,

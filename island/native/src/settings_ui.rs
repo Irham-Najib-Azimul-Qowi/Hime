@@ -252,7 +252,7 @@ impl Default for SettingsState {
             music_mode_enabled: true,
             suppress_native_notifications: true,
             dock_enabled: true,
-            dock_mode: "fixed".to_string(),
+            dock_mode: "auto-hide".to_string(),
             dock_pinned: Vec::new(),
             dock_win_number_enabled: true,
             volume_overlay_enabled: true,
@@ -1487,7 +1487,7 @@ mod tests {
             panel.handle_click(300.0, 185.0),
             Some(SettingsAction::ToggleDockMode)
         );
-        assert_eq!(panel.state.dock_mode, "auto-hide");
+        assert_eq!(panel.state.dock_mode, "smart");
 
         // Switch to Hime AI tab (index 4 -> y = 42 + 68 + 4*38 = 262..296)
         assert_eq!(

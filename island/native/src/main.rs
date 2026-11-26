@@ -45,13 +45,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowExW, FindWindowW,
     GetClassNameA, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongA, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer,
-    LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongA, SetWindowLongPtrW, ShowWindow,
-    TrackPopupMenu, TranslateMessage, GWL_EXSTYLE, GWLP_WNDPROC, HWND_MESSAGE, IDI_APPLICATION,
-    LWA_ALPHA, MF_STRING, MSG, PM_REMOVE, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR,
-    WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+    LoadCursorW, LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongA, SetWindowLongPtrW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, GWL_EXSTYLE, GWLP_WNDPROC, HTCLIENT,
+    HWND_MESSAGE, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_STRING, MSG, PM_REMOVE, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
 };
 
 use hime_island_native::ai_drawer::{
@@ -4591,14 +4592,17 @@ fn main() {
     }
 
     let hinstance = unsafe { GetModuleHandleW(None) }.expect("GetModuleHandleW");
+    let arrow_cursor = unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() };
     let wc = WNDCLASSW {
         lpfnWndProc: Some(controller_wnd_proc),
         hInstance: hinstance.into(),
+        hCursor: arrow_cursor,
         lpszClassName: CONTROLLER_CLASS,
         ..Default::default()
     };
     unsafe {
         RegisterClassW(&wc);
+        let _ = SetCursor(Some(arrow_cursor));
     }
 
     let ctrl_hwnd = unsafe {
@@ -4731,6 +4735,15 @@ unsafe extern "system" fn controller_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_SETCURSOR => {
+            if ((lparam.0 & 0xFFFF) as u32) == HTCLIENT {
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    let _ = SetCursor(Some(arrow));
+                }
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_HOTKEY => {
             if wparam.0 as i32 == HOTKEY_TRANSLATE_CST {
                 APP_SHELL.with(|cell| {

@@ -32,9 +32,10 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BeginPath, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC, DeleteObject,
-    EndPath, LineTo, MoveToEx, PathToRegion, PolyBezierTo, SelectObject, SetWindowRgn,
-    ValidateRect, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    BeginPath, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
+    DeleteObject, EndPath, LineTo, MoveToEx, PathToRegion, PolyBezierTo, SelectObject,
+    SetWindowRgn, ValidateRect, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HRGN,
+    RGN_OR,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -42,13 +43,13 @@ use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetS
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DrawIconEx, GetClassLongPtrW,
-    GetIconInfo, GetWindowLongW, PostMessageW, RegisterClassExW, SendMessageTimeoutW,
-    SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, DI_NORMAL, GCLP_HICON,
-    GCLP_HICONSM, GWL_EXSTYLE, HICON, HWND_TOPMOST, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
-    SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    GetIconInfo, GetWindowLongW, LoadCursorW, PostMessageW, RegisterClassExW, SendMessageTimeoutW,
+    SetCursor, SetWindowLongW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, DI_NORMAL,
+    GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, HICON, HTCLIENT, HWND_TOPMOST, ICONINFO, ICON_BIG,
+    ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_DROPFILES, WM_GETICON,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
@@ -499,6 +500,7 @@ enum RegionKey {
         diam: i32,
     },
     Edge(u64),
+    Multi(u64),
 }
 
 #[derive(Default)]
@@ -748,6 +750,63 @@ impl NativeSurface {
                     *self.last_region_key.borrow_mut() = Some(key);
                 } else {
                     let _ = DeleteObject(rgn.into());
+                }
+            }
+        }
+    }
+
+    /// Clips the window to the union of one or more rounded rectangles in DIPs, keeping
+    /// the surface region cache in sync across transitions (e.g. expanded Dock <-> collapsed strip).
+    pub fn set_rounded_regions(&self, rects: &[(Rect, f32)]) {
+        if rects.is_empty() {
+            return;
+        }
+        if rects.len() == 1 {
+            self.set_rounded_region(rects[0].0, rects[0].1);
+            return;
+        }
+
+        let scale = (self.dpi / 96.0).max(0.5);
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut coords: Vec<(i32, i32, i32, i32, i32)> = Vec::with_capacity(rects.len());
+        for &(r, rad) in rects {
+            let left = (r.x * scale).round() as i32;
+            let top = (r.y * scale).round() as i32;
+            let right = ((r.x + r.width) * scale).round() as i32 + 1;
+            let bottom = ((r.y + r.height) * scale).round() as i32 + 1;
+            let diam = ((rad * 2.0) * scale).round().max(0.0) as i32;
+            for v in [left, top, right, bottom, diam] {
+                hash ^= v as u64;
+                hash = hash.wrapping_mul(0x1000_0000_01b3);
+            }
+            coords.push((left, top, right, bottom, diam));
+        }
+
+        let key = RegionKey::Multi(hash);
+        if *self.last_region_key.borrow() == Some(key) {
+            return;
+        }
+
+        unsafe {
+            let mut combined: Option<HRGN> = None;
+            for (left, top, right, bottom, diam) in coords {
+                let next = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
+                if next.is_invalid() {
+                    continue;
+                }
+                match combined {
+                    None => combined = Some(next),
+                    Some(acc) => {
+                        let _ = CombineRgn(Some(acc), Some(acc), Some(next), RGN_OR);
+                        let _ = DeleteObject(next.into());
+                    }
+                }
+            }
+            if let Some(acc) = combined {
+                if SetWindowRgn(self.hwnd, Some(acc), true) != 0 {
+                    *self.last_region_key.borrow_mut() = Some(key);
+                } else {
+                    let _ = DeleteObject(acc.into());
                 }
             }
         }
@@ -1880,11 +1939,13 @@ impl Drop for NativeSurface {
 
 fn register_window_class(hinstance: HINSTANCE) {
     CLASS_REGISTERED.get_or_init(|| unsafe {
+        let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(surface_wnd_proc),
             hInstance: hinstance,
+            hCursor: cursor,
             lpszClassName: WINDOW_CLASS_NAME,
             ..Default::default()
         };
@@ -1898,6 +1959,13 @@ unsafe extern "system" fn surface_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_SETCURSOR && ((lparam.0 & 0xFFFF) as u32) == HTCLIENT {
+        if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+            let _ = SetCursor(Some(arrow));
+        }
+        return LRESULT(1);
+    }
+
     let kind = match msg {
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as f32;
