@@ -45,7 +45,7 @@ use windows::Win32::NetworkManagement::WiFi::{
 use windows::Win32::Networking::WinSock::{ADDRESS_FAMILY, AF_INET, AF_INET6};
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CoUninitialize, CLSCTX_ALL,
+    CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
     STGM_READ,
 };
@@ -56,7 +56,9 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::System::Variant::VT_LPWSTR;
-use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
+use windows::Win32::UI::Shell::{
+    SHGetKnownFolderPath, Shell_NotifyIconGetRect, KF_FLAG_DEFAULT, NOTIFYICONIDENTIFIER,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, FindWindowExW, GetClassNameA, GetWindow, GetWindowLongW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
@@ -153,6 +155,10 @@ pub fn friendly_app_name(executable: &str) -> String {
         "soundrec" | "windowssoundrecorder" => "Sound Recorder".to_string(),
         "time" | "windowsalarms" => "Clock".to_string(),
         "applicationframehost" => "Windows App".to_string(),
+        "googledrivefs" => "Google Drive".to_string(),
+        "dcv2" => "MSI Center Pro".to_string(),
+        "xmousebuttoncontrol" => "X-Mouse Button Control".to_string(),
+        "securityhealthsystray" => "Windows Security".to_string(),
         _ => {
             let mut chars = stem.chars();
             match chars.next() {
@@ -1573,34 +1579,198 @@ unsafe fn reg_string(hkey: isize, name: &str) -> Option<String> {
     String::from_utf16(&chars).ok()
 }
 
-/// Counts live third-party system tray application icons via `Control Panel\NotifyIconSettings`
-/// verified with `Shell_NotifyIconGetRect`.
-pub fn read_tray_count() -> u32 {
-    const REG_DWORD: u32 = 4;
+const REG_DWORD_TYPE: u32 = 4;
+const REG_BINARY_TYPE: u32 = 3;
 
-    unsafe fn reg_dword(hkey: isize, name: &str) -> Option<u32> {
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let mut kind = 0u32;
-        let mut val = 0u32;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            (&mut val as *mut u32).cast::<u8>(),
-            &mut size,
-        ) == 0
-            && kind == REG_DWORD
-        {
-            Some(val)
-        } else {
-            None
+unsafe fn reg_dword(hkey: isize, name: &str) -> Option<u32> {
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let mut kind = 0u32;
+    let mut val = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    if RegQueryValueExW(
+        hkey,
+        PCWSTR(wide.as_ptr()),
+        std::ptr::null_mut(),
+        &mut kind,
+        (&mut val as *mut u32).cast::<u8>(),
+        &mut size,
+    ) == 0
+        && kind == REG_DWORD_TYPE
+    {
+        Some(val)
+    } else {
+        None
+    }
+}
+
+unsafe fn reg_bytes(hkey: isize, name: &str) -> Option<Vec<u8>> {
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let mut kind = 0u32;
+    let mut size = 0u32;
+    if RegQueryValueExW(
+        hkey,
+        PCWSTR(wide.as_ptr()),
+        std::ptr::null_mut(),
+        &mut kind,
+        std::ptr::null_mut(),
+        &mut size,
+    ) != 0
+        || kind != REG_BINARY_TYPE
+        || size == 0
+        || size > 512 * 1024
+    {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if RegQueryValueExW(
+        hkey,
+        PCWSTR(wide.as_ptr()),
+        std::ptr::null_mut(),
+        &mut kind,
+        buf.as_mut_ptr(),
+        &mut size,
+    ) != 0
+    {
+        return None;
+    }
+    buf.truncate(size as usize);
+    Some(buf)
+}
+
+/// Active background System Tray icon discovered from Windows `NotifyIconSettings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTrayRecord {
+    pub id: String,
+    pub label: String,
+    pub exe_path: String,
+    pub hwnd: isize,
+    pub pid: u32,
+    pub launch_uri: Option<String>,
+    pub icon_png: Option<Vec<u8>>,
+}
+
+/// Resolves Windows Known Folder GUID prefixes (e.g. `{6D809377-...}\Google\...`)
+/// stored in `NotifyIconSettings\ExecutablePath` to full filesystem paths (`C:\Program Files\...`).
+pub fn resolve_known_folder_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return trimmed.to_string();
+    }
+    let Some(close_idx) = trimmed.find('}') else {
+        return trimmed.to_string();
+    };
+    let guid_str = &trimmed[1..close_idx];
+    let Ok(guid) = GUID::try_from(guid_str) else {
+        return trimmed.to_string();
+    };
+    let tail = &trimmed[close_idx + 1..];
+    unsafe {
+        if let Ok(pwstr) = SHGetKnownFolderPath(&guid, KF_FLAG_DEFAULT, None) {
+            if !pwstr.is_null() {
+                let len = (0..32768).take_while(|&i| *pwstr.0.add(i) != 0).count();
+                let base = String::from_utf16_lossy(std::slice::from_raw_parts(pwstr.0, len));
+                CoTaskMemFree(Some(pwstr.0.cast()));
+                return format!("{base}{tail}");
+            }
         }
     }
+    trimmed.to_string()
+}
+
+fn has_active_bluetooth_radio() -> bool {
+    #[repr(C)]
+    struct BluetoothFindRadioParams {
+        dw_size: u32,
+    }
+    unsafe {
+        let Ok(dll) = LoadLibraryW(windows::core::w!("BluetoothApis.dll")) else {
+            return false;
+        };
+        let Some(find_first) = GetProcAddress(dll, windows::core::s!("BluetoothFindFirstRadio"))
+        else {
+            return false;
+        };
+        let Some(find_close) = GetProcAddress(dll, windows::core::s!("BluetoothFindRadioClose"))
+        else {
+            return false;
+        };
+        let find_first_fn: unsafe extern "system" fn(
+            *const BluetoothFindRadioParams,
+            *mut HANDLE,
+        ) -> HANDLE = std::mem::transmute(find_first);
+        let find_close_fn: unsafe extern "system" fn(HANDLE) -> BOOL =
+            std::mem::transmute(find_close);
+        let params = BluetoothFindRadioParams {
+            dw_size: std::mem::size_of::<BluetoothFindRadioParams>() as u32,
+        };
+        let mut radio = HANDLE::default();
+        let search = find_first_fn(&params, &mut radio);
+        if search.0.is_null() {
+            false
+        } else {
+            if !radio.0.is_null() {
+                let _ = CloseHandle(radio);
+            }
+            let _ = find_close_fn(search);
+            true
+        }
+    }
+}
+
+fn enumerate_running_process_exes() -> Vec<(u32, String)> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn K32EnumProcesses(lpid_process: *mut u32, cb: u32, lpcb_needed: *mut u32) -> i32;
+    }
+
+    let mut pids = vec![0u32; 2048];
+    let mut needed = 0u32;
+    unsafe {
+        if K32EnumProcesses(
+            pids.as_mut_ptr(),
+            (pids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut needed,
+        ) == 0
+        {
+            return Vec::new();
+        }
+    }
+    let count = (needed as usize / std::mem::size_of::<u32>()).min(pids.len());
+    let mut result = Vec::with_capacity(count);
+    for &pid in &pids[..count] {
+        if pid == 0 {
+            continue;
+        }
+        unsafe {
+            if let Ok(proc_h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut path_buf = [0u16; 1024];
+                let mut len = path_buf.len() as u32;
+                if QueryFullProcessImageNameW(
+                    proc_h,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(path_buf.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok()
+                {
+                    let exe = String::from_utf16_lossy(&path_buf[..len as usize]);
+                    result.push((pid, exe));
+                }
+                let _ = CloseHandle(proc_h);
+            }
+        }
+    }
+    result
+}
+
+/// Discovers live background & hidden system tray items from `Control Panel\NotifyIconSettings`
+/// matched against running OS processes (`K32EnumProcesses` + Known Folder resolution) and active
+/// Windows system tray items (such as Bluetooth Devices), preserving PNG `IconSnapshot` artwork.
+pub fn collect_live_tray_records() -> Vec<LiveTrayRecord> {
+    const BLUETOOTH_ICON_GUID: &str = "7820AE78-23E3-4229-82C1-E41CB67D5B9C";
 
     unsafe extern "system" fn collect_hwnd_exe(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let out = &mut *(lparam.0 as *mut Vec<(isize, String)>);
+        let out = &mut *(lparam.0 as *mut Vec<(isize, u32, String)>);
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid != 0 {
@@ -1616,7 +1786,7 @@ pub fn read_tray_count() -> u32 {
                 .is_ok()
                 {
                     let exe = String::from_utf16_lossy(&path_buf[..len as usize]);
-                    out.push((hwnd.0 as isize, exe));
+                    out.push((hwnd.0 as isize, pid, exe));
                 }
                 let _ = CloseHandle(proc_h);
             }
@@ -1626,11 +1796,11 @@ pub fn read_tray_count() -> u32 {
 
     unsafe {
         let Some(root) = reg_open(HKEY_CURRENT_USER, "Control Panel\\NotifyIconSettings") else {
-            return 0;
+            return Vec::new();
         };
 
-        let mut windows: Vec<(isize, String)> = Vec::new();
-        let param = LPARAM(&mut windows as *mut Vec<(isize, String)> as isize);
+        let mut windows_list: Vec<(isize, u32, String)> = Vec::new();
+        let param = LPARAM(&mut windows_list as *mut Vec<(isize, u32, String)> as isize);
         let _ = EnumWindows(Some(collect_hwnd_exe), param);
         let mut prev = None;
         while let Ok(hwnd) = FindWindowExW(Some(HWND_MESSAGE), prev, PCWSTR::null(), PCWSTR::null())
@@ -1639,10 +1809,22 @@ pub fn read_tray_count() -> u32 {
             prev = Some(hwnd);
         }
 
+        let mut exe_to_pid: HashMap<String, u32> = HashMap::new();
+        for (pid, exe) in enumerate_running_process_exes() {
+            exe_to_pid.entry(exe.to_ascii_lowercase()).or_insert(pid);
+        }
+        let mut exe_to_hwnd: HashMap<String, isize> = HashMap::new();
+        for (hwnd, pid, exe) in &windows_list {
+            let key = exe.to_ascii_lowercase();
+            exe_to_hwnd.entry(key.clone()).or_insert(*hwnd);
+            exe_to_pid.entry(key).or_insert(*pid);
+        }
+
+        let bt_active = has_active_bluetooth_radio();
         let own_exe = std::env::current_exe()
             .ok()
-            .map(|p| p.to_string_lossy().to_lowercase());
-        let mut unique_apps: HashSet<String> = HashSet::new();
+            .map(|p| p.to_string_lossy().to_ascii_lowercase());
+        let mut by_key: HashMap<String, LiveTrayRecord> = HashMap::new();
 
         for idx in 0..1024u32 {
             let mut name_buf = [0u16; 256];
@@ -1664,54 +1846,150 @@ pub fn read_tray_count() -> u32 {
             let Some(item_key) = reg_open(root, &subkey) else {
                 continue;
             };
-            let exe_path = reg_string(item_key, "ExecutablePath");
+            let raw_exe = reg_string(item_key, "ExecutablePath");
             let icon_guid = reg_string(item_key, "IconGuid");
             let uid = reg_dword(item_key, "UID");
+            let is_promoted = reg_dword(item_key, "IsPromoted");
+            let initial_tooltip = reg_string(item_key, "InitialTooltip");
+            let icon_png = reg_bytes(item_key, "IconSnapshot");
             let _ = RegCloseKey(item_key);
 
-            let Some(path) = exe_path else {
+            if is_promoted == Some(1) {
+                continue;
+            }
+            let Some(raw_exe) = raw_exe else {
                 continue;
             };
-            let lower = path.to_lowercase();
-            if lower.ends_with("\\explorer.exe") || own_exe.as_deref() == Some(lower.as_str()) {
+            if icon_guid.is_none() && uid.is_none() {
                 continue;
             }
 
+            let resolved_exe = resolve_known_folder_path(&raw_exe);
+            let lower = resolved_exe.to_ascii_lowercase();
+            let exe_name = Path::new(&resolved_exe)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("App");
+            let exe_lower = exe_name.to_ascii_lowercase();
+
+            if own_exe.as_deref() == Some(lower.as_str())
+                || matches!(
+                    exe_lower.as_str(),
+                    "svchost.exe"
+                        | "conhost.exe"
+                        | "sihost.exe"
+                        | "runtimebroker.exe"
+                        | "shellexperiencehost.exe"
+                        | "startmenuexperiencehost.exe"
+                        | "searchhost.exe"
+                        | "textinputhost.exe"
+                )
+            {
+                continue;
+            }
+
+            if exe_lower == "explorer.exe" {
+                let norm_guid = icon_guid
+                    .as_deref()
+                    .map(|g| g.trim_start_matches('{').trim_end_matches('}'));
+                if norm_guid.is_some_and(|g| g.eq_ignore_ascii_case(BLUETOOTH_ICON_GUID)) && bt_active
+                {
+                    let key = format!("guid:{BLUETOOTH_ICON_GUID}");
+                    let entry = LiveTrayRecord {
+                        id: key.clone(),
+                        label: "Bluetooth Devices".to_string(),
+                        exe_path: resolved_exe,
+                        hwnd: 0,
+                        pid: 0,
+                        launch_uri: Some("ms-settings:bluetooth".to_string()),
+                        icon_png,
+                    };
+                    by_key.entry(key).or_insert(entry);
+                }
+                continue;
+            }
+
+            let Some(&pid) = exe_to_pid.get(&lower) else {
+                continue;
+            };
+
+            let hwnd = exe_to_hwnd.get(&lower).copied().unwrap_or(0);
             let mut nid = NOTIFYICONIDENTIFIER {
                 cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
                 ..Default::default()
             };
-            let confirmed = if let Some(guid_str) = icon_guid {
-                if let Ok(guid) =
-                    GUID::try_from(guid_str.trim_start_matches('{').trim_end_matches('}'))
-                {
-                    nid.guidItem = guid;
-                    windows.iter().any(|(_, p)| p.eq_ignore_ascii_case(&path))
-                        && Shell_NotifyIconGetRect(&nid).is_ok()
-                } else {
-                    false
-                }
+            let rect_confirmed = if let Some(ref guid_str) = icon_guid {
+                GUID::try_from(guid_str.trim_start_matches('{').trim_end_matches('}'))
+                    .ok()
+                    .is_some_and(|guid| {
+                        nid.guidItem = guid;
+                        Shell_NotifyIconGetRect(&nid).is_ok()
+                    })
             } else if let Some(u) = uid {
-                nid.uID = u;
-                windows.iter().any(|(hwnd, p)| {
-                    if !p.eq_ignore_ascii_case(&path) {
-                        return false;
-                    }
-                    nid.hWnd = HWND(*hwnd as *mut _);
+                hwnd != 0 && {
+                    nid.hWnd = HWND(hwnd as *mut _);
+                    nid.uID = u;
                     Shell_NotifyIconGetRect(&nid).is_ok()
-                })
+                }
             } else {
                 false
             };
 
-            if confirmed {
-                unique_apps.insert(lower);
+            // CLI shells and regular web browsers share EXEs with user sessions even when not tray-hosted;
+            // only keep them if Shell_NotifyIconGetRect actively confirms their tray icon.
+            if matches!(
+                exe_lower.as_str(),
+                "powershell.exe"
+                    | "pwsh.exe"
+                    | "cmd.exe"
+                    | "wt.exe"
+                    | "windowsterminal.exe"
+                    | "chrome.exe"
+                    | "msedge.exe"
+                    | "brave.exe"
+                    | "firefox.exe"
+            ) && !rect_confirmed
+            {
+                continue;
+            }
+
+            let clean_tip = initial_tooltip
+                .as_deref()
+                .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|t| !t.is_empty());
+            let label = clean_tip.unwrap_or_else(|| friendly_app_name(exe_name));
+
+            let candidate = LiveTrayRecord {
+                id: lower.clone(),
+                label,
+                exe_path: resolved_exe,
+                hwnd,
+                pid,
+                launch_uri: None,
+                icon_png,
+            };
+            match by_key.get_mut(&lower) {
+                Some(existing) => {
+                    if existing.icon_png.is_none() && candidate.icon_png.is_some() {
+                        *existing = candidate;
+                    }
+                }
+                None => {
+                    by_key.insert(lower, candidate);
+                }
             }
         }
 
         let _ = RegCloseKey(root);
-        unique_apps.len() as u32
+        let mut records: Vec<LiveTrayRecord> = by_key.into_values().collect();
+        records.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
+        records
     }
+}
+
+/// Counts live background/hidden system tray icons matching `collect_live_tray_records()`.
+pub fn read_tray_count() -> u32 {
+    collect_live_tray_records().len() as u32
 }
 
 fn read_smtc_music(
@@ -2455,5 +2733,21 @@ mod tests {
             );
             assert!(Path::new(&calc_exe).is_file());
         }
+    }
+
+    #[test]
+    fn resolve_known_folder_and_tray_friendly_names() {
+        let sys_resolved =
+            resolve_known_folder_path(r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\SecurityHealthSystray.exe");
+        assert!(
+            sys_resolved.to_ascii_lowercase().ends_with(r"\system32\securityhealthsystray.exe"),
+            "unexpected known folder expansion: {sys_resolved}"
+        );
+        assert_eq!(
+            resolve_known_folder_path(r"C:\Apps\Tool.exe"),
+            r"C:\Apps\Tool.exe"
+        );
+        assert_eq!(friendly_app_name("GoogleDriveFS.exe"), "Google Drive");
+        assert_eq!(friendly_app_name("DCv2.exe"), "MSI Center Pro");
     }
 }

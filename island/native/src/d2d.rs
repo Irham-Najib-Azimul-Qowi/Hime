@@ -407,6 +407,47 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
     }
 }
 
+/// Decodes raw encoded image bytes (e.g. PNG from Windows `IconSnapshot`) via WIC
+/// into `target_w x target_h` 32-bit premultiplied BGRA pixels.
+pub fn decode_image_bytes_bgra_premul(
+    bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+) -> Option<IconRgba> {
+    if bytes.is_empty() || target_w == 0 || target_h == 0 {
+        return None;
+    }
+    let len_u32 = u32::try_from(bytes.len()).ok()?;
+    #[link(name = "shlwapi")]
+    extern "system" {
+        fn SHCreateMemStream(p_init: *const u8, cb_init: u32) -> *mut std::ffi::c_void;
+    }
+
+    decode_via_wic(target_w, target_h, |factory_ptr, f_vtbl| unsafe {
+        let stream_ptr = SHCreateMemStream(bytes.as_ptr(), len_u32);
+        if stream_ptr.is_null() {
+            return None;
+        }
+        let stream = WicComPtr(stream_ptr);
+        // IWICImagingFactory::CreateDecoderFromStream (slot 4)
+        let create_decoder_stream: unsafe extern "system" fn(
+            *mut std::ffi::c_void,
+            *mut std::ffi::c_void,
+            *const GUID,
+            u32,
+            *mut *mut std::ffi::c_void,
+        ) -> HRESULT = std::mem::transmute(*f_vtbl.add(4));
+        let mut decoder_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if create_decoder_stream(factory_ptr, stream.0, std::ptr::null(), 0, &mut decoder_ptr)
+            .is_err()
+            || decoder_ptr.is_null()
+        {
+            return None;
+        }
+        Some(decoder_ptr)
+    })
+}
+
 /// Decodes an image file (PNG/BMP/JPG) via Windows Imaging Component (`IWICImagingFactory`)
 /// into `target_w x target_h` 32-bit premultiplied BGRA pixels.
 pub fn decode_image_bgra_premul(
@@ -419,43 +460,10 @@ pub fn decode_image_bgra_premul(
     }
     let path_str = path.to_str()?;
     let wide_path = to_wide_null(path_str);
-
-    // Verified against wincodec.h
-    const CLSID_WIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
-    const IID_IWIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xec5ec8a9_c395_4314_9c77_54d7a935ff70);
-    const GUID_WIC_32BPP_PBGRA: GUID = GUID::from_u128(0x6fddc324_4e03_4bfe_b185_3d77768dc910);
     const GENERIC_READ: u32 = 0x8000_0000;
     const WIC_DECODE_METADATA_CACHE_ON_DEMAND: u32 = 0;
-    const WIC_DITHER_NONE: u32 = 0;
-    const WIC_PALETTE_CUSTOM: u32 = 0;
-    const WIC_INTERP_FANT: u32 = 3;
 
-    struct RawCom(*mut std::ffi::c_void);
-    impl Drop for RawCom {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    let vtbl = *(self.0 as *const *const usize);
-                    let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
-                        std::mem::transmute(*vtbl.add(2));
-                    release(self.0);
-                }
-            }
-        }
-    }
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let factory_unk: windows::core::IUnknown =
-            CoCreateInstance(&CLSID_WIC_IMAGING_FACTORY, None, CLSCTX_ALL).ok()?;
-        let mut wic_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        if factory_unk.query(&IID_IWIC_IMAGING_FACTORY, &mut wic_ptr).is_err() || wic_ptr.is_null()
-        {
-            return None;
-        }
-        let factory = RawCom(wic_ptr);
-        let f_vtbl = *(factory.0 as *const *const usize);
-
+    decode_via_wic(target_w, target_h, |factory_ptr, f_vtbl| unsafe {
         // IWICImagingFactory::CreateDecoderFromFilename (slot 3)
         let create_decoder: unsafe extern "system" fn(
             *mut std::ffi::c_void,
@@ -467,7 +475,7 @@ pub fn decode_image_bgra_premul(
         ) -> HRESULT = std::mem::transmute(*f_vtbl.add(3));
         let mut decoder_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         if create_decoder(
-            factory.0,
+            factory_ptr,
             PCWSTR(wide_path.as_ptr()),
             std::ptr::null(),
             GENERIC_READ,
@@ -479,7 +487,50 @@ pub fn decode_image_bgra_premul(
         {
             return None;
         }
-        let decoder = RawCom(decoder_ptr);
+        Some(decoder_ptr)
+    })
+}
+
+struct WicComPtr(*mut std::ffi::c_void);
+impl Drop for WicComPtr {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let vtbl = *(self.0 as *const *const usize);
+                let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+                    std::mem::transmute(*vtbl.add(2));
+                release(self.0);
+            }
+        }
+    }
+}
+
+fn decode_via_wic<F>(target_w: u32, target_h: u32, make_decoder: F) -> Option<IconRgba>
+where
+    F: FnOnce(*mut std::ffi::c_void, *const usize) -> Option<*mut std::ffi::c_void>,
+{
+    // Verified against wincodec.h
+    const CLSID_WIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xcacaf262_9370_4615_a13b_9f5539da4c0a);
+    const IID_IWIC_IMAGING_FACTORY: GUID = GUID::from_u128(0xec5ec8a9_c395_4314_9c77_54d7a935ff70);
+    const GUID_WIC_32BPP_PBGRA: GUID = GUID::from_u128(0x6fddc324_4e03_4bfe_b185_3d77768dc910);
+    const WIC_DITHER_NONE: u32 = 0;
+    const WIC_PALETTE_CUSTOM: u32 = 0;
+    const WIC_INTERP_FANT: u32 = 3;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let factory_unk: windows::core::IUnknown =
+            CoCreateInstance(&CLSID_WIC_IMAGING_FACTORY, None, CLSCTX_ALL).ok()?;
+        let mut wic_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        if factory_unk.query(&IID_IWIC_IMAGING_FACTORY, &mut wic_ptr).is_err() || wic_ptr.is_null()
+        {
+            return None;
+        }
+        let factory = WicComPtr(wic_ptr);
+        let f_vtbl = *(factory.0 as *const *const usize);
+
+        let decoder_ptr = make_decoder(factory.0, f_vtbl)?;
+        let decoder = WicComPtr(decoder_ptr);
         let d_vtbl = *(decoder.0 as *const *const usize);
 
         // IWICBitmapDecoder::GetFrame (slot 13)
@@ -492,7 +543,7 @@ pub fn decode_image_bgra_premul(
         if get_frame(decoder.0, 0, &mut frame_ptr).is_err() || frame_ptr.is_null() {
             return None;
         }
-        let frame = RawCom(frame_ptr);
+        let frame = WicComPtr(frame_ptr);
 
         // IWICImagingFactory::CreateBitmapScaler (slot 11)
         let create_scaler: unsafe extern "system" fn(
@@ -503,7 +554,7 @@ pub fn decode_image_bgra_premul(
         if create_scaler(factory.0, &mut scaler_ptr).is_err() || scaler_ptr.is_null() {
             return None;
         }
-        let scaler = RawCom(scaler_ptr);
+        let scaler = WicComPtr(scaler_ptr);
         let s_vtbl = *(scaler.0 as *const *const usize);
 
         // IWICBitmapScaler::Initialize (slot 8)
@@ -527,7 +578,7 @@ pub fn decode_image_bgra_premul(
         if create_conv(factory.0, &mut conv_ptr).is_err() || conv_ptr.is_null() {
             return None;
         }
-        let conv = RawCom(conv_ptr);
+        let conv = WicComPtr(conv_ptr);
         let c_vtbl = *(conv.0 as *const *const usize);
 
         // IWICFormatConverter::Initialize (slot 8)
@@ -5072,6 +5123,12 @@ mod tests {
         .unwrap()
         .expect("UWP Assets PNG decode should succeed under MTA");
         assert_eq!(mta_extracted.width, 48);
+
+        let mem_decoded = decode_image_bytes_bgra_premul(&png, 20, 20)
+            .expect("in-memory PNG bytes should decode via WIC stream");
+        assert_eq!(mem_decoded.width, 20);
+        assert_eq!(mem_decoded.height, 20);
+        assert!(mem_decoded.bgra_premul.chunks_exact(4).any(|px| px[3] > 200));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

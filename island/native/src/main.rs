@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows::core::{w, GUID, PCWSTR, PWSTR};
+use windows::core::{w, PCWSTR};
 use windows::Devices::Radios::{Radio, RadioKind, RadioState};
 use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
 use windows::Win32::Foundation::{
@@ -37,22 +37,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     TRACKMOUSEEVENT, VK_LBUTTON, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
-    NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
+    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BringWindowToTop, CallWindowProcW, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowExW, FindWindowW,
-    GetAncestor, GetClassNameA, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongA,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    KillTimer, LoadCursorW, LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongA,
-    SetWindowLongPtrW, ShowWindow, TrackPopupMenu, TranslateMessage, GA_ROOT, GWL_EXSTYLE,
-    GWLP_WNDPROC, HTCLIENT, HWND_MESSAGE, IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_STRING, MSG,
-    PM_REMOVE, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_RETURNCMD, WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY,
-    WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_TIMER, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+    DefWindowProcW, DestroyMenu, DispatchMessageW, EnumWindows, FindWindowW, GetAncestor,
+    GetClassNameA, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowLongA, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer,
+    LoadCursorW, LoadIconW, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongA, SetWindowLongPtrW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, GA_ROOT, GWL_EXSTYLE, GWLP_WNDPROC, HTCLIENT,
+    IDC_ARROW, IDI_APPLICATION, LWA_ALPHA, MF_STRING, MSG, PM_REMOVE, SW_HIDE, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD,
+    WINDOW_EX_STYLE, WM_APP, WM_CHAR, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WNDPROC,
+    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_OVERLAPPED,
 };
 
 use hime_island_native::ai_drawer::{
@@ -613,6 +613,7 @@ enum OsCommand {
     OpenNotificationCenter,
     CloseWindows(Vec<isize>),
     EndTaskWindows(Vec<isize>),
+    EndTaskPids(Vec<u32>),
 }
 
 struct OsWorker {
@@ -769,6 +770,9 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                 }
                 OsCommand::EndTaskWindows(hwnds) => {
                     os_shell::terminate_processes_by_hwnd(&hwnds);
+                }
+                OsCommand::EndTaskPids(pids) => {
+                    os_shell::terminate_processes_by_pid(&pids);
                 }
                 OsCommand::SetVolume { .. } | OsCommand::SetBrightness(_) => {}
             }
@@ -1926,6 +1930,10 @@ impl AppShell {
                 || prev.music != snap.music
                 || prev.available_wifi != snap.available_wifi
         });
+        let tray_count_changed = self
+            .last_telemetry_snap
+            .as_ref()
+            .is_some_and(|prev| prev.tray_count != snap.tray_count);
         let dock_data_changed = self.last_telemetry_snap.as_ref().is_none_or(|prev| {
             prev.running_windows != snap.running_windows || prev.tray_count != snap.tray_count
         });
@@ -2009,6 +2017,9 @@ impl AppShell {
             self.dock.sync_running_windows(&snap.running_windows);
             let effective_tray = snap.tray_count.max(self.dock.tray_items().len() as u32);
             self.dock.set_system_tray_count(effective_tray);
+            if tray_count_changed {
+                self.os_worker.send(OsCommand::ScanTrayEntries);
+            }
             self.dirty_dock = true;
         }
 
@@ -3129,7 +3140,9 @@ impl AppShell {
             DockAction::ActivateTrayItem(idx) => {
                 if let Some(entry) = self.dock.tray_items().get(idx).cloned() {
                     self.dock.set_tray_open(false);
-                    if (entry.hwnd == 0 || !focus_hwnd(entry.hwnd))
+                    if let Some(ref uri) = entry.launch_uri {
+                        open_shell_uri(uri);
+                    } else if (entry.hwnd == 0 || !focus_hwnd(entry.hwnd))
                         && !entry.exe_path.trim().is_empty()
                     {
                         launch_executable(&entry.exe_path);
@@ -3179,6 +3192,9 @@ impl AppShell {
                         }
                         ContextMenuOp::EndTask(hwnds) => {
                             self.os_worker.send(OsCommand::EndTaskWindows(hwnds));
+                        }
+                        ContextMenuOp::EndTaskPids(pids) => {
+                            self.os_worker.send(OsCommand::EndTaskPids(pids));
                         }
                         ContextMenuOp::FocusOrLaunchTray(idx) => {
                             self.execute_dock_action(DockAction::ActivateTrayItem(idx), ctrl_hwnd);
@@ -4728,258 +4744,16 @@ impl AppShell {
 }
 
 fn collect_live_tray_entries() -> Vec<TrayEntry> {
-    #[link(name = "advapi32")]
-    extern "system" {
-        fn RegOpenKeyExW(
-            hKey: isize,
-            lpSubKey: PCWSTR,
-            ulOptions: u32,
-            samDesired: u32,
-            phkResult: *mut isize,
-        ) -> i32;
-        fn RegEnumKeyExW(
-            hKey: isize,
-            dwIndex: u32,
-            lpName: PWSTR,
-            lpcchName: *mut u32,
-            lpReserved: *mut u32,
-            lpClass: PWSTR,
-            lpcchClass: *mut u32,
-            lpftLastWriteTime: *mut c_void,
-        ) -> i32;
-        fn RegQueryValueExW(
-            hKey: isize,
-            lpValueName: PCWSTR,
-            lpReserved: *mut u32,
-            lpType: *mut u32,
-            lpData: *mut u8,
-            lpcbData: *mut u32,
-        ) -> i32;
-        fn RegCloseKey(hKey: isize) -> i32;
-    }
-
-    const HKEY_CURRENT_USER: isize = -2147483647isize;
-    const KEY_READ: u32 = 0x20019;
-    const REG_SZ: u32 = 1;
-    const REG_DWORD: u32 = 4;
-
-    unsafe fn reg_open(parent: isize, subkey: &str) -> Option<isize> {
-        let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
-        let mut out = 0isize;
-        if RegOpenKeyExW(parent, PCWSTR(wide.as_ptr()), 0, KEY_READ, &mut out) == 0 {
-            Some(out)
-        } else {
-            None
-        }
-    }
-
-    unsafe fn reg_string(hkey: isize, name: &str) -> Option<String> {
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let mut kind = 0u32;
-        let mut size = 0u32;
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            std::ptr::null_mut(),
-            &mut size,
-        ) != 0
-            || kind != REG_SZ
-            || size == 0
-            || size > 65536
-        {
-            return None;
-        }
-        let mut buf = vec![0u8; size as usize];
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            buf.as_mut_ptr(),
-            &mut size,
-        ) != 0
-        {
-            return None;
-        }
-        let chars: Vec<u16> = buf[..size as usize]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|&ch| ch != 0)
-            .collect();
-        String::from_utf16(&chars).ok()
-    }
-
-    unsafe fn reg_dword(hkey: isize, name: &str) -> Option<u32> {
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let mut kind = 0u32;
-        let mut val = 0u32;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            (&mut val as *mut u32).cast::<u8>(),
-            &mut size,
-        ) == 0
-            && kind == REG_DWORD
-        {
-            Some(val)
-        } else {
-            None
-        }
-    }
-
-    unsafe extern "system" fn collect_hwnd_exe(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-        let out = &mut *(lparam.0 as *mut Vec<(isize, String)>);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != 0 {
-            if let Ok(proc_h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-                let mut path_buf = [0u16; 1024];
-                let mut len = path_buf.len() as u32;
-                if QueryFullProcessImageNameW(
-                    proc_h,
-                    PROCESS_NAME_WIN32,
-                    PWSTR(path_buf.as_mut_ptr()),
-                    &mut len,
-                )
-                .is_ok()
-                {
-                    let exe = String::from_utf16_lossy(&path_buf[..len as usize]);
-                    out.push((hwnd.0 as isize, exe));
-                }
-                let _ = CloseHandle(proc_h);
-            }
-        }
-        true.into()
-    }
-
-    unsafe {
-        let Some(root) = reg_open(HKEY_CURRENT_USER, "Control Panel\\NotifyIconSettings") else {
-            return Vec::new();
-        };
-
-        let mut windows_list: Vec<(isize, String)> = Vec::new();
-        let param = LPARAM(&mut windows_list as *mut Vec<(isize, String)> as isize);
-        let _ = EnumWindows(Some(collect_hwnd_exe), param);
-        let mut prev = None;
-        while let Ok(hwnd) = FindWindowExW(Some(HWND_MESSAGE), prev, PCWSTR::null(), PCWSTR::null())
-        {
-            let _ = collect_hwnd_exe(hwnd, param);
-            prev = Some(hwnd);
-        }
-
-        let own_exe = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().to_lowercase());
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut entries = Vec::new();
-
-        for idx in 0..1024u32 {
-            let mut name_buf = [0u16; 256];
-            let mut name_len = name_buf.len() as u32;
-            if RegEnumKeyExW(
-                root,
-                idx,
-                PWSTR(name_buf.as_mut_ptr()),
-                &mut name_len,
-                std::ptr::null_mut(),
-                PWSTR::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) != 0
-            {
-                break;
-            }
-            let subkey = String::from_utf16_lossy(&name_buf[..name_len as usize]);
-            let Some(item_key) = reg_open(root, &subkey) else {
-                continue;
-            };
-            let exe_path = reg_string(item_key, "ExecutablePath");
-            let icon_guid = reg_string(item_key, "IconGuid");
-            let uid = reg_dword(item_key, "UID");
-            let _ = RegCloseKey(item_key);
-
-            let Some(path) = exe_path else {
-                continue;
-            };
-            let lower = path.to_lowercase();
-            let exe_name = Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("App");
-            let exe_lower = exe_name.to_ascii_lowercase();
-            if own_exe.as_deref() == Some(lower.as_str())
-                || matches!(
-                    exe_lower.as_str(),
-                    "explorer.exe"
-                        | "svchost.exe"
-                        | "conhost.exe"
-                        | "sihost.exe"
-                        | "runtimebroker.exe"
-                        | "shellexperiencehost.exe"
-                        | "startmenuexperiencehost.exe"
-                        | "searchhost.exe"
-                        | "textinputhost.exe"
-                )
-            {
-                continue;
-            }
-            if seen.contains(&lower) {
-                continue;
-            }
-
-            let mut nid = NOTIFYICONIDENTIFIER {
-                cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                ..Default::default()
-            };
-            let matched_hwnd = if let Some(guid_str) = icon_guid {
-                if let Ok(guid) =
-                    GUID::try_from(guid_str.trim_start_matches('{').trim_end_matches('}'))
-                {
-                    nid.guidItem = guid;
-                    let _ = Shell_NotifyIconGetRect(&nid);
-                    windows_list
-                        .iter()
-                        .find(|(_, p)| p.eq_ignore_ascii_case(&path))
-                        .map(|(h, _)| *h)
-                } else {
-                    None
-                }
-            } else if let Some(u) = uid {
-                nid.uID = u;
-                windows_list
-                    .iter()
-                    .find(|(hwnd, p)| {
-                        if !p.eq_ignore_ascii_case(&path) {
-                            return false;
-                        }
-                        nid.hWnd = HWND(*hwnd as *mut _);
-                        let _ = Shell_NotifyIconGetRect(&nid);
-                        true
-                    })
-                    .map(|(h, _)| *h)
-            } else {
-                windows_list
-                    .iter()
-                    .find(|(_, p)| p.eq_ignore_ascii_case(&path))
-                    .map(|(h, _)| *h)
-            };
-
-            if let Some(hwnd) = matched_hwnd {
-                seen.insert(lower.clone());
-                let label = telemetry::friendly_app_name(exe_name);
-                entries.push(TrayEntry::new(lower, label, path, hwnd));
-            }
-        }
-
-        let _ = RegCloseKey(root);
-        entries.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
-        entries
-    }
+    telemetry::collect_live_tray_records()
+        .into_iter()
+        .map(|rec| {
+            let mut entry = TrayEntry::new(rec.id, rec.label, rec.exe_path, rec.hwnd);
+            entry.pid = rec.pid;
+            entry.launch_uri = rec.launch_uri;
+            entry.icon_png = rec.icon_png;
+            entry
+        })
+        .collect()
 }
 
 fn find_native_toast_hwnds() -> Vec<HWND> {

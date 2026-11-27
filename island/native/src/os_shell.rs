@@ -1250,6 +1250,19 @@ pub fn close_windows_by_hwnd(hwnds: &[isize]) {
     }
 }
 
+fn terminate_pid_guarded(pid: u32, own_pid: u32, terminated: &mut Vec<u32>) {
+    if pid == 0 || pid == own_pid || terminated.contains(&pid) {
+        return;
+    }
+    unsafe {
+        if let Ok(proc_h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(proc_h, 1);
+            let _ = CloseHandle(proc_h);
+            terminated.push(pid);
+        }
+    }
+}
+
 /// Terminates unique non-self processes owning `hwnds` (matching Windows 11 "End task").
 pub fn terminate_processes_by_hwnd(hwnds: &[isize]) {
     let own_pid = unsafe { GetCurrentProcessId() };
@@ -1265,15 +1278,17 @@ pub fn terminate_processes_by_hwnd(hwnds: &[isize]) {
                 continue;
             }
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid == 0 || pid == own_pid || terminated_pids.contains(&pid) {
-                continue;
-            }
-            if let Ok(proc_h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                let _ = TerminateProcess(proc_h, 1);
-                let _ = CloseHandle(proc_h);
-                terminated_pids.push(pid);
-            }
         }
+        terminate_pid_guarded(pid, own_pid, &mut terminated_pids);
+    }
+}
+
+/// Terminates a list of non-self process IDs safely (used when tray apps have no top-level HWND).
+pub fn terminate_processes_by_pid(pids: &[u32]) {
+    let own_pid = unsafe { GetCurrentProcessId() };
+    let mut terminated_pids = Vec::new();
+    for &pid in pids {
+        terminate_pid_guarded(pid, own_pid, &mut terminated_pids);
     }
 }
 

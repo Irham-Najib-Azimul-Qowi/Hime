@@ -42,10 +42,10 @@ const MAGNIFY_EFFECT_WIDTH: f32 = 190.0;
 const BOUNCE_DURATION_SECS: f32 = 0.38;
 const MAX_RUNNING_GROUPS: usize = 12;
 const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
-const TRAY_ITEM_SIZE: f32 = 30.0;
+const TRAY_ITEM_SIZE: f32 = 36.0;
 const TRAY_GRID_COLS: usize = 5;
 const TRAY_FLYOUT_PAD: f32 = 8.0;
-const TRAY_FLYOUT_GAP: f32 = 6.0;
+const TRAY_FLYOUT_GAP: f32 = 4.0;
 const SPACES_FLYOUT_PAD: f32 = 5.0;
 const SPACES_FLYOUT_GAP: f32 = 5.0;
 const SPACES_PILL_HEIGHT: f32 = 26.0;
@@ -76,6 +76,12 @@ pub struct TrayEntry {
     pub exe_path: String,
     #[serde(default)]
     pub hwnd: isize,
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub launch_uri: Option<String>,
+    #[serde(skip, default)]
+    pub icon_png: Option<Vec<u8>>,
     #[serde(skip, default)]
     pub icon: Option<IconRgba>,
 }
@@ -93,6 +99,9 @@ impl TrayEntry {
             label: label.into(),
             exe_path: exe_path.into(),
             hwnd,
+            pid: 0,
+            launch_uri: None,
+            icon_png: None,
             icon: None,
         }
     }
@@ -166,6 +175,7 @@ pub enum ContextMenuOp {
     OpenFileLocation(String),
     CloseWindows(Vec<isize>),
     EndTask(Vec<isize>),
+    EndTaskPids(Vec<u32>),
     FocusOrLaunchTray(usize),
     OpenTaskbarSettings,
 }
@@ -740,21 +750,30 @@ impl DockBar {
             op: ContextMenuOp::FocusOrLaunchTray(index),
             is_task: false,
         }];
-        if !entry.exe_path.trim().is_empty() {
-            menu_items.push(ContextMenuItem {
-                label: "Open file location".to_string(),
-                icon: ContextMenuIcon::Folder,
-                op: ContextMenuOp::OpenFileLocation(entry.exe_path.clone()),
-                is_task: false,
-            });
-        }
-        if entry.hwnd != 0 {
-            menu_items.push(ContextMenuItem {
-                label: "End task".to_string(),
-                icon: ContextMenuIcon::EndTask,
-                op: ContextMenuOp::EndTask(vec![entry.hwnd]),
-                is_task: false,
-            });
+        if entry.launch_uri.is_none() {
+            if !entry.exe_path.trim().is_empty() {
+                menu_items.push(ContextMenuItem {
+                    label: "Open file location".to_string(),
+                    icon: ContextMenuIcon::Folder,
+                    op: ContextMenuOp::OpenFileLocation(entry.exe_path.clone()),
+                    is_task: false,
+                });
+            }
+            if entry.hwnd != 0 {
+                menu_items.push(ContextMenuItem {
+                    label: "End task".to_string(),
+                    icon: ContextMenuIcon::EndTask,
+                    op: ContextMenuOp::EndTask(vec![entry.hwnd]),
+                    is_task: false,
+                });
+            } else if entry.pid != 0 {
+                menu_items.push(ContextMenuItem {
+                    label: "End task".to_string(),
+                    icon: ContextMenuIcon::EndTask,
+                    op: ContextMenuOp::EndTaskPids(vec![entry.pid]),
+                    is_task: false,
+                });
+            }
         }
         menu_items.push(ContextMenuItem {
             label: "Taskbar settings".to_string(),
@@ -786,9 +805,14 @@ impl DockBar {
         }
     }
 
-    /// Replaces the System Tray item list, resolving HICONs once per entry and updating `system_tray_count`.
+    /// Replaces the System Tray item list, preferring Windows `IconSnapshot` PNG icons with HICON/EXE fallback.
     pub fn set_tray_items(&mut self, mut items: Vec<TrayEntry>) {
         for entry in &mut items {
+            if entry.icon.is_none() {
+                if let Some(ref png) = entry.icon_png {
+                    entry.icon = crate::d2d::decode_image_bytes_bgra_premul(png, 36, 36);
+                }
+            }
             if entry.icon.is_none() && (entry.hwnd != 0 || !entry.exe_path.trim().is_empty()) {
                 entry.icon = self.resolve_icon(entry.hwnd, &entry.exe_path);
             }
@@ -2192,12 +2216,12 @@ impl DockBar {
                     for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
                         let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
                         surface.draw_icon_button(*r, 7.0, hovered, false, false)?;
-                        let icon_inset = 4.0_f32;
+                        let icon_inset = 7.0_f32;
                         let icon_rect = Rect::new(
                             r.x + icon_inset,
                             r.y + icon_inset,
-                            (r.width - icon_inset * 2.0).max(14.0),
-                            (r.height - icon_inset * 2.0).max(14.0),
+                            (r.width - icon_inset * 2.0).max(16.0),
+                            (r.height - icon_inset * 2.0).max(16.0),
                         );
                         if let Some(ref icon_rgba) = entry.icon {
                             surface.draw_bgra_bitmap(
@@ -2205,7 +2229,7 @@ impl DockBar {
                                 icon_rgba.width,
                                 icon_rgba.height,
                                 &icon_rgba.bgra_premul,
-                                4.0,
+                                2.0,
                             )?;
                         } else {
                             let initial = entry
