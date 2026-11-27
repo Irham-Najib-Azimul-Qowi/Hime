@@ -2278,13 +2278,58 @@ impl NativeSurface {
         drop(backdrop_ref);
 
         let dest = rect.to_d2d();
-        self.d2d_target.DrawBitmap(
-            &bitmap,
-            Some(&dest),
-            1.0,
-            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-            None,
-        );
+        let r = style
+            .corner_radius
+            .max(0.0)
+            .min(rect.width * 0.5)
+            .min(rect.height * 0.5);
+
+        if edge_params.is_none() && r > 0.0 {
+            let clip_rr = D2D1_ROUNDED_RECT {
+                rect: dest,
+                radiusX: r,
+                radiusY: r,
+            };
+            let clip_geo = self.d2d_factory.CreateRoundedRectangleGeometry(&clip_rr)?;
+            let layer = {
+                let existing = self.cached_layer.borrow().clone();
+                if let Some(layer) = existing {
+                    layer
+                } else {
+                    let created = self.d2d_target.CreateLayer(None)?;
+                    *self.cached_layer.borrow_mut() = Some(created.clone());
+                    created
+                }
+            };
+            let mut layer_params = D2D1_LAYER_PARAMETERS {
+                contentBounds: dest,
+                geometricMask: std::mem::ManuallyDrop::new(Some(clip_geo.into())),
+                maskAntialiasMode: Default::default(),
+                maskTransform: windows_numerics::Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: Default::default(),
+            };
+            self.d2d_target.PushLayer(&layer_params, &layer);
+            self.d2d_target.DrawBitmap(
+                &bitmap,
+                Some(&dest),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+            self.d2d_target.PopLayer();
+            std::mem::ManuallyDrop::drop(&mut layer_params.geometricMask);
+            std::mem::ManuallyDrop::drop(&mut layer_params.opacityBrush);
+        } else {
+            self.d2d_target.DrawBitmap(
+                &bitmap,
+                Some(&dest),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
 
         // Crisp 1px D2D vector optical rim/outline at native DPI
         let border_col = match style.variant {
@@ -2299,11 +2344,6 @@ impl NativeSurface {
             let geo = self.build_contour_geometry(&ops)?;
             self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
         } else {
-            let r = style
-                .corner_radius
-                .max(0.0)
-                .min(rect.width * 0.5)
-                .min(rect.height * 0.5);
             let border_rr = D2D1_ROUNDED_RECT {
                 rect: Rect::new(
                     rect.x + 0.5,
@@ -3928,18 +3968,12 @@ fn sdg_rrect(px: f32, py: f32, hw: f32, hh: f32, r: f32, soft: f32) -> (f32, f32
     let wy = py.abs() - (hh - r);
     let g = wx.max(wy);
     if g > 0.0 {
+        // Exact Euclidean circular corner arc (L^2) matching Direct2D's `D2D1_ROUNDED_RECT`
+        // so glass refraction and 1px border geometry align with zero corner overhang.
         let qx = wx.max(1e-7);
         let qy = wy.max(1e-7);
-        if r <= 0.5 {
-            let l = qx.hypot(qy);
-            return (l - r, sx * qx / l, sy * qy / l);
-        }
-        const N: f32 = 2.79;
-        let l = (qx.powf(N) + qy.powf(N)).powf(1.0 / N);
-        let gx = (qx / l).powf(N - 1.0);
-        let gy = (qy / l).powf(N - 1.0);
-        let gl = gx.hypot(gy).max(1e-6);
-        return ((l - r) / gl, sx * gx / gl, sy * gy / gl);
+        let l = qx.hypot(qy).max(1e-6);
+        return (l - r, sx * qx / l, sy * qy / l);
     }
     let inv_s = 1.0 / soft.max(1e-3);
     let ex = ((wx - g) * inv_s).exp();
@@ -4841,6 +4875,9 @@ mod tests {
         unsafe {
             let dib = surface.dib.borrow();
             assert_eq!(dib.pixel_bgra(2, 2), Some([0, 0, 0, 0]));
+            // Corner pixel inside bounding rect (20,20) but outside r=16 circular corner arc:
+            // distance from arc center (36,36) to (21,21) = sqrt(15^2 + 15^2) = 21.21 > 16 => alpha 0.
+            assert_eq!(dib.pixel_bgra(21, 21), Some([0, 0, 0, 0]));
             let interior = dib.pixel_bgra(75, 50).unwrap();
             assert!(
                 interior[0] < 90 && interior[1] < 90 && interior[2] < 90 && interior[3] > 220,
