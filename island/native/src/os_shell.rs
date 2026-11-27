@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{BOOL, PCSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
@@ -27,7 +27,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DeleteDC, DeleteObject, FillRect,
     GetDC, GetMonitorInfoW, GetSysColor, MonitorFromPoint, ReleaseDC, SelectObject,
     SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BACKGROUND,
-    DIB_RGB_COLORS, HALFTONE, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
+    DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    SRCCOPY,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ABM_GETSTATE, ABM_GETTASKBARPOS,
@@ -38,8 +39,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LEFT, VK_LWIN, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics, GetWindowLongA,
-    GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, SetForegroundWindow,
+    EnumChildWindows, EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics,
+    GetWindowLongA, GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongA, SetWindowLongW, SetWindowPos, ShowWindow,
     GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_HIDEWINDOW, SWP_NOACTIVATE,
@@ -1191,6 +1192,133 @@ pub struct CapturedBackdrop {
     pub bgra: Vec<u8>,
 }
 
+#[derive(Debug, Default)]
+struct GdiBackdropScratch {
+    cap_dc: HDC,
+    cap_dib: HBITMAP,
+    cap_old: HGDIOBJ,
+    cap_bits: *mut c_void,
+    cap_w: u32,
+    cap_h: u32,
+    win_dc: HDC,
+    win_dib: HBITMAP,
+    win_old: HGDIOBJ,
+    win_w: i32,
+    win_h: i32,
+}
+
+impl Drop for GdiBackdropScratch {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.cap_dc.0.is_null() {
+                if !self.cap_dib.0.is_null() {
+                    let _ = SelectObject(self.cap_dc, self.cap_old);
+                    let _ = DeleteObject(self.cap_dib.into());
+                }
+                let _ = DeleteDC(self.cap_dc);
+            }
+            if !self.win_dc.0.is_null() {
+                if !self.win_dib.0.is_null() {
+                    let _ = SelectObject(self.win_dc, self.win_old);
+                    let _ = DeleteObject(self.win_dib.into());
+                }
+                let _ = DeleteDC(self.win_dc);
+            }
+        }
+    }
+}
+
+impl GdiBackdropScratch {
+    unsafe fn ensure_cap_surface(&mut self, w: u32, h: u32) -> Option<(HDC, *mut u8, usize)> {
+        if self.cap_dc.0.is_null() {
+            self.cap_dc = CreateCompatibleDC(None);
+            if self.cap_dc.0.is_null() {
+                return None;
+            }
+            let _ = SetStretchBltMode(self.cap_dc, HALFTONE);
+        }
+        if self.cap_dib.0.is_null() || self.cap_w != w || self.cap_h != h {
+            if !self.cap_dib.0.is_null() {
+                let _ = SelectObject(self.cap_dc, self.cap_old);
+                let _ = DeleteObject(self.cap_dib.into());
+                self.cap_dib = HBITMAP::default();
+                self.cap_bits = std::ptr::null_mut();
+            }
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w as i32,
+                    biHeight: -(h as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let dib =
+                CreateDIBSection(Some(self.cap_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+                    .ok()?;
+            self.cap_old = SelectObject(self.cap_dc, dib.into());
+            self.cap_dib = dib;
+            self.cap_bits = bits;
+            self.cap_w = w;
+            self.cap_h = h;
+        }
+        if self.cap_bits.is_null() {
+            return None;
+        }
+        let byte_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        Some((self.cap_dc, self.cap_bits as *mut u8, byte_len))
+    }
+
+    unsafe fn ensure_win_surface(&mut self, w: i32, h: i32) -> Option<HDC> {
+        if self.win_dc.0.is_null() {
+            self.win_dc = CreateCompatibleDC(None);
+            if self.win_dc.0.is_null() {
+                return None;
+            }
+        }
+        if self.win_dib.0.is_null() || self.win_w < w || self.win_h < h {
+            if !self.win_dib.0.is_null() {
+                let _ = SelectObject(self.win_dc, self.win_old);
+                let _ = DeleteObject(self.win_dib.into());
+                self.win_dib = HBITMAP::default();
+            }
+            let alloc_w = w.max(self.win_w);
+            let alloc_h = h.max(self.win_h);
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: alloc_w,
+                    biHeight: -alloc_h,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let dib = CreateDIBSection(
+                Some(self.win_dc),
+                &bmi,
+                DIB_RGB_COLORS,
+                &mut bits,
+                None,
+                0,
+            )
+            .ok()?;
+            self.win_old = SelectObject(self.win_dc, dib.into());
+            self.win_dib = dib;
+            self.win_w = alloc_w;
+            self.win_h = alloc_h;
+        }
+        Some(self.win_dc)
+    }
+}
+
 /// Captures desktop wallpaper + visible non-Hime windows underneath a surface without
 /// `WDA_EXCLUDEFROMCAPTURE` (keeping screenshots intact and steady-state RAM tiny).
 #[derive(Debug, Default)]
@@ -1198,10 +1326,14 @@ pub struct BackdropCapturer {
     cached_wallpaper_path: Option<String>,
     cached_wallpaper_color: u32,
     cached_wallpaper_screen: Option<ScreenBounds>,
+    wallpaper_checked_at: Option<Instant>,
     wallpaper_w: u32,
     wallpaper_h: u32,
     wallpaper_bgra: Vec<u8>,
+    scratch: GdiBackdropScratch,
 }
+
+unsafe impl Send for BackdropCapturer {}
 
 impl BackdropCapturer {
     pub fn new() -> Self {
@@ -1246,6 +1378,7 @@ impl BackdropCapturer {
         let primary = primary_screen_bounds();
         self.ensure_wallpaper_cache(primary);
         let bgra = composite_windows_below(
+            &mut self.scratch,
             screen_x,
             screen_y,
             width as i32,
@@ -1264,6 +1397,17 @@ impl BackdropCapturer {
     }
 
     fn ensure_wallpaper_cache(&mut self, screen: ScreenBounds) {
+        let now = Instant::now();
+        if self.cached_wallpaper_screen == Some(screen)
+            && !self.wallpaper_bgra.is_empty()
+            && self
+                .wallpaper_checked_at
+                .is_some_and(|t| now.duration_since(t) < Duration::from_millis(500))
+        {
+            return;
+        }
+        self.wallpaper_checked_at = Some(now);
+
         let wp_path = query_desktop_wallpaper_path();
         let bg_color = unsafe { GetSysColor(COLOR_BACKGROUND) };
         if self.cached_wallpaper_screen == Some(screen)
@@ -1519,11 +1663,69 @@ struct BackdropWinSearch<'a> {
     windows: Vec<BackdropWinCandidate>,
 }
 
+fn collect_live_wallpaper_children(desktop_hwnd: HWND, search: &mut BackdropWinSearch<'_>) {
+    unsafe extern "system" fn child_proc(child: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut BackdropWinSearch<'_>);
+        let raw = child.0 as isize;
+        if search.exclude_hwnds.contains(&raw) || !IsWindowVisible(child).as_bool() {
+            return BOOL(1);
+        }
+        let mut class = [0u8; 64];
+        let len = GetClassNameA(child, &mut class);
+        if len > 0 {
+            let cls = &class[..len as usize];
+            if matches!(
+                cls,
+                b"SHELLDLL_DefView" | b"FolderView" | b"SysListView32" | b"WorkerW" | b"Progman"
+            ) {
+                return BOOL(1);
+            }
+        }
+        let mut rect = RECT::default();
+        if DwmGetWindowAttribute(
+            child,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut _ as *mut c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_err()
+            && GetWindowRect(child, &mut rect).is_err()
+        {
+            return BOOL(1);
+        }
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return BOOL(1);
+        }
+        let intersects = rect.left < search.region.right
+            && rect.right > search.region.left
+            && rect.top < search.region.bottom
+            && rect.bottom > search.region.top;
+        if intersects {
+            search.windows.push(BackdropWinCandidate { hwnd: child, rect });
+        }
+        BOOL(1)
+    }
+
+    unsafe {
+        let _ = EnumChildWindows(
+            Some(desktop_hwnd),
+            Some(child_proc),
+            LPARAM(search as *mut BackdropWinSearch<'_> as isize),
+        );
+    }
+}
+
 fn collect_intersecting_windows(region: RECT, exclude_hwnds: &[isize]) -> Vec<BackdropWinCandidate> {
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let search = &mut *(lparam.0 as *mut BackdropWinSearch<'_>);
         let raw = hwnd.0 as isize;
-        if search.exclude_hwnds.contains(&raw) || is_desktop_shell_hwnd(hwnd) {
+        if search.exclude_hwnds.contains(&raw) {
+            return BOOL(1);
+        }
+        if is_desktop_shell_hwnd(hwnd) {
+            if IsWindowVisible(hwnd).as_bool() {
+                collect_live_wallpaper_children(hwnd, search);
+            }
             return BOOL(1);
         }
         if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
@@ -1622,6 +1824,7 @@ pub fn visible_window_layout_hash(bounds: (i32, i32, u32, u32), exclude_hwnds: &
 
 #[allow(clippy::too_many_arguments)]
 fn composite_windows_below(
+    scratch: &mut GdiBackdropScratch,
     sx: i32,
     sy: i32,
     sw: i32,
@@ -1648,37 +1851,12 @@ fn composite_windows_below(
     let windows_below = collect_intersecting_windows(region, exclude_hwnds);
 
     unsafe {
-        let cap_dc = CreateCompatibleDC(None);
-        if cap_dc.0.is_null() {
-            return None;
-        }
-        let cap_bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: cap_w as i32,
-                biHeight: -(cap_h as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut cap_bits: *mut c_void = std::ptr::null_mut();
-        let Ok(cap_dib) =
-            CreateDIBSection(Some(cap_dc), &cap_bmi, DIB_RGB_COLORS, &mut cap_bits, None, 0)
-        else {
-            let _ = DeleteDC(cap_dc);
-            return None;
-        };
-        let cap_old = SelectObject(cap_dc, cap_dib.into());
-        let byte_len = (cap_w as usize).saturating_mul(cap_h as usize).saturating_mul(4);
+        let (cap_dc, cap_bits, byte_len) = scratch.ensure_cap_surface(cap_w, cap_h)?;
 
         // 1. Seed cap_dc with the matching slice of cached wallpaper (or desktop background color).
         if wp_w > 0
             && wp_h > 0
             && wp_bytes.len() == (wp_w as usize * wp_h as usize * 4)
-            && !cap_bits.is_null()
         {
             sample_wallpaper_slice(
                 wp_bytes,
@@ -1688,7 +1866,7 @@ fn composite_windows_below(
                 region,
                 cap_w,
                 cap_h,
-                std::slice::from_raw_parts_mut(cap_bits as *mut u8, byte_len),
+                std::slice::from_raw_parts_mut(cap_bits, byte_len),
             );
         } else {
             let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(
@@ -1704,96 +1882,59 @@ fn composite_windows_below(
             let _ = DeleteObject(brush.into());
         }
 
-        // 2. Composite visible non-Hime windows below Hime Z-order onto cap_dc.
+        // 2. Composite visible non-Hime windows below Hime Z-order onto cap_dc reusing cached win_dib.
         if !windows_below.is_empty() {
-            let _ = SetStretchBltMode(cap_dc, HALFTONE);
-            let win_dc = CreateCompatibleDC(None);
-            if !win_dc.0.is_null() {
-                for cand in windows_below {
-                    let win_w = (cand.rect.right - cand.rect.left).clamp(1, screen.width.max(1));
-                    let win_h = (cand.rect.bottom - cand.rect.top).clamp(1, screen.height.max(1));
-                    let win_bmi = BITMAPINFO {
-                        bmiHeader: BITMAPINFOHEADER {
-                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                            biWidth: win_w,
-                            biHeight: -win_h,
-                            biPlanes: 1,
-                            biBitCount: 32,
-                            biCompression: BI_RGB.0,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    };
-                    let mut win_bits: *mut c_void = std::ptr::null_mut();
-                    let Ok(win_dib) = CreateDIBSection(
-                        Some(win_dc),
-                        &win_bmi,
-                        DIB_RGB_COLORS,
-                        &mut win_bits,
-                        None,
-                        0,
-                    ) else {
-                        continue;
-                    };
-                    let win_old = SelectObject(win_dc, win_dib.into());
-                    let ok = PrintWindow(cand.hwnd, win_dc, PW_RENDERFULLCONTENT).as_bool()
-                        || PrintWindow(cand.hwnd, win_dc, 0).as_bool();
-                    if ok {
-                        let ix0 = cand.rect.left.max(region.left);
-                        let iy0 = cand.rect.top.max(region.top);
-                        let ix1 = cand.rect.right.min(region.right);
-                        let iy1 = cand.rect.bottom.min(region.bottom);
-                        let iw = (ix1 - ix0).max(0);
-                        let ih = (iy1 - iy0).max(0);
-                        if iw > 0 && ih > 0 {
-                            let src_x = ix0 - cand.rect.left;
-                            let src_y = iy0 - cand.rect.top;
-                            let dst_x = (((ix0 - region.left) as f32 / sw.max(1) as f32)
-                                * cap_w as f32)
-                                .floor() as i32;
-                            let dst_y = (((iy0 - region.top) as f32 / sh.max(1) as f32)
-                                * cap_h as f32)
-                                .floor() as i32;
-                            let dst_w =
-                                (((iw as f32 / sw.max(1) as f32) * cap_w as f32).ceil() as i32)
-                                    .max(1);
-                            let dst_h =
-                                (((ih as f32 / sh.max(1) as f32) * cap_h as f32).ceil() as i32)
-                                    .max(1);
-                            let _ = StretchBlt(
-                                cap_dc,
-                                dst_x,
-                                dst_y,
-                                dst_w,
-                                dst_h,
-                                Some(win_dc),
-                                src_x,
-                                src_y,
-                                iw,
-                                ih,
-                                SRCCOPY,
-                            );
-                        }
+            for cand in windows_below {
+                let win_w = (cand.rect.right - cand.rect.left).clamp(1, screen.width.max(1));
+                let win_h = (cand.rect.bottom - cand.rect.top).clamp(1, screen.height.max(1));
+                let Some(win_dc) = scratch.ensure_win_surface(win_w, win_h) else {
+                    continue;
+                };
+                let ok = PrintWindow(cand.hwnd, win_dc, PW_RENDERFULLCONTENT).as_bool()
+                    || PrintWindow(cand.hwnd, win_dc, 0).as_bool();
+                if ok {
+                    let ix0 = cand.rect.left.max(region.left);
+                    let iy0 = cand.rect.top.max(region.top);
+                    let ix1 = cand.rect.right.min(region.right);
+                    let iy1 = cand.rect.bottom.min(region.bottom);
+                    let iw = (ix1 - ix0).max(0);
+                    let ih = (iy1 - iy0).max(0);
+                    if iw > 0 && ih > 0 {
+                        let src_x = ix0 - cand.rect.left;
+                        let src_y = iy0 - cand.rect.top;
+                        let dst_x = (((ix0 - region.left) as f32 / sw.max(1) as f32)
+                            * cap_w as f32)
+                            .floor() as i32;
+                        let dst_y = (((iy0 - region.top) as f32 / sh.max(1) as f32)
+                            * cap_h as f32)
+                            .floor() as i32;
+                        let dst_w =
+                            (((iw as f32 / sw.max(1) as f32) * cap_w as f32).ceil() as i32)
+                                .max(1);
+                        let dst_h =
+                            (((ih as f32 / sh.max(1) as f32) * cap_h as f32).ceil() as i32)
+                                .max(1);
+                        let _ = StretchBlt(
+                            cap_dc,
+                            dst_x,
+                            dst_y,
+                            dst_w,
+                            dst_h,
+                            Some(win_dc),
+                            src_x,
+                            src_y,
+                            iw,
+                            ih,
+                            SRCCOPY,
+                        );
                     }
-                    let _ = SelectObject(win_dc, win_old);
-                    let _ = DeleteObject(win_dib.into());
                 }
-                let _ = DeleteDC(win_dc);
             }
         }
 
-        let out = if !cap_bits.is_null() {
-            let mut buf = std::slice::from_raw_parts(cap_bits as *const u8, byte_len).to_vec();
-            force_opaque_alpha(&mut buf);
-            Some(buf)
-        } else {
-            None
-        };
-
-        let _ = SelectObject(cap_dc, cap_old);
-        let _ = DeleteObject(cap_dib.into());
-        let _ = DeleteDC(cap_dc);
-        out
+        let mut buf = std::slice::from_raw_parts(cap_bits, byte_len).to_vec();
+        force_opaque_alpha(&mut buf);
+        Some(buf)
     }
 }
 

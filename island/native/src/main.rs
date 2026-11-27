@@ -10,7 +10,7 @@ use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::{w, GUID, PCWSTR, PWSTR};
@@ -98,6 +98,7 @@ const CONTROLLER_CLASS: PCWSTR = w!("HimeIslandNativeController");
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
 const WM_EXTRA_SURFACE_EVENT: u32 = WM_APP + 3;
+const WM_BACKDROP_READY: u32 = WM_APP + 4;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM_ID: usize = 1;
 const ANIM_INTERVAL_ACTIVE_MS: u32 = 16;
@@ -120,7 +121,7 @@ const VK_T: u32 = 0x54;
 const PROACTIVE_EVAL_INTERVAL: Duration = Duration::from_secs(60);
 const CORE_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MEDIA_TIMELINE_SYNC_INTERVAL: Duration = Duration::from_secs(1);
-const BACKDROP_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const BACKDROP_REFRESH_INTERVAL: Duration = Duration::from_millis(33);
 
 static ORIG_SURFACE_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static EXTRA_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
@@ -872,7 +873,10 @@ fn open_shell_uri(uri: &str) {
     }
 }
 
-const STATIC_COMPOSITE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const STATIC_COMPOSITE_REFRESH_INTERVAL: Duration = Duration::from_millis(33);
+const BACKDROP_TARGET_DOCK: usize = 0;
+const BACKDROP_TARGET_SETTINGS: usize = 1;
+const BACKDROP_TARGET_DRAWER: usize = 2;
 
 #[derive(Default)]
 struct BackdropSlot {
@@ -892,14 +896,186 @@ fn should_skip_settled_backdrop_refresh(
         return false;
     }
     if slot.layout_hash == Some(cur_layout) {
-        if slot.from_wake {
-            return true;
-        }
         return slot
             .last_at
             .is_some_and(|t| now.duration_since(t) < STATIC_COMPOSITE_REFRESH_INTERVAL);
     }
     false
+}
+
+struct BackdropShared {
+    shutdown: bool,
+    ctrl_hwnd: isize,
+    exclude_hwnds: Vec<isize>,
+    targets: [Option<(i32, i32, u32, u32)>; 3],
+    last_hashes: [Option<u64>; 3],
+    pending_frames: [Option<(u64, os_shell::CapturedBackdrop)>; 3],
+}
+
+impl BackdropShared {
+    fn new(ctrl_hwnd: isize) -> Self {
+        Self {
+            shutdown: false,
+            ctrl_hwnd,
+            exclude_hwnds: Vec::new(),
+            targets: [None, None, None],
+            last_hashes: [None, None, None],
+            pending_frames: [None, None, None],
+        }
+    }
+}
+
+struct BackdropWorker {
+    shared: Arc<(Mutex<BackdropShared>, Condvar)>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BackdropWorker {
+    fn spawn(ctrl_hwnd: HWND) -> Self {
+        let shared = Arc::new((Mutex::new(BackdropShared::new(ctrl_hwnd.0 as isize)), Condvar::new()));
+        let bg = Arc::clone(&shared);
+        let handle = std::thread::Builder::new()
+            .name("hime-backdrop-worker".to_string())
+            .spawn(move || run_backdrop_worker(bg))
+            .ok();
+        Self { shared, handle }
+    }
+
+    fn sync_targets(&self, targets: [Option<(i32, i32, u32, u32)>; 3], exclude_hwnds: Vec<isize>) {
+        let (lock, cvar) = &*self.shared;
+        let Ok(mut state) = lock.lock() else {
+            return;
+        };
+        let was_idle = state.targets.iter().all(Option::is_none);
+        if state.targets != targets || state.exclude_hwnds != exclude_hwnds {
+            state.targets = targets;
+            state.exclude_hwnds = exclude_hwnds;
+            for idx in 0..3 {
+                if state.targets[idx].is_none() {
+                    state.last_hashes[idx] = None;
+                    state.pending_frames[idx] = None;
+                }
+            }
+            if was_idle && state.targets.iter().any(Option::is_some) {
+                cvar.notify_one();
+            }
+        }
+    }
+
+    fn seed_hash(&self, idx: usize, hash: u64) {
+        let (lock, _) = &*self.shared;
+        if let Ok(mut state) = lock.lock() {
+            state.last_hashes[idx] = Some(hash);
+            state.pending_frames[idx] = None;
+        }
+    }
+
+    fn take_pending(&self) -> [Option<(u64, os_shell::CapturedBackdrop)>; 3] {
+        let (lock, _) = &*self.shared;
+        let Ok(mut state) = lock.lock() else {
+            return [None, None, None];
+        };
+        [
+            state.pending_frames[0].take(),
+            state.pending_frames[1].take(),
+            state.pending_frames[2].take(),
+        ]
+    }
+
+    fn shutdown(&mut self) {
+        let (lock, cvar) = &*self.shared;
+        if let Ok(mut state) = lock.lock() {
+            state.shutdown = true;
+            cvar.notify_all();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_backdrop_worker(shared: Arc<(Mutex<BackdropShared>, Condvar)>) {
+    let mut capturer = os_shell::BackdropCapturer::new();
+    let (lock, cvar) = &*shared;
+
+    loop {
+        let (targets, exclude_hwnds, prev_hashes, ctrl_hwnd) = {
+            let mut state = match lock.lock() {
+                Ok(g) => g,
+                Err(_) => break,
+            };
+            while !state.shutdown && state.targets.iter().all(Option::is_none) {
+                state = match cvar.wait(state) {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+            }
+            if state.shutdown {
+                break;
+            }
+            (
+                state.targets,
+                state.exclude_hwnds.clone(),
+                state.last_hashes,
+                state.ctrl_hwnd,
+            )
+        };
+
+        let cycle_start = Instant::now();
+        let mut updates: [Option<(u64, os_shell::CapturedBackdrop)>; 3] = [None, None, None];
+        let mut any_changed = false;
+
+        for (idx, target) in targets.into_iter().enumerate() {
+            let Some((x, y, w, h)) = target else {
+                continue;
+            };
+            let Some(cap) = capturer.capture_region(x, y, w, h, &exclude_hwnds, false) else {
+                continue;
+            };
+            let h_val = hash_backdrop(cap.width, cap.height, &cap.bgra);
+            if prev_hashes[idx] != Some(h_val) {
+                updates[idx] = Some((h_val, cap));
+                any_changed = true;
+            }
+        }
+
+        if any_changed {
+            let mut post_notify = false;
+            if let Ok(mut state) = lock.lock() {
+                if !state.shutdown {
+                    for idx in 0..3 {
+                        if let Some((h_val, cap)) = updates[idx].take() {
+                            if state.targets[idx].is_some() {
+                                state.last_hashes[idx] = Some(h_val);
+                                state.pending_frames[idx] = Some((h_val, cap));
+                                post_notify = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if post_notify && ctrl_hwnd != 0 {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(ctrl_hwnd as *mut std::ffi::c_void)),
+                        WM_BACKDROP_READY,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+        }
+
+        let elapsed = cycle_start.elapsed();
+        if elapsed < BACKDROP_REFRESH_INTERVAL {
+            let rem = BACKDROP_REFRESH_INTERVAL - elapsed;
+            if let Ok(state) = lock.lock() {
+                if !state.shutdown {
+                    let _ = cvar.wait_timeout(state, rem);
+                }
+            }
+        }
+    }
 }
 
 fn hash_backdrop(width: u32, height: u32, bgra: &[u8]) -> u64 {
@@ -980,6 +1156,7 @@ struct AppShell {
     settings_surface: Option<NativeSurface>,
     drawer_surface: Option<NativeSurface>,
     backdrop_capturer: os_shell::BackdropCapturer,
+    backdrop_worker: BackdropWorker,
     backdrop_dock: BackdropSlot,
     backdrop_settings: BackdropSlot,
     backdrop_drawer: BackdropSlot,
@@ -1120,6 +1297,7 @@ impl AppShell {
             settings_surface: None,
             drawer_surface: None,
             backdrop_capturer: os_shell::BackdropCapturer::new(),
+            backdrop_worker: BackdropWorker::spawn(ctrl_hwnd),
             backdrop_dock: BackdropSlot::default(),
             backdrop_settings: BackdropSlot::default(),
             backdrop_drawer: BackdropSlot::default(),
@@ -1184,6 +1362,7 @@ impl AppShell {
         shell.update_surface_click_through();
         shell.mark_all_dirty();
         shell.render_all();
+        shell.sync_backdrop_worker_targets();
         shell.log_startup_diag();
         Ok(shell)
     }
@@ -1245,6 +1424,9 @@ impl AppShell {
             is_hidden,
             force,
         ) {
+            if let Some(h) = self.backdrop_dock.last_hash {
+                self.backdrop_worker.seed_hash(BACKDROP_TARGET_DOCK, h);
+            }
             self.dirty_dock = true;
         }
     }
@@ -1284,6 +1466,9 @@ impl AppShell {
             is_hidden,
             force,
         ) {
+            if let Some(h) = self.backdrop_settings.last_hash {
+                self.backdrop_worker.seed_hash(BACKDROP_TARGET_SETTINGS, h);
+            }
             self.dirty_settings = true;
         }
     }
@@ -1312,25 +1497,91 @@ impl AppShell {
             is_hidden,
             force,
         ) {
+            if let Some(h) = self.backdrop_drawer.last_hash {
+                self.backdrop_worker.seed_hash(BACKDROP_TARGET_DRAWER, h);
+            }
             self.dirty_drawer = true;
         }
     }
 
-    fn refresh_visible_backdrops(
-        &mut self,
-        dock_settled: bool,
-        set_settled: bool,
-        drw_settled: bool,
-    ) {
-        if dock_settled && self.dock.visible && !self.dock.is_hidden {
-            self.capture_dock_backdrop(false, false);
+    fn sync_backdrop_worker_targets(&self) {
+        let screen = os_shell::primary_screen_bounds();
+        let dock_bounds = if self.dock.visible && !self.dock.is_hidden && self.dock.show_progress.value > 0.02 {
+            let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+            Some(dock_surface_bounds(screen, scale))
+        } else {
+            None
+        };
+        let settings_bounds = if self.settings.visible {
+            self.settings_surface.as_ref().and_then(|surf| {
+                let mut r = RECT::default();
+                unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
+                    (
+                        r.left,
+                        r.top,
+                        (r.right - r.left).max(1) as u32,
+                        (r.bottom - r.top).max(1) as u32,
+                    )
+                })
+            })
+        } else {
+            None
+        };
+        let drawer_bounds = if self.ai_drawer.visible {
+            self.drawer_surface.as_ref().and_then(|surf| {
+                let mut r = RECT::default();
+                unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
+                    (
+                        r.left,
+                        r.top,
+                        (r.right - r.left).max(1) as u32,
+                        (r.bottom - r.top).max(1) as u32,
+                    )
+                })
+            })
+        } else {
+            None
+        };
+        self.backdrop_worker
+            .sync_targets([dock_bounds, settings_bounds, drawer_bounds], self.own_hwnds());
+    }
+
+    fn drain_dynamic_backdrops(&mut self) {
+        let frames = self.backdrop_worker.take_pending();
+        let now = Instant::now();
+        if let Some((hash, cap)) = frames[BACKDROP_TARGET_DOCK].as_ref() {
+            if self.dock.visible && !self.dock.is_hidden {
+                self.dock_surface
+                    .set_backdrop_pixels(cap.width, cap.height, &cap.bgra);
+                self.backdrop_dock.last_hash = Some(*hash);
+                self.backdrop_dock.last_at = Some(now);
+                self.backdrop_dock.from_wake = false;
+                self.dirty_dock = true;
+            }
         }
-        if set_settled && self.settings.visible {
-            self.capture_settings_backdrop(false, false);
+        if let Some((hash, cap)) = frames[BACKDROP_TARGET_SETTINGS].as_ref() {
+            if self.settings.visible {
+                if let Some(ref surf) = self.settings_surface {
+                    surf.set_backdrop_pixels(cap.width, cap.height, &cap.bgra);
+                    self.backdrop_settings.last_hash = Some(*hash);
+                    self.backdrop_settings.last_at = Some(now);
+                    self.backdrop_settings.from_wake = false;
+                    self.dirty_settings = true;
+                }
+            }
         }
-        if drw_settled && self.ai_drawer.visible {
-            self.capture_drawer_backdrop(false, false);
+        if let Some((hash, cap)) = frames[BACKDROP_TARGET_DRAWER].as_ref() {
+            if self.ai_drawer.visible {
+                if let Some(ref surf) = self.drawer_surface {
+                    surf.set_backdrop_pixels(cap.width, cap.height, &cap.bgra);
+                    self.backdrop_drawer.last_hash = Some(*hash);
+                    self.backdrop_drawer.last_at = Some(now);
+                    self.backdrop_drawer.from_wake = false;
+                    self.dirty_drawer = true;
+                }
+            }
         }
+        self.render_all();
     }
 
     fn ensure_ipc_client(&mut self) -> Arc<HimeIpcClient> {
@@ -4190,7 +4441,7 @@ impl AppShell {
             || watch_outside_click
             || self.notch.has_active_banner();
 
-        self.refresh_visible_backdrops(!dock_anim, !set_anim, !drw_anim);
+        self.sync_backdrop_worker_targets();
         self.sync_overlay_visibility();
         self.render_all();
         self.release_settings_surface_if_idle();
@@ -4359,6 +4610,7 @@ impl AppShell {
     }
 
     fn shutdown(&mut self) {
+        self.backdrop_worker.shutdown();
         self.ipc_worker = None;
         self.ipc = None;
         if let Some(surf) = self.settings_surface.take() {
@@ -5429,6 +5681,14 @@ unsafe extern "system" fn controller_wnd_proc(
             });
             LRESULT(0)
         }
+        WM_BACKDROP_READY => {
+            APP_SHELL.with(|cell| {
+                if let Some(shell) = cell.borrow_mut().as_mut() {
+                    shell.drain_dynamic_backdrops();
+                }
+            });
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == TIMER_ANIM_ID {
                 APP_SHELL.with(|cell| {
@@ -5826,27 +6086,35 @@ mod tests {
     }
 
     #[test]
-    fn backdrop_slot_skips_composite_when_wake_layout_unchanged() {
+    fn backdrop_slot_refreshes_dynamically_even_when_layout_unchanged() {
         let now = Instant::now();
         let slot_empty = BackdropSlot::default();
         assert!(!should_skip_settled_backdrop_refresh(&slot_empty, now, 123, false));
 
-        let wake_slot = BackdropSlot {
-            last_at: Some(now - Duration::from_secs(10)),
+        // Wake slot skips only within the ~30 FPS cadence, then refreshes dynamically even when layout is unchanged
+        let wake_slot_fresh = BackdropSlot {
+            last_at: Some(now - Duration::from_millis(10)),
             last_hash: Some(0xdead_beef),
             layout_hash: Some(42),
             from_wake: true,
         };
-        // Same window layout behind wake capture: skip PrintWindow composite indefinitely
-        assert!(should_skip_settled_backdrop_refresh(&wake_slot, now, 42, false));
-        // Window opened/closed/moved behind surface: must refresh immediately
-        assert!(!should_skip_settled_backdrop_refresh(&wake_slot, now, 99, false));
-        // Forced refresh always runs
-        assert!(!should_skip_settled_backdrop_refresh(&wake_slot, now, 42, true));
+        assert!(should_skip_settled_backdrop_refresh(&wake_slot_fresh, now, 42, false));
 
-        // Non-wake composite slot skips within STATIC_COMPOSITE_REFRESH_INTERVAL (2s), refreshes after
+        let wake_slot_stale = BackdropSlot {
+            last_at: Some(now - Duration::from_millis(45)),
+            last_hash: Some(0xdead_beef),
+            layout_hash: Some(42),
+            from_wake: true,
+        };
+        assert!(!should_skip_settled_backdrop_refresh(&wake_slot_stale, now, 42, false));
+        // Window opened/closed/moved behind surface: must refresh immediately
+        assert!(!should_skip_settled_backdrop_refresh(&wake_slot_fresh, now, 99, false));
+        // Forced refresh always runs
+        assert!(!should_skip_settled_backdrop_refresh(&wake_slot_fresh, now, 42, true));
+
+        // Non-wake composite slot also refreshes once STATIC_COMPOSITE_REFRESH_INTERVAL (33ms) elapses
         let composite_slot = BackdropSlot {
-            last_at: Some(now - Duration::from_millis(600)),
+            last_at: Some(now - Duration::from_millis(10)),
             last_hash: Some(0xdead_beef),
             layout_hash: Some(42),
             from_wake: false,
@@ -5854,7 +6122,7 @@ mod tests {
         assert!(should_skip_settled_backdrop_refresh(&composite_slot, now, 42, false));
         assert!(!should_skip_settled_backdrop_refresh(
             &composite_slot,
-            now + Duration::from_secs(3),
+            now + Duration::from_millis(40),
             42,
             false
         ));
