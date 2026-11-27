@@ -3480,12 +3480,35 @@ impl NativeSurface {
     }
 
     /// Draws a notification bell icon centered at `(cx, cy)`.
+    /// Draws a classic SF Symbols-style notification bell outline centered at `(cx, cy)`.
     pub fn draw_bell_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
         let s = size.max(8.0);
-        let sw = (s * 0.11).max(1.0);
-        self.stroke_circle(cx, cy - s * 0.05, s * 0.25, color, sw)?;
-        self.draw_line(cx - s * 0.34, cy + s * 0.22, cx + s * 0.34, cy + s * 0.22, color, sw)?;
-        self.fill_circle(cx, cy + s * 0.34, s * 0.08, color)?;
+        let sw = (s * 0.095).max(1.2);
+        // Top finial stem
+        self.draw_line(cx, cy - s * 0.38, cx, cy - s * 0.31, color, sw)?;
+        // Classic flared bell body (smooth dome -> straight waist -> flared rim)
+        let body = [
+            (cx - s * 0.34, cy + s * 0.18),
+            (cx - s * 0.25, cy + s * 0.07),
+            (cx - s * 0.23, cy - s * 0.08),
+            (cx - s * 0.19, cy - s * 0.20),
+            (cx - s * 0.10, cy - s * 0.28),
+            (cx, cy - s * 0.31),
+            (cx + s * 0.10, cy - s * 0.28),
+            (cx + s * 0.19, cy - s * 0.20),
+            (cx + s * 0.23, cy - s * 0.08),
+            (cx + s * 0.25, cy + s * 0.07),
+            (cx + s * 0.34, cy + s * 0.18),
+        ];
+        self.draw_polyline(&body, true, color, sw)?;
+        // Bottom clapper arc
+        let clapper = [
+            (cx - s * 0.09, cy + s * 0.25),
+            (cx - s * 0.05, cy + s * 0.33),
+            (cx + s * 0.05, cy + s * 0.33),
+            (cx + s * 0.09, cy + s * 0.25),
+        ];
+        self.draw_polyline(&clapper, false, color, sw)?;
         Ok(())
     }
 
