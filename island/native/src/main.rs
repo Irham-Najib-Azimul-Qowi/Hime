@@ -2123,12 +2123,13 @@ impl AppShell {
             } else {
                 os_shell::DEFAULT_EDGE_WAKE_THRESHOLD_PX
             };
-            let near_wake = os_shell::is_notch_edge_hovered(
+            let near_wake = os_shell::is_notch_edge_hovered_scaled(
                 cx as f32,
                 cy as f32,
                 &self.notch,
                 primary,
                 wake_margin,
+                notch_scale,
             );
             let drag_near_notch = external_file_drag
                 && is_cursor_in_notch_drop_band(cx as f32, cy as f32, &self.notch, primary);
@@ -2599,7 +2600,8 @@ impl AppShell {
                 let ly = y / scale;
                 let prev_hover = self.notch.pointer_pos;
                 self.notch.set_pointer_hover(Some((lx, ly)));
-                if prev_hover != self.notch.pointer_pos {
+                let hover_transition = prev_hover.is_none() || self.notch.is_expanded;
+                if hover_transition && prev_hover != self.notch.pointer_pos {
                     render_now = true;
                 }
                 if self.notch.is_hidden {

@@ -625,10 +625,25 @@ pub fn is_notch_edge_hovered(
     screen: ScreenBounds,
     wake_margin_px: f32,
 ) -> bool {
-    let rx = cursor_x - screen.x as f32;
-    let ry = cursor_y - screen.y as f32;
-    let sw = screen.width.max(1) as f32;
-    let sh = screen.height.max(1) as f32;
+    is_notch_edge_hovered_scaled(cursor_x, cursor_y, notch, screen, wake_margin_px, 1.0)
+}
+
+/// DPI-aware variant of [`is_notch_edge_hovered`] converting physical cursor/screen pixels
+/// into DIP coordinates before comparing with `NotchView` spring dimensions.
+pub fn is_notch_edge_hovered_scaled(
+    cursor_x: f32,
+    cursor_y: f32,
+    notch: &NotchView,
+    screen: ScreenBounds,
+    wake_margin_px: f32,
+    dip_scale: f32,
+) -> bool {
+    let scale = dip_scale.max(0.5);
+    let rx = (cursor_x - screen.x as f32) / scale;
+    let ry = (cursor_y - screen.y as f32) / scale;
+    let sw = (screen.width.max(1) as f32) / scale;
+    let sh = (screen.height.max(1) as f32) / scale;
+    let margin_dip = wake_margin_px / scale;
     if rx < 0.0 || rx > sw || ry < 0.0 || ry > sh {
         return false;
     }
@@ -639,9 +654,9 @@ pub fn is_notch_edge_hovered(
         // externally (wake_margin_px > 20.0) so top-edge hover never leaks across wide empty space.
         let is_drag = wake_margin_px > 20.0;
         let margin = if is_drag {
-            wake_margin_px
+            margin_dip
         } else {
-            wake_margin_px.clamp(3.0, 6.0)
+            margin_dip.clamp(3.0, 6.0)
         };
         let wake_rect = match notch.edge {
             NotchEdge::Top => {

@@ -214,13 +214,17 @@ pub fn edge_contour_points(
     };
 
     let ear = if flares {
-        ear_w.max(0.0).min(lw * 0.25)
+        ear_w.max(0.0).min(lw * 0.25).min((lh * 0.42).max(0.0))
     } else {
         0.0
     };
     let left = ear;
     let right = (lw - ear).max(left);
-    let r = radius.max(0.0).min(lh * 0.5).min((right - left) * 0.5);
+    let r = radius
+        .max(0.0)
+        .min((lh - ear).max(0.0))
+        .min(lh * 0.5)
+        .min((right - left) * 0.5);
     let k = 0.552_284_8 * r;
     let c_off = ear * (10.0 / 13.0);
 
@@ -4847,6 +4851,16 @@ mod tests {
                 end: (13.0, 13.0),
             })
         );
+
+        // Intermediate tiny heights during Peek wake/hide keep concave ears cleanly bounded.
+        let tiny_ops =
+            edge_contour_points(Rect::new(0.0, 0.0, 64.0, 10.0), 13.0, 18.0, EdgeSide::Top, true);
+        if let Some(&ContourOp::CubicTo { end: (_, ear_y), .. }) = tiny_ops.get(1) {
+            assert!(
+                ear_y <= 5.0,
+                "concave ear must stay above bottom corner radius at tiny heights, got {ear_y}"
+            );
+        }
     }
 
     #[test]

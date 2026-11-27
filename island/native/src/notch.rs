@@ -424,10 +424,15 @@ impl NotchView {
     }
 
     pub fn set_hidden(&mut self, hidden: bool) {
+        if self.is_hidden == hidden {
+            return;
+        }
         self.is_hidden = hidden;
         if hidden {
             self.is_expanded = false;
             self.drag_hover = false;
+            self.pointer_pos = None;
+            self.hover_spring.animate_to(0.0, Spring::RECEDE);
             self.drag_hover_spring.animate_to(0.0, Spring::RECEDE);
             self.active_panel = NotchPanel::Status;
         }
@@ -507,12 +512,15 @@ impl NotchView {
         }
     }
 
-    /// Updates local pointer hover coordinates (in surface DIPs) for subtle glass hover states.
+    /// Updates local pointer hover coordinates (in surface DIPs) for subtle Dynamic Island hover motion.
     pub fn set_pointer_hover(&mut self, pos: Option<(f32, f32)>) {
+        let was_hovered = self.pointer_pos.is_some();
         self.pointer_pos = pos;
-        let hovered = pos.is_some();
-        self.hover_spring
-            .animate_to(if hovered { 1.0 } else { 0.0 }, Spring::INTERACTIVE);
+        let hovered = pos.is_some() && !self.is_hidden;
+        if was_hovered != hovered {
+            self.hover_spring
+                .animate_to(if hovered { 1.0 } else { 0.0 }, Spring::SMOOTH);
+        }
     }
 
     /// Updates pointer press state for tactile Apple button press micro-scale (`0.97`).
@@ -871,8 +879,17 @@ impl NotchView {
 
     /// Computes the notch pill rectangle flush to the configured screen edge.
     pub fn computed_rect(&self, surface_width: f32, surface_height: f32) -> Rect {
-        let w = self.width_spring.value.max(HIDDEN_BAR_THICKNESS);
-        let h = self.height_spring.value.max(HIDDEN_BAR_THICKNESS);
+        let hover_t = if !self.is_hidden && !self.is_expanded && !self.has_active_banner() {
+            self.hover_spring.value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (hover_dw, hover_dh) = match self.edge {
+            NotchEdge::Top => (12.0 * hover_t, 2.0 * hover_t),
+            NotchEdge::Left | NotchEdge::Right => (2.0 * hover_t, 12.0 * hover_t),
+        };
+        let w = (self.width_spring.value + hover_dw).max(HIDDEN_BAR_THICKNESS);
+        let h = (self.height_spring.value + hover_dh).max(HIDDEN_BAR_THICKNESS);
         match self.edge {
             NotchEdge::Top => Rect::new((surface_width - w) * 0.5, 0.0, w, h),
             NotchEdge::Left => Rect::new(0.0, (surface_height - h) * 0.5, w, h),
@@ -1181,8 +1198,16 @@ impl NotchView {
         }
 
         let p = AdaptivePalette::dark_glass();
-        let radius = if self.is_hidden { 1.5 } else { CORNER_RADIUS };
-        let flares = !self.is_hidden;
+        let open_t = match self.edge {
+            NotchEdge::Top => ((rect.height - HIDDEN_BAR_THICKNESS)
+                / (TOP_COLLAPSED_HEIGHT - HIDDEN_BAR_THICKNESS))
+                .clamp(0.0, 1.0),
+            NotchEdge::Left | NotchEdge::Right => ((rect.width - HIDDEN_BAR_THICKNESS)
+                / (SIDE_COLLAPSED_WIDTH - HIDDEN_BAR_THICKNESS))
+                .clamp(0.0, 1.0),
+        };
+        let radius = 1.5 + (CORNER_RADIUS - 1.5) * open_t;
+        let flares = open_t > 0.20;
         surface.set_edge_surface_region(rect, EAR_WIDTH, radius, edge_side, flares);
         surface.draw_edge_surface(
             rect,
@@ -1194,12 +1219,36 @@ impl NotchView {
             None,
         )?;
 
-        if self.is_hidden {
+        if open_t < 0.72 {
             return Ok(());
         }
+        let content_alpha = ((open_t - 0.72) / 0.28).clamp(0.0, 1.0);
+        let p = AdaptivePalette {
+            text_primary: p.text_primary.with_alpha_mul(content_alpha),
+            text_secondary: p.text_secondary.with_alpha_mul(content_alpha),
+            text_tertiary: p.text_tertiary.with_alpha_mul(content_alpha),
+            accent: p.accent.with_alpha_mul(content_alpha),
+            accent_tint: p.accent_tint.with_alpha_mul(content_alpha),
+            control_fill: p.control_fill.with_alpha_mul(content_alpha),
+            control_hover: p.control_hover.with_alpha_mul(content_alpha),
+            control_active: p.control_active.with_alpha_mul(content_alpha),
+            glass_elevated: p.glass_elevated.with_alpha_mul(content_alpha),
+            divider: p.divider.with_alpha_mul(content_alpha),
+            status_green: p.status_green.with_alpha_mul(content_alpha),
+            status_red: p.status_red.with_alpha_mul(content_alpha),
+            status_amber: p.status_amber.with_alpha_mul(content_alpha),
+            ..p
+        };
 
         if self.is_expanded || self.expand_spring.value > 0.25 {
+            if rect.width < 320.0 || rect.height < 160.0 {
+                return Ok(());
+            }
             return self.render_expanded_contents(surface, rect, &p);
+        }
+
+        if self.edge == NotchEdge::Top && rect.width < 220.0 {
+            return Ok(());
         }
 
         if self.has_active_banner() && !self.drag_hover {
@@ -3331,9 +3380,9 @@ impl NotchView {
             self.drag_hover,
         );
         if self.is_hidden {
-            self.width_spring.launch_to(w, Spring::RECEDE, 1.0);
-            self.height_spring.launch_to(h, Spring::RECEDE, 1.0);
-            self.expand_spring.launch_to(0.0, Spring::RECEDE, 1.0);
+            self.width_spring.animate_to(w, Spring::RECEDE);
+            self.height_spring.animate_to(h, Spring::RECEDE);
+            self.expand_spring.animate_to(0.0, Spring::RECEDE);
         } else if self.is_expanded {
             let was_collapsed = self.expand_spring.value < 0.2;
             if was_collapsed {
@@ -4005,10 +4054,19 @@ mod tests {
         assert!((notch.press_spring.value - 0.97).abs() < 0.03);
 
         notch.set_pointer_pressed(false);
+        notch.set_pointer_hover(None);
         notch.set_expanded(false);
         settle(&mut notch);
         assert!(notch.expand_spring.value.abs() < 0.05);
         assert!((notch.press_spring.value - 1.0).abs() < 0.03);
+
+        // Hovering the collapsed Top Notch smoothly breathes width/height via hover_spring.
+        let rest_rect = notch.computed_rect(560.0, 320.0);
+        notch.set_pointer_hover(Some((280.0, 18.0)));
+        settle(&mut notch);
+        let hovered_rect = notch.computed_rect(560.0, 320.0);
+        assert!(hovered_rect.width > rest_rect.width + 8.0);
+        assert!(hovered_rect.height > rest_rect.height + 1.0);
     }
 
     #[test]
