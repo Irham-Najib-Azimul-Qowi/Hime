@@ -3943,7 +3943,7 @@ mod tests {
         notch.set_panel(NotchPanel::CommandCenter);
         settle(&mut notch);
 
-        // Dark/black backdrop under Auto -> LightGlass (frosted white glass + dark ink)
+        // Dark/black backdrop under Auto -> DarkGlass (smoked glass + white ink)
         let dark_bg = vec![12_u8; 64 * 64 * 4];
         let mut dark_bg_opaque = dark_bg;
         for px in dark_bg_opaque.chunks_exact_mut(4) {
@@ -3951,17 +3951,17 @@ mod tests {
         }
         surface.set_color_theme_mode(ColorThemeMode::Auto);
         surface.set_backdrop_pixels(64, 64, &dark_bg_opaque);
-        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
-        surface.begin_draw();
-        notch.render(&surface).expect("LightGlass render should succeed");
-        surface.end_draw_and_present().expect("LightGlass present should succeed");
-
-        // Bright/white backdrop under Auto -> DarkGlass (smoked glass + white ink)
-        let bright_bg = vec![240_u8; 64 * 64 * 4];
-        surface.set_backdrop_pixels(64, 64, &bright_bg);
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
         surface.begin_draw();
         notch.render(&surface).expect("DarkGlass render should succeed");
         surface.end_draw_and_present().expect("DarkGlass present should succeed");
+
+        // Bright/white backdrop under Auto -> LightGlass (frosted white glass + dark ink)
+        let bright_bg = vec![240_u8; 64 * 64 * 4];
+        surface.set_backdrop_pixels(64, 64, &bright_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface.begin_draw();
+        notch.render(&surface).expect("LightGlass render should succeed");
+        surface.end_draw_and_present().expect("LightGlass present should succeed");
     }
 }

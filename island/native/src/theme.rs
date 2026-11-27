@@ -135,15 +135,15 @@ impl ColorThemeMode {
 /// Resolved Liquid Glass polarity for a surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThemePolarity {
-    /// Dark smoked charcoal glass (`#141418`) with white typography (over light/white backdrops).
+    /// Dark smoked charcoal glass (`#141418`) with white typography (over dark/black backdrops).
     #[default]
     DarkGlass,
-    /// Light frosted white glass (`#F3F5F8`) with near-black `#111214` typography (over dark/black backdrops).
+    /// Light frosted white glass (`#F3F5F8`) with near-black `#111214` typography (over bright/white backdrops).
     LightGlass,
 }
 
-/// Luminance threshold below which `ColorThemeMode::Auto` flips to `LightGlass`
-/// so dark/black desktops receive crisp frosted-white Apple glass.
+/// Luminance threshold (`0.45`): dark backdrops (`< 0.45`) resolve to `DarkGlass` (white ink)
+/// and bright backdrops (`>= 0.45`) resolve to `LightGlass` (dark `#111214` ink), matching Apple HIG.
 pub const AUTO_LUMINANCE_THRESHOLD: f32 = 0.45;
 
 /// Complete adaptive monochrome + semantic palette resolved for a [`ThemePolarity`].
@@ -175,7 +175,7 @@ pub struct AdaptivePalette {
 }
 
 impl AdaptivePalette {
-    /// Dark smoked Liquid Glass palette (crisp white labels, used over bright/light backdrops or `Dark` mode).
+    /// Dark smoked Liquid Glass palette (crisp white labels, used over dark backdrops or `Dark` mode).
     pub const fn dark_glass() -> Self {
         Self {
             polarity: ThemePolarity::DarkGlass,
@@ -191,8 +191,8 @@ impl AdaptivePalette {
             slider_track: SLIDER_TRACK,
             slider_fill: SLIDER_FILL,
             text_primary: TEXT_PRIMARY,
-            text_secondary: Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0xB8),
-            text_tertiary: Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0x80),
+            text_secondary: TEXT_SECONDARY,
+            text_tertiary: TEXT_TERTIARY,
             text_quaternary: TEXT_QUATERNARY,
             accent: SYSTEM_BLUE,
             accent_tint: SYSTEM_BLUE_TINT,
@@ -204,7 +204,7 @@ impl AdaptivePalette {
         }
     }
 
-    /// Light frosted white Liquid Glass palette (near-black `#111214` labels, used over black/dark backdrops or `Light` mode).
+    /// Light frosted white Liquid Glass palette (near-black `#111214` labels, used over bright/white backdrops or `Light` mode).
     pub const fn light_glass() -> Self {
         Self {
             polarity: ThemePolarity::LightGlass,
@@ -222,7 +222,7 @@ impl AdaptivePalette {
             text_primary: LIGHT_TEXT_PRIMARY,
             text_secondary: LIGHT_TEXT_SECONDARY,
             text_tertiary: LIGHT_TEXT_TERTIARY,
-            text_quaternary: Color::from_rgba_u8(0x11, 0x12, 0x14, 0x45),
+            text_quaternary: Color::from_rgba_u8(0x11, 0x12, 0x14, 0x54),
             accent: SYSTEM_BLUE_LIGHT,
             accent_tint: Color::from_rgba_u8(0x00, 0x7A, 0xFF, 0x29),
             status_green: Color::from_rgb_u8(0x1E, 0x9E, 0x44),
@@ -242,13 +242,15 @@ impl AdaptivePalette {
     }
 
     /// Resolves polarity & palette from `mode` and optional sampled `backdrop_luminance` (`0.0..=1.0`).
+    /// Under `Auto`: dark backdrops (`< 0.45`) -> `DarkGlass` (white ink); bright backdrops (`>= 0.45`) -> `LightGlass` (dark ink).
     pub fn resolve(mode: ColorThemeMode, backdrop_luminance: Option<f32>) -> Self {
         let polarity = match mode {
             ColorThemeMode::Dark => ThemePolarity::DarkGlass,
             ColorThemeMode::Light => ThemePolarity::LightGlass,
             ColorThemeMode::Auto => match backdrop_luminance {
-                Some(lum) if lum < AUTO_LUMINANCE_THRESHOLD => ThemePolarity::LightGlass,
-                _ => ThemePolarity::DarkGlass,
+                Some(lum) if lum < AUTO_LUMINANCE_THRESHOLD => ThemePolarity::DarkGlass,
+                Some(_) => ThemePolarity::LightGlass,
+                None => ThemePolarity::DarkGlass,
             },
         };
         Self::for_polarity(polarity)
@@ -323,23 +325,23 @@ pub const SLIDER_FILL: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0xEB);
 /// Primary label color (Dark Glass: `#FFFFFF`).
 pub const TEXT_PRIMARY: Color = Color::from_rgb_u8(0xFF, 0xFF, 0xFF);
 
-/// Secondary label color (Dark Glass, >= 4.5:1 contrast).
-pub const TEXT_SECONDARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0xB8);
+/// Secondary label color (Dark Glass, ~86% white for crisp legibility over blurred backdrops).
+pub const TEXT_SECONDARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0xDC);
 
-/// Tertiary label color (Dark Glass).
-pub const TEXT_TERTIARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0x80);
+/// Tertiary label color (Dark Glass, ~65% white).
+pub const TEXT_TERTIARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0xA6);
 
 /// Quaternary label color (Dark Glass).
-pub const TEXT_QUATERNARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0x40);
+pub const TEXT_QUATERNARY: Color = Color::from_rgba_u8(0xEB, 0xEB, 0xF5, 0x54);
 
 /// Primary label color (Light Glass: near-black `#111214`).
 pub const LIGHT_TEXT_PRIMARY: Color = Color::from_rgb_u8(0x11, 0x12, 0x14);
 
-/// Secondary label color (Light Glass, >= 4.5:1 contrast on `#F3F5F8`).
-pub const LIGHT_TEXT_SECONDARY: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0xB8);
+/// Secondary label color (Light Glass, ~78% ink for crisp legibility over frosted white glass).
+pub const LIGHT_TEXT_SECONDARY: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0xC7);
 
-/// Tertiary label color (Light Glass).
-pub const LIGHT_TEXT_TERTIARY: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0x85);
+/// Tertiary label color (Light Glass, ~56% ink).
+pub const LIGHT_TEXT_TERTIARY: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0x8F);
 
 // ---------------------------------------------------------------------------
 // Single System Accent + Semantic Live Indicators
@@ -440,23 +442,29 @@ mod tests {
 
     #[test]
     fn adaptive_palette_flips_with_backdrop_luminance_and_mode() {
-        // Dark/black backdrop under Auto -> Light Frosted White Glass with dark text.
+        // Dark/black backdrop under Auto -> Dark Smoked Glass with crisp white text (Apple HIG).
         let on_black = AdaptivePalette::resolve(ColorThemeMode::Auto, Some(0.05));
-        assert_eq!(on_black.polarity, ThemePolarity::LightGlass);
-        assert_eq!(on_black.text_primary, LIGHT_TEXT_PRIMARY);
+        assert_eq!(on_black.polarity, ThemePolarity::DarkGlass);
+        assert_eq!(on_black.text_primary, TEXT_PRIMARY);
 
-        // Bright/white backdrop under Auto -> Dark Smoked Glass with white text.
+        // Bright/white backdrop under Auto -> Light Frosted White Glass with dark ink text (Apple HIG).
         let on_white = AdaptivePalette::resolve(ColorThemeMode::Auto, Some(0.92));
-        assert_eq!(on_white.polarity, ThemePolarity::DarkGlass);
-        assert_eq!(on_white.text_primary, TEXT_PRIMARY);
+        assert_eq!(on_white.polarity, ThemePolarity::LightGlass);
+        assert_eq!(on_white.text_primary, LIGHT_TEXT_PRIMARY);
+
+        // No backdrop -> defaults to DarkGlass.
+        assert_eq!(
+            AdaptivePalette::resolve(ColorThemeMode::Auto, None).polarity,
+            ThemePolarity::DarkGlass
+        );
 
         // Explicit overrides win regardless of backdrop luminance.
         assert_eq!(
-            AdaptivePalette::resolve(ColorThemeMode::Dark, Some(0.02)).polarity,
+            AdaptivePalette::resolve(ColorThemeMode::Dark, Some(0.95)).polarity,
             ThemePolarity::DarkGlass
         );
         assert_eq!(
-            AdaptivePalette::resolve(ColorThemeMode::Light, Some(0.95)).polarity,
+            AdaptivePalette::resolve(ColorThemeMode::Light, Some(0.02)).polarity,
             ThemePolarity::LightGlass
         );
         assert_eq!(ColorThemeMode::from_str_lossy("Light"), ColorThemeMode::Light);

@@ -1372,7 +1372,7 @@ impl SettingsPanel {
             let text_color = if is_active || is_hovered {
                 palette.text_primary
             } else {
-                palette.text_primary.with_alpha_mul(0.84)
+                palette.text_primary.with_alpha_mul(0.88)
             };
 
             let icon_rect = Rect::new(rect.x + 10.0, rect.y + (rect.height - 15.0) * 0.5, 15.0, 15.0);
@@ -1975,7 +1975,8 @@ mod tests {
 
     #[test]
     fn settings_window_renders_liquid_glass_and_sf_symbols_without_error() {
-        use crate::theme::ColorThemeMode;
+        use crate::d2d::BackdropBuffer;
+        use crate::theme::{ColorThemeMode, ThemePolarity, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
 
         let surface = match NativeSurface::new(
             "HimeSettingsTest",
@@ -1990,17 +1991,38 @@ mod tests {
         let mut panel = SettingsPanel::new();
         panel.open();
         panel.set_status_notice(Some("Connected to 9Router".to_string()));
-        for mode in [ColorThemeMode::Dark, ColorThemeMode::Light] {
-            surface.set_color_theme_mode(mode);
-            for &tab in &SettingsTab::ALL {
-                panel.select_tab(tab);
-                for _ in 0..45 {
-                    panel.tick(1.0 / 60.0);
-                }
-                surface.begin_draw();
-                panel.render(&surface).expect("settings render");
-                surface.end_draw_and_present().expect("settings present");
+
+        let dark_bg = BackdropBuffer::from_bgra_premul(4, 4, vec![0x14, 0x14, 0x18, 0xFF].repeat(16))
+            .expect("dark backdrop");
+        let bright_bg =
+            BackdropBuffer::from_bgra_premul(4, 4, vec![0xF0, 0xF2, 0xF6, 0xFF].repeat(16))
+                .expect("bright backdrop");
+
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        surface.set_backdrop(Some(dark_bg));
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
+        for &tab in &SettingsTab::ALL {
+            panel.select_tab(tab);
+            for _ in 0..45 {
+                panel.tick(1.0 / 60.0);
             }
+            surface.begin_draw();
+            panel.render(&surface).expect("dark auto settings render");
+            surface.end_draw_and_present().expect("dark auto settings present");
+        }
+
+        surface.set_backdrop(Some(bright_bg));
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
+        for &tab in &SettingsTab::ALL {
+            panel.select_tab(tab);
+            for _ in 0..45 {
+                panel.tick(1.0 / 60.0);
+            }
+            surface.begin_draw();
+            panel.render(&surface).expect("light auto settings render");
+            surface.end_draw_and_present().expect("light auto settings present");
         }
     }
 

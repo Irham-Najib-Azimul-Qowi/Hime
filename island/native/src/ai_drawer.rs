@@ -1561,22 +1561,24 @@ mod tests {
             status: ApprovalStatus::Pending,
         });
 
+        // Dark backdrop under Auto -> DarkGlass (smoked glass + white ink)
         let mut dark_bg = vec![10_u8; 64 * 64 * 4];
         for px in dark_bg.chunks_exact_mut(4) {
             px[3] = 255;
         }
         surface.set_color_theme_mode(ColorThemeMode::Auto);
         surface.set_backdrop_pixels(64, 64, &dark_bg);
-        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
-        surface.begin_draw();
-        drawer.render(&surface).expect("LightGlass drawer render should succeed");
-        surface.end_draw_and_present().expect("LightGlass present");
-
-        let bright_bg = vec![245_u8; 64 * 64 * 4];
-        surface.set_backdrop_pixels(64, 64, &bright_bg);
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
         surface.begin_draw();
         drawer.render(&surface).expect("DarkGlass drawer render should succeed");
         surface.end_draw_and_present().expect("DarkGlass present");
+
+        // Bright backdrop under Auto -> LightGlass (frosted white glass + dark ink)
+        let bright_bg = vec![245_u8; 64 * 64 * 4];
+        surface.set_backdrop_pixels(64, 64, &bright_bg);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface.begin_draw();
+        drawer.render(&surface).expect("LightGlass drawer render should succeed");
+        surface.end_draw_and_present().expect("LightGlass present");
     }
 }

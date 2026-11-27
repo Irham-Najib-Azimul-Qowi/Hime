@@ -1891,15 +1891,12 @@ impl NativeSurface {
         }
         unsafe {
             if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
-                let shadow_rect = Rect::new(
-                    rect.x + if flares { ear_w * 0.5 } else { 0.0 },
-                    rect.y,
-                    (rect.width - if flares { ear_w } else { 0.0 }).max(4.0),
-                    rect.height,
-                );
-                self.draw_soft_shadow(
-                    shadow_rect,
+                self.draw_edge_contour_shadow(
+                    rect,
+                    ear_w,
                     radius,
+                    edge,
+                    flares,
                     style.shadow_blur,
                     style.shadow_offset_y,
                     style.shadow_opacity,
@@ -1923,6 +1920,75 @@ impl NativeSurface {
             self.d2d_target.FillGeometry(&geo, &fill_brush, None);
             let border_brush = self.create_brush(border_col)?;
             self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+            Ok(())
+        }
+    }
+
+    /// Draws an edge-aware soft outer drop shadow following the exact `edge_contour_points`
+    /// silhouette, keeping the screen-bezel edge flush so no rounded corners protrude beyond
+    /// flared ears on any `EdgeSide`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_edge_contour_shadow(
+        &self,
+        rect: Rect,
+        ear_w: f32,
+        radius: f32,
+        edge: EdgeSide,
+        flares: bool,
+        blur: f32,
+        offset_y: f32,
+        opacity: f32,
+    ) -> Result<()> {
+        if rect.width <= 0.0 || rect.height <= 0.0 || blur <= 0.0 || opacity <= 0.0 {
+            return Ok(());
+        }
+        if edge == EdgeSide::Bottom && !flares {
+            return self.draw_soft_shadow(rect, radius, blur, offset_y, opacity);
+        }
+        let steps = 5_usize;
+        let max_blur = blur.min(24.0);
+        let base_alpha = opacity.clamp(0.0, 0.65);
+        unsafe {
+            for i in 0..steps {
+                let frac = 1.0 - (i as f32 / steps as f32);
+                let expand = max_blur * frac;
+                let falloff = (-(frac * 1.55) * (frac * 1.55)).exp();
+                let step_alpha = (base_alpha * falloff / (steps as f32 * 0.58)).clamp(0.004, 0.28);
+                let brush = self.create_brush(Color::rgba(0.0, 0.0, 0.0, step_alpha))?;
+                let sr = match edge {
+                    EdgeSide::Top => Rect::new(
+                        rect.x - expand * 0.75,
+                        rect.y,
+                        rect.width + expand * 1.5,
+                        rect.height + expand + offset_y.max(0.0) * 0.55,
+                    ),
+                    EdgeSide::Bottom => {
+                        let bottom = rect.y + rect.height;
+                        let up = expand + offset_y.abs() * 0.25;
+                        Rect::new(
+                            rect.x - expand * 0.75,
+                            rect.y - up,
+                            rect.width + expand * 1.5,
+                            bottom - (rect.y - up),
+                        )
+                    }
+                    EdgeSide::Left => Rect::new(
+                        rect.x,
+                        rect.y - expand * 0.75 + offset_y * 0.25,
+                        rect.width + expand,
+                        rect.height + expand * 1.5,
+                    ),
+                    EdgeSide::Right => Rect::new(
+                        rect.x - expand,
+                        rect.y - expand * 0.75 + offset_y * 0.25,
+                        rect.width + expand,
+                        rect.height + expand * 1.5,
+                    ),
+                };
+                let ops = edge_contour_points(sr, ear_w, (radius + expand * 0.65).max(0.0), edge, flares);
+                let geo = self.build_contour_geometry(&ops)?;
+                self.d2d_target.FillGeometry(&geo, &brush, None);
+            }
             Ok(())
         }
     }
@@ -3941,26 +4007,22 @@ fn sdg_edge_contour(
         }
     };
 
-    if flares && ear > 0.0 && uy >= 0.0 && uy <= ear {
-        if ux < left {
-            let dx = ux;
-            let dy = ear - uy;
-            let dist = dx.hypot(dy).max(1e-5);
-            let ear_d = ear - dist;
-            if ear_d < d {
+    if flares && ear > 0.0 && uy <= ear && uy < (clh - r).min(clh * 0.5).max(ear) {
+        let tail_len = (clh - r - ear).max(0.0);
+        if ux < clw * 0.5 {
+            let (ear_d, enx, eny) = sdg_canonical_ear(ux, uy, ear, tail_len);
+            if ux < left || ear_d >= ux - right {
                 d = ear_d;
-                unx = -dx / dist;
-                uny = dy / dist;
+                unx = enx;
+                uny = eny;
             }
-        } else if ux > right {
-            let dx = clw - ux;
-            let dy = ear - uy;
-            let dist = dx.hypot(dy).max(1e-5);
-            let ear_d = ear - dist;
-            if ear_d < d {
+        } else {
+            let mx = clw - ux;
+            let (ear_d, mnx, eny) = sdg_canonical_ear(mx, uy, ear, tail_len);
+            if mx < left || ear_d >= mx - right {
                 d = ear_d;
-                unx = dx / dist;
-                uny = dy / dist;
+                unx = -mnx;
+                uny = eny;
             }
         }
     }
@@ -3972,6 +4034,111 @@ fn sdg_edge_contour(
         EdgeSide::Right => (-uny, unx),
     };
     (d, nx, ny)
+}
+
+/// Signed distance & outward normal from canonical `(px, py)` to the `edge_contour_points`
+/// concave flare cubic Bezier (`c_off = ear * 10/13`) plus vertical wall continuation.
+#[inline]
+fn sdg_canonical_ear(px: f32, py: f32, ear: f32, tail_len: f32) -> (f32, f32, f32) {
+    if px < 0.0 {
+        let cy = py.max(0.0);
+        let dy = py - cy;
+        let dist = px.hypot(dy).max(1e-5);
+        return (dist, px / dist, dy / dist);
+    }
+
+    const SEGS: usize = 12;
+    let c_off = ear * (10.0 / 13.0);
+    let eval_pt = |t: f32| -> (f32, f32) {
+        let u = 1.0 - t;
+        let u2 = u * u;
+        let t2 = t * t;
+        let b1 = 3.0 * u2 * t;
+        let b2 = 3.0 * u * t2;
+        let b3 = t2 * t;
+        (
+            b1 * c_off + b2 * ear + b3 * ear,
+            b2 * (ear - c_off) + b3 * ear,
+        )
+    };
+
+    let mut min_dist2 = f32::MAX;
+    let mut best_dx = 0.0_f32;
+    let mut best_dy = 0.0_f32;
+    let mut best_nx = -1.0_f32;
+    let mut best_ny = 0.0_f32;
+    let mut curve_x = ear;
+    let mut found_scan = false;
+
+    let mut prev = (0.0_f32, 0.0_f32);
+    for i in 1..=SEGS {
+        let curr = eval_pt(i as f32 / SEGS as f32);
+        if !found_scan && py >= prev.1 && py <= curr.1 {
+            let dy_seg = curr.1 - prev.1;
+            let frac = if dy_seg > 1e-6 {
+                ((py - prev.1) / dy_seg).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            curve_x = prev.0 + frac * (curr.0 - prev.0);
+            found_scan = true;
+        }
+        let vx = curr.0 - prev.0;
+        let vy = curr.1 - prev.1;
+        let len2 = (vx * vx + vy * vy).max(1e-8);
+        let proj = (((px - prev.0) * vx + (py - prev.1) * vy) / len2).clamp(0.0, 1.0);
+        let cx = prev.0 + proj * vx;
+        let cy = prev.1 + proj * vy;
+        let dx = px - cx;
+        let dy = py - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 < min_dist2 {
+            min_dist2 = d2;
+            best_dx = dx;
+            best_dy = dy;
+            let len = len2.sqrt();
+            best_nx = -vy / len;
+            best_ny = vx / len;
+        }
+        prev = curr;
+    }
+
+    if tail_len > 0.0 {
+        let ty_end = ear + tail_len;
+        let cy = py.clamp(ear, ty_end);
+        let dx = px - ear;
+        let dy = py - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 < min_dist2 {
+            min_dist2 = d2;
+            best_dx = dx;
+            best_dy = dy;
+            best_nx = -1.0;
+            best_ny = 0.0;
+        }
+    }
+
+    let sign = if py >= ear {
+        if px >= ear { -1.0 } else { 1.0 }
+    } else if px >= curve_x {
+        -1.0
+    } else {
+        1.0
+    };
+
+    let dist = min_dist2.sqrt();
+    let (nx, ny) = if dist > 1e-4 {
+        ((best_dx / dist) * sign, (best_dy / dist) * sign)
+    } else {
+        (best_nx, best_ny)
+    };
+    let ear_d = dist * sign;
+    let top_d = -py;
+    if top_d > ear_d {
+        (top_d, 0.0, -1.0)
+    } else {
+        (ear_d, nx, ny)
+    }
 }
 
 #[inline]
@@ -4075,10 +4242,10 @@ fn rasterize_liquid_glass(
     let can_skip_center_sdf = edge_params.is_none() && flat_hw > 0.0 && flat_hh > 0.0;
 
     let (refract_reach, tone_mix) = match style.variant {
-        LiquidGlassVariant::Regular => (depth * 0.55, 0.26_f32),
-        LiquidGlassVariant::Clear => (depth * 0.72, 0.16_f32),
-        LiquidGlassVariant::Elevated => (depth * 0.42, 0.34_f32),
-        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.28_f32),
+        LiquidGlassVariant::Regular => (depth * 0.55, 0.30_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.20_f32),
+        LiquidGlassVariant::Elevated => (depth * 0.42, 0.38_f32),
+        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.30_f32),
     };
     let tone_target = match polarity {
         ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
@@ -4640,7 +4807,7 @@ mod tests {
             Err(_) => return,
         };
 
-        // 1. Dark/black backdrop under Auto -> flips to Light Frosted White Glass + dark text
+        // 1. Dark/black backdrop under Auto -> Dark Smoked Glass + crisp white text (Apple HIG)
         let mut dark_bg = vec![0u8; 240 * 120 * 4];
         for px in dark_bg.chunks_exact_mut(4) {
             px[0] = 0x10;
@@ -4649,8 +4816,8 @@ mod tests {
             px[3] = 0xFF;
         }
         surface.set_backdrop_pixels(240, 120, &dark_bg);
-        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
-        assert_eq!(surface.palette().text_primary, theme::LIGHT_TEXT_PRIMARY);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        assert_eq!(surface.palette().text_primary, theme::TEXT_PRIMARY);
 
         surface.begin_draw();
         surface
@@ -4676,13 +4843,13 @@ mod tests {
             assert_eq!(dib.pixel_bgra(2, 2), Some([0, 0, 0, 0]));
             let interior = dib.pixel_bgra(75, 50).unwrap();
             assert!(
-                interior[0] > 45 && interior[0] < 160 && interior[3] > 220,
-                "expected translucent light frosted glass on dark backdrop, got {:?}",
+                interior[0] < 90 && interior[1] < 90 && interior[2] < 90 && interior[3] > 220,
+                "expected translucent dark smoked glass on dark backdrop, got {:?}",
                 interior
             );
         }
 
-        // 2. White/bright backdrop under Auto -> flips to Dark Smoked Glass + white text
+        // 2. White/bright backdrop under Auto -> Light Frosted White Glass + near-black text (Apple HIG)
         let mut light_bg = vec![0u8; 240 * 120 * 4];
         for px in light_bg.chunks_exact_mut(4) {
             px[0] = 0xF5;
@@ -4691,8 +4858,8 @@ mod tests {
             px[3] = 0xFF;
         }
         surface.set_backdrop_pixels(240, 120, &light_bg);
-        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
-        assert_eq!(surface.palette().text_primary, theme::TEXT_PRIMARY);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, theme::LIGHT_TEXT_PRIMARY);
 
         surface.begin_draw();
         surface
@@ -4707,8 +4874,8 @@ mod tests {
             let dib = surface.dib.borrow();
             let interior = dib.pixel_bgra(75, 50).unwrap();
             assert!(
-                interior[0] > 100 && interior[0] < 215 && interior[3] > 220,
-                "expected translucent dark smoked glass on bright backdrop, got {:?}",
+                interior[0] > 180 && interior[1] > 180 && interior[2] > 180 && interior[3] > 220,
+                "expected translucent light frosted white glass on bright backdrop, got {:?}",
                 interior
             );
         }
@@ -4841,5 +5008,122 @@ mod tests {
         assert_eq!(mta_extracted.width, 48);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn edge_surface_flared_shadow_and_contour_match() {
+        let surface = match NativeSurface::new("HimeEdgeShadowTest", -2000, -2000, 120, 240) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Verify signed distance matches the 10/13 concave flare Bezier for Left & Right.
+        let ear = 13.0_f32;
+        let rect = Rect::new(24.0, 24.0, 56.0, 180.0);
+        // Canonical (ux = ear * 0.72, uy = ear * 0.25) is strictly OUTSIDE the 10/13 Bezier flare.
+        let (d_out_right, _, _) = sdg_edge_contour(
+            rect.width - ear * 0.25,
+            ear * 0.72,
+            rect.width,
+            rect.height,
+            ear,
+            18.0,
+            EdgeSide::Right,
+            true,
+        );
+        assert!(
+            d_out_right > 0.5,
+            "concave Right flare notch should be outside contour, got d={d_out_right}"
+        );
+        let (d_out_left, _, _) = sdg_edge_contour(
+            ear * 0.25,
+            ear * 0.72,
+            rect.width,
+            rect.height,
+            ear,
+            18.0,
+            EdgeSide::Left,
+            true,
+        );
+        assert!(
+            d_out_left > 0.5,
+            "concave Left flare notch should be outside contour, got d={d_out_left}"
+        );
+
+        let w = 120_u32;
+        let h = 240_u32;
+        let bgra = vec![96_u8; (w * h * 4) as usize];
+        surface.set_backdrop_pixels(w, h, &bgra);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_edge_surface(
+                rect,
+                ear,
+                18.0,
+                EdgeSide::Right,
+                true,
+                LiquidGlassStyle::regular(18.0),
+            )
+            .expect("draw Right edge surface");
+        surface.end_draw_and_present().expect("end_draw_and_present");
+
+        let alpha_at = |x: u32, y: u32| -> u8 {
+            unsafe { surface.dib.borrow().pixel_bgra(x, y).unwrap()[3] }
+        };
+
+        // Right screen-bezel edge stays flush: zero shadow/glass bleeding past rect.x + rect.width.
+        assert_eq!(alpha_at(82, 110), 0);
+        assert_eq!(alpha_at(82, 24), 0);
+        assert_eq!(alpha_at(82, 204), 0);
+
+        // Above/below the top & bottom body corners (outside the concave flares), no hard
+        // rectangular/rounded-corner shadow bump should protrude.
+        assert!(
+            alpha_at(30, 18) <= 30,
+            "top-left corner above flare alpha={}",
+            alpha_at(30, 18)
+        );
+        assert!(
+            alpha_at(30, 210) <= 30,
+            "bottom-left corner below flare alpha={}",
+            alpha_at(30, 210)
+        );
+        // Inside the main glass body, rendered opaque glass is solid/translucent (>150).
+        assert!(
+            alpha_at(52, 114) > 150,
+            "glass center alpha={}",
+            alpha_at(52, 114)
+        );
+
+        // Repeat bezel-flush check for EdgeSide::Left flared surface.
+        let left_rect = Rect::new(24.0, 24.0, 56.0, 180.0);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_edge_surface(
+                left_rect,
+                ear,
+                18.0,
+                EdgeSide::Left,
+                true,
+                LiquidGlassStyle::regular(18.0),
+            )
+            .expect("draw Left edge surface");
+        surface.end_draw_and_present().expect("end_draw_and_present");
+        assert_eq!(alpha_at(22, 110), 0);
+        assert!(
+            alpha_at(74, 18) <= 30,
+            "Left top-right above flare alpha={}",
+            alpha_at(74, 18)
+        );
+        assert!(
+            alpha_at(74, 210) <= 30,
+            "Left bottom-right below flare alpha={}",
+            alpha_at(74, 210)
+        );
+        assert!(
+            alpha_at(52, 114) > 150,
+            "Left glass center alpha={}",
+            alpha_at(52, 114)
+        );
     }
 }

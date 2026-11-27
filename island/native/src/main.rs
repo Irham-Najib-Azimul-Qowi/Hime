@@ -872,10 +872,34 @@ fn open_shell_uri(uri: &str) {
     }
 }
 
+const STATIC_COMPOSITE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
 #[derive(Default)]
 struct BackdropSlot {
     last_at: Option<Instant>,
     last_hash: Option<u64>,
+    layout_hash: Option<u64>,
+    from_wake: bool,
+}
+
+fn should_skip_settled_backdrop_refresh(
+    slot: &BackdropSlot,
+    now: Instant,
+    cur_layout: u64,
+    force: bool,
+) -> bool {
+    if force || slot.last_hash.is_none() {
+        return false;
+    }
+    if slot.layout_hash == Some(cur_layout) {
+        if slot.from_wake {
+            return true;
+        }
+        return slot
+            .last_at
+            .is_some_and(|t| now.duration_since(t) < STATIC_COMPOSITE_REFRESH_INTERVAL);
+    }
+    false
 }
 
 fn hash_backdrop(width: u32, height: u32, bgra: &[u8]) -> u64 {
@@ -907,6 +931,11 @@ fn update_surface_backdrop(
     {
         return false;
     }
+    let cur_layout = os_shell::visible_window_layout_hash(bounds, exclude_hwnds);
+    if !is_surface_hidden && should_skip_settled_backdrop_refresh(slot, now, cur_layout, force) {
+        slot.last_at = Some(now);
+        return false;
+    }
     slot.last_at = Some(now);
     let Some(cap) = capturer.capture_region(
         bounds.0,
@@ -918,6 +947,8 @@ fn update_surface_backdrop(
     ) else {
         return false;
     };
+    slot.layout_hash = Some(cur_layout);
+    slot.from_wake = is_surface_hidden;
     let h = hash_backdrop(cap.width, cap.height, &cap.bgra);
     if slot.last_hash == Some(h) {
         return false;
@@ -1256,6 +1287,34 @@ impl AppShell {
         }
     }
 
+    /// Ensures the Notch has a fresh exact backdrop before unhiding or expanding.
+    fn ensure_notch_wake_backdrop(&mut self) {
+        if self.notch.is_hidden {
+            self.capture_notch_backdrop(true, true);
+        } else if self.backdrop_notch.last_hash.is_none() {
+            self.capture_notch_backdrop(true, false);
+        } else {
+            let screen = os_shell::primary_screen_bounds();
+            let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
+            let bounds = notch_surface_bounds(self.notch.edge, screen, scale);
+            let cur_layout = os_shell::visible_window_layout_hash(bounds, &self.own_hwnds());
+            if self.backdrop_notch.layout_hash != Some(cur_layout) {
+                self.capture_notch_backdrop(true, false);
+            }
+        }
+    }
+
+    /// Ensures the Dock has a crisp backdrop before waking from auto-hide/smart-hide or enabling,
+    /// using `StretchBlt` only while completely invisible (`show_progress <= 0.02`) and keeping the
+    /// cached wake capture during mid-recede re-hovers so no semi-transparent dock pixels bleed in.
+    fn ensure_dock_wake_backdrop(&mut self) {
+        if self.dock.show_progress.value <= 0.02 {
+            self.capture_dock_backdrop(true, true);
+        } else if self.backdrop_dock.last_hash.is_none() {
+            self.capture_dock_backdrop(true, false);
+        }
+    }
+
     fn capture_overlay_backdrop(&mut self, is_left: bool, force: bool, is_hidden: bool) {
         let screen = os_shell::primary_screen_bounds();
         let exclude = self.own_hwnds();
@@ -1572,6 +1631,9 @@ impl AppShell {
         self.notch.notif_suppression_enabled = norm.suppress_native_notifications;
         self.notch.set_ai_enabled(norm.hime_ai_enabled);
         if norm.notch_mode == "fixed" {
+            if self.notch.is_hidden {
+                self.capture_notch_backdrop(true, true);
+            }
             self.notch.set_hidden(false);
         } else if norm.notch_mode == "peek" && !self.notch.is_expanded {
             self.notch.set_hidden(true);
@@ -1586,11 +1648,13 @@ impl AppShell {
             self.dock.sync_running_windows(&self.last_running_windows);
         }
         if self.dock.visible != norm.dock_enabled {
-            self.dock.set_visible(norm.dock_enabled);
             if norm.dock_enabled {
+                self.capture_dock_backdrop(true, true);
+                self.dock.set_visible(true);
                 self.dock_surface.show();
                 os_shell::hide_taskbar();
             } else {
+                self.dock.set_visible(false);
                 self.dock_surface.hide();
                 os_shell::restore_taskbar();
             }
@@ -1982,11 +2046,14 @@ impl AppShell {
 
                 if self.dock.is_hidden && self.dock.show_progress.value <= 0.2 {
                     if over_wake {
-                        self.capture_dock_backdrop(true, true);
+                        self.ensure_dock_wake_backdrop();
                     }
                     self.dock.set_edge_hovered(over_wake);
                     self.dock_surface.set_click_through(true);
                 } else {
+                    if self.dock.is_hidden && over_wake {
+                        self.ensure_dock_wake_backdrop();
+                    }
                     let dock_rect = self.dock.dock_rect(surf_rect);
                     let over_dock = os_shell::is_point_in_rect(local_dx, local_dy, dock_rect);
                     let over_tray_flyout = self
@@ -2517,6 +2584,16 @@ impl AppShell {
     }
 
     fn execute_notch_action(&mut self, action: NotchAction, ctrl_hwnd: HWND) {
+        if matches!(
+            action,
+            NotchAction::ExpandPanel(_)
+                | NotchAction::OpenWifiList
+                | NotchAction::OpenShortcuts
+                | NotchAction::PrevPanel
+                | NotchAction::NextPanel
+        ) {
+            self.ensure_notch_wake_backdrop();
+        }
         let was_vol_muted = self.notch.volume_muted;
         let quick_add_prio = self.notch.tasks_ws.quick_add_priority;
         let quick_add_tab = self.notch.tasks_ws.active_tab;
@@ -3229,10 +3306,19 @@ impl AppShell {
     }
 
     fn open_settings(&mut self, ctrl_hwnd: HWND) {
+        let had_surface = self.settings_surface.is_some();
         if self.ensure_settings_surface().is_none() {
             return;
         }
         if !self.settings.visible {
+            if had_surface
+                && self
+                    .settings_surface
+                    .as_ref()
+                    .is_some_and(|s| !unsafe { IsWindowVisible(s.hwnd()).as_bool() })
+            {
+                self.capture_settings_backdrop(true, true);
+            }
             self.settings.open();
         }
         if let Some(ref surf) = self.settings_surface {
@@ -3413,11 +3499,20 @@ impl AppShell {
             self.ensure_fast_timer(ctrl_hwnd);
             return;
         }
+        let had_surface = self.drawer_surface.is_some();
         if self.ensure_drawer_surface().is_none() {
             return;
         }
         self.ai_drawer.select_tab(tab);
         if !self.ai_drawer.visible {
+            if had_surface
+                && self
+                    .drawer_surface
+                    .as_ref()
+                    .is_some_and(|s| !unsafe { IsWindowVisible(s.hwnd()).as_bool() })
+            {
+                self.capture_drawer_backdrop(true, true);
+            }
             self.sync_shelf_to_views();
             self.ai_drawer.open();
         }
@@ -3451,6 +3546,7 @@ impl AppShell {
         } else {
             self.ai_drawer.translation.target_lang.to_ascii_lowercase()
         };
+        self.ensure_notch_wake_backdrop();
         self.notch
             .translate_banner
             .show_loading("Selected text", &target_lang);
@@ -3605,8 +3701,17 @@ impl AppShell {
                     return;
                 }
                 if !self.ai_drawer.visible {
+                    let had_surface = self.drawer_surface.is_some();
                     if self.ensure_drawer_surface().is_none() {
                         return;
+                    }
+                    if had_surface
+                        && self
+                            .drawer_surface
+                            .as_ref()
+                            .is_some_and(|s| !unsafe { IsWindowVisible(s.hwnd()).as_bool() })
+                    {
+                        self.capture_drawer_backdrop(true, true);
                     }
                     self.sync_shelf_to_views();
                 }
@@ -3631,6 +3736,9 @@ impl AppShell {
             }
             HotkeyAction::ToggleNotch => {
                 let next = !self.notch.is_expanded;
+                if next {
+                    self.ensure_notch_wake_backdrop();
+                }
                 self.notch.set_expanded(next);
                 self.dirty_notch = true;
                 self.update_surface_click_through();
@@ -3640,6 +3748,7 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Calendar {
                     self.notch.set_expanded(false);
                 } else {
+                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Calendar);
                 }
                 self.dirty_notch = true;
@@ -3650,6 +3759,7 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Music {
                     self.notch.set_expanded(false);
                 } else {
+                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Music);
                 }
                 self.dirty_notch = true;
@@ -3667,6 +3777,7 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Shortcuts {
                     self.notch.set_expanded(false);
                 } else {
+                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Shortcuts);
                 }
                 self.dirty_notch = true;
@@ -5855,5 +5966,40 @@ mod tests {
         notch.set_edge(NotchEdge::Right);
         assert!(is_cursor_in_notch_drop_band(1900.0, 540.0, &notch, screen));
         assert!(!is_cursor_in_notch_drop_band(1820.0, 540.0, &notch, screen));
+    }
+
+    #[test]
+    fn backdrop_slot_skips_composite_when_wake_layout_unchanged() {
+        let now = Instant::now();
+        let slot_empty = BackdropSlot::default();
+        assert!(!should_skip_settled_backdrop_refresh(&slot_empty, now, 123, false));
+
+        let wake_slot = BackdropSlot {
+            last_at: Some(now - Duration::from_secs(10)),
+            last_hash: Some(0xdead_beef),
+            layout_hash: Some(42),
+            from_wake: true,
+        };
+        // Same window layout behind wake capture: skip PrintWindow composite indefinitely
+        assert!(should_skip_settled_backdrop_refresh(&wake_slot, now, 42, false));
+        // Window opened/closed/moved behind surface: must refresh immediately
+        assert!(!should_skip_settled_backdrop_refresh(&wake_slot, now, 99, false));
+        // Forced refresh always runs
+        assert!(!should_skip_settled_backdrop_refresh(&wake_slot, now, 42, true));
+
+        // Non-wake composite slot skips within STATIC_COMPOSITE_REFRESH_INTERVAL (2s), refreshes after
+        let composite_slot = BackdropSlot {
+            last_at: Some(now - Duration::from_millis(600)),
+            last_hash: Some(0xdead_beef),
+            layout_hash: Some(42),
+            from_wake: false,
+        };
+        assert!(should_skip_settled_backdrop_refresh(&composite_slot, now, 42, false));
+        assert!(!should_skip_settled_backdrop_refresh(
+            &composite_slot,
+            now + Duration::from_secs(3),
+            42,
+            false
+        ));
     }
 }

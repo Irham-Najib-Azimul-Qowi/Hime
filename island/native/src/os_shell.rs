@@ -1589,6 +1589,37 @@ fn collect_intersecting_windows(region: RECT, exclude_hwnds: &[isize]) -> Vec<Ba
     search.windows
 }
 
+/// Computes an FNV-1a signature of the visible non-Hime windows intersecting `bounds`
+/// (in Z-order, with extended frame rects) so settled surfaces avoid redundant `PrintWindow`
+/// composites until windows behind them actually open, close, move, or reorder.
+pub fn visible_window_layout_hash(bounds: (i32, i32, u32, u32), exclude_hwnds: &[isize]) -> u64 {
+    let region = RECT {
+        left: bounds.0,
+        top: bounds.1,
+        right: bounds.0.saturating_add(bounds.2 as i32),
+        bottom: bounds.1.saturating_add(bounds.3 as i32),
+    };
+    let wins = collect_intersecting_windows(region, exclude_hwnds);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    };
+    mix(bounds.0 as i64 as u64);
+    mix(bounds.1 as i64 as u64);
+    mix(bounds.2 as u64);
+    mix(bounds.3 as u64);
+    mix(wins.len() as u64);
+    for w in wins {
+        mix(w.hwnd.0 as isize as u64);
+        mix(w.rect.left as i64 as u64);
+        mix(w.rect.top as i64 as u64);
+        mix(w.rect.right as i64 as u64);
+        mix(w.rect.bottom as i64 as u64);
+    }
+    h
+}
+
 #[allow(clippy::too_many_arguments)]
 fn composite_windows_below(
     sx: i32,
@@ -2038,5 +2069,11 @@ mod tests {
         assert_eq!(cap.height, 50);
         assert_eq!(cap.bgra.len(), 100 * 50 * 4);
         assert!(cap.bgra.chunks_exact(4).all(|px| px[3] == 255));
+
+        let h1 = visible_window_layout_hash((0, 0, 200, 100), &[]);
+        let h2 = visible_window_layout_hash((0, 0, 200, 100), &[]);
+        let h3 = visible_window_layout_hash((10, 0, 200, 100), &[]);
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
     }
 }

@@ -665,7 +665,6 @@ pub fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::ColorThemeMode;
 
     #[test]
     fn dual_edge_defaults_start_invisible_and_idle() {
@@ -829,6 +828,9 @@ mod tests {
 
     #[test]
     fn dual_edge_overlays_render_invisible_idle_and_adaptive_flared_glass_without_error() {
+        use crate::d2d::BackdropBuffer;
+        use crate::theme::{ColorThemeMode, ThemePolarity, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
+
         let surface = match NativeSurface::new("HimeOverlayTest", -2000, -2000, 80, 240) {
             Ok(s) => s,
             Err(_) => return,
@@ -844,7 +846,7 @@ mod tests {
         pair.brightness.render(&surface).expect("idle right render");
         surface.end_draw_and_present().expect("idle right present");
 
-        // Expanded edge-flared Liquid Glass under both LightGlass and DarkGlass polarities
+        // Expanded edge-flared Liquid Glass under Auto dark-backdrop (DarkGlass) and bright-backdrop (LightGlass)
         pair.show_volume(72, false, Some("Headphones (USB)".into()));
         pair.show_brightness(84);
         pair.volume.expand.snap_to(1.0);
@@ -855,19 +857,41 @@ mod tests {
         pair.brightness.bar_fill.snap_to(0.84);
         pair.brightness.sun_angle.snap_to(0.84 * TAU);
 
-        for mode in [ColorThemeMode::Dark, ColorThemeMode::Light] {
-            surface.set_color_theme_mode(mode);
-            surface.begin_draw();
-            pair.volume.render(&surface).expect("expanded volume render");
-            surface.end_draw_and_present().expect("expanded volume present");
+        let dark_bg = BackdropBuffer::from_bgra_premul(4, 4, vec![0x14, 0x14, 0x18, 0xFF].repeat(16))
+            .expect("dark backdrop");
+        let bright_bg =
+            BackdropBuffer::from_bgra_premul(4, 4, vec![0xF0, 0xF2, 0xF6, 0xFF].repeat(16))
+                .expect("bright backdrop");
 
-            surface.begin_draw();
-            pair.brightness
-                .render(&surface)
-                .expect("expanded brightness render");
-            surface
-                .end_draw_and_present()
-                .expect("expanded brightness present");
-        }
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        surface.set_backdrop(Some(dark_bg));
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
+
+        surface.begin_draw();
+        pair.volume.render(&surface).expect("dark auto volume render");
+        surface.end_draw_and_present().expect("dark auto volume present");
+        surface.begin_draw();
+        pair.brightness
+            .render(&surface)
+            .expect("dark auto brightness render");
+        surface
+            .end_draw_and_present()
+            .expect("dark auto brightness present");
+
+        surface.set_backdrop(Some(bright_bg));
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
+
+        surface.begin_draw();
+        pair.volume.render(&surface).expect("light auto volume render");
+        surface.end_draw_and_present().expect("light auto volume present");
+        surface.begin_draw();
+        pair.brightness
+            .render(&surface)
+            .expect("light auto brightness render");
+        surface
+            .end_draw_and_present()
+            .expect("light auto brightness present");
     }
 }

@@ -59,8 +59,8 @@ use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, FindWindowExW, GetClassNameA, GetWindow, GetWindowLongW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE,
-    GW_OWNER, HWND_MESSAGE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GWL_EXSTYLE, GW_OWNER, HWND_MESSAGE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::dock::DockItem;
@@ -1521,61 +1521,62 @@ extern "system" {
     fn RegCloseKey(hKey: isize) -> i32;
 }
 
+const HKEY_CURRENT_USER: isize = -2147483647isize; // 0x80000001
+const REG_KEY_READ: u32 = 0x20019;
+const REG_SZ_TYPE: u32 = 1;
+
+unsafe fn reg_open(parent: isize, subkey: &str) -> Option<isize> {
+    let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    let mut out = 0isize;
+    if RegOpenKeyExW(parent, PCWSTR(wide.as_ptr()), 0, REG_KEY_READ, &mut out) == 0 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+unsafe fn reg_string(hkey: isize, name: &str) -> Option<String> {
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let mut kind = 0u32;
+    let mut size = 0u32;
+    if RegQueryValueExW(
+        hkey,
+        PCWSTR(wide.as_ptr()),
+        std::ptr::null_mut(),
+        &mut kind,
+        std::ptr::null_mut(),
+        &mut size,
+    ) != 0
+        || kind != REG_SZ_TYPE
+        || size == 0
+        || size > 65536
+    {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    if RegQueryValueExW(
+        hkey,
+        PCWSTR(wide.as_ptr()),
+        std::ptr::null_mut(),
+        &mut kind,
+        buf.as_mut_ptr(),
+        &mut size,
+    ) != 0
+    {
+        return None;
+    }
+    let chars: Vec<u16> = buf[..size as usize]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&ch| ch != 0)
+        .collect();
+    String::from_utf16(&chars).ok()
+}
+
 /// Counts live third-party system tray application icons via `Control Panel\NotifyIconSettings`
 /// verified with `Shell_NotifyIconGetRect`.
 pub fn read_tray_count() -> u32 {
-    const HKEY_CURRENT_USER: isize = -2147483647isize; // 0x80000001
-    const KEY_READ: u32 = 0x20019;
-    const REG_SZ: u32 = 1;
     const REG_DWORD: u32 = 4;
-
-    unsafe fn reg_open(parent: isize, subkey: &str) -> Option<isize> {
-        let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
-        let mut out = 0isize;
-        if RegOpenKeyExW(parent, PCWSTR(wide.as_ptr()), 0, KEY_READ, &mut out) == 0 {
-            Some(out)
-        } else {
-            None
-        }
-    }
-
-    unsafe fn reg_string(hkey: isize, name: &str) -> Option<String> {
-        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-        let mut kind = 0u32;
-        let mut size = 0u32;
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            std::ptr::null_mut(),
-            &mut size,
-        ) != 0
-            || kind != REG_SZ
-            || size == 0
-            || size > 65536
-        {
-            return None;
-        }
-        let mut buf = vec![0u8; size as usize];
-        if RegQueryValueExW(
-            hkey,
-            PCWSTR(wide.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            buf.as_mut_ptr(),
-            &mut size,
-        ) != 0
-        {
-            return None;
-        }
-        let chars: Vec<u16> = buf[..size as usize]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|&ch| ch != 0)
-            .collect();
-        String::from_utf16(&chars).ok()
-    }
 
     unsafe fn reg_dword(hkey: isize, name: &str) -> Option<u32> {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
@@ -1837,7 +1838,68 @@ unsafe fn resolve_uwp_child_target(host_hwnd: HWND, host_pid: u32) -> Option<(HW
     search.core_match.or(search.fallback_match)
 }
 
+fn find_windowsapps_exe_from_registry(
+    package_prefix: &str,
+    exe_candidates: &[&str],
+) -> Option<String> {
+    const PACKAGES_KEY: &str =
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+    let root_key = unsafe { reg_open(HKEY_CURRENT_USER, PACKAGES_KEY) }?;
+    let mut best_pkg: Option<String> = None;
+    let mut best_path: Option<String> = None;
+    let mut idx = 0u32;
+    let mut name_buf = [0u16; 260];
+    loop {
+        let mut name_len = name_buf.len() as u32;
+        let rc = unsafe {
+            RegEnumKeyExW(
+                root_key,
+                idx,
+                PWSTR(name_buf.as_mut_ptr()),
+                &mut name_len,
+                std::ptr::null_mut(),
+                PWSTR::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != 0 {
+            break;
+        }
+        idx += 1;
+        let subkey_name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        if !subkey_name.to_ascii_lowercase().starts_with(package_prefix) {
+            continue;
+        }
+        if let Some(sub_key) = unsafe { reg_open(root_key, &subkey_name) } {
+            let folder = unsafe { reg_string(sub_key, "PackageRootFolder") };
+            unsafe {
+                RegCloseKey(sub_key);
+            }
+            if let Some(root_folder) = folder {
+                for exe in exe_candidates {
+                    let candidate = Path::new(&root_folder).join(exe);
+                    if candidate.is_file() {
+                        if best_pkg.as_ref().is_none_or(|b| subkey_name > *b) {
+                            best_pkg = Some(subkey_name.clone());
+                            best_path = Some(candidate.to_string_lossy().into_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    unsafe {
+        RegCloseKey(root_key);
+    }
+    best_path
+}
+
 fn find_windowsapps_exe(package_prefix: &str, exe_candidates: &[&str]) -> Option<String> {
+    if let Some(reg_hit) = find_windowsapps_exe_from_registry(package_prefix, exe_candidates) {
+        return Some(reg_hit);
+    }
     let root = Path::new(r"C:\Program Files\WindowsApps");
     let entries = std::fs::read_dir(root).ok()?;
     let mut dirs: Vec<std::path::PathBuf> = entries
@@ -1859,6 +1921,31 @@ fn find_windowsapps_exe(package_prefix: &str, exe_candidates: &[&str]) -> Option
         }
     }
     None
+}
+
+fn uwp_resolved_cache() -> &'static std::sync::Mutex<HashMap<(isize, u32), String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<(isize, u32), String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn cache_uwp_resolved_exe(host_hwnd: isize, host_pid: u32, exe_path: &str) {
+    if host_hwnd == 0 || host_pid == 0 || exe_path.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = uwp_resolved_cache().lock() {
+        if guard.len() >= 128 && !guard.contains_key(&(host_hwnd, host_pid)) {
+            guard.clear();
+        }
+        guard.insert((host_hwnd, host_pid), exe_path.to_string());
+    }
+}
+
+fn lookup_uwp_resolved_exe(host_hwnd: isize, host_pid: u32) -> Option<String> {
+    uwp_resolved_cache()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&(host_hwnd, host_pid)).cloned())
 }
 
 fn fallback_uwp_package_exe(title: &str) -> Option<String> {
@@ -1902,6 +1989,32 @@ fn fallback_uwp_package_exe(title: &str) -> Option<String> {
     resolved
 }
 
+/// Returns `true` when DWM cloaking means the window should be omitted from the Dock.
+/// Minimized windows (`IsIconic`) on the current desktop (including suspended UWP apps with
+/// `DWM_CLOAKED_APP = 1`) remain listed unless shell-cloaked (`DWM_CLOAKED_SHELL = 2`) for
+/// another virtual desktop.
+fn is_window_cloaked_excluded(cloaked: u32, is_minimized: bool) -> bool {
+    const DWM_CLOAKED_SHELL: u32 = 0x0000_0002;
+    if is_minimized {
+        (cloaked & DWM_CLOAKED_SHELL) != 0
+    } else {
+        cloaked != 0
+    }
+}
+
+/// Returns `true` when a non-minimized window has a degenerate or far-offscreen rect.
+/// Win32 moves minimized (`IsIconic`) windows to `(-32000, -32000)`, so minimized windows
+/// bypass this check and stay visible in the Dock.
+fn is_window_rect_excluded(rect: RECT, is_minimized: bool) -> bool {
+    if is_minimized {
+        return false;
+    }
+    rect.right - rect.left <= 1
+        || rect.bottom - rect.top <= 1
+        || rect.left <= -9000
+        || rect.top <= -9000
+}
+
 unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let out = &mut *(lparam.0 as *mut Vec<RunningWindow>);
 
@@ -1909,21 +2022,18 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
         return true.into();
     }
 
+    let is_minimized = IsIconic(hwnd).as_bool();
+
     let mut cloaked = 0u32;
     let size = std::mem::size_of::<u32>() as u32;
     if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, size).is_ok()
-        && cloaked != 0
+        && is_window_cloaked_excluded(cloaked, is_minimized)
     {
         return true.into();
     }
 
     let mut rect = RECT::default();
-    if GetWindowRect(hwnd, &mut rect).is_ok()
-        && (rect.right - rect.left <= 1
-            || rect.bottom - rect.top <= 1
-            || rect.left <= -9000
-            || rect.top <= -9000)
-    {
+    if GetWindowRect(hwnd, &mut rect).is_ok() && is_window_rect_excluded(rect, is_minimized) {
         return true.into();
     }
 
@@ -1993,6 +2103,9 @@ unsafe extern "system" fn enum_running_windows_proc(hwnd: HWND, lparam: LPARAM) 
             {
                 return true.into();
             }
+            cache_uwp_resolved_exe(hwnd.0 as isize, pid, &exe_path);
+        } else if let Some(cached_exe) = lookup_uwp_resolved_exe(hwnd.0 as isize, pid) {
+            exe_path = cached_exe;
         } else if let Some(pkg_exe) = fallback_uwp_package_exe(&title) {
             exe_path = pkg_exe;
         }
@@ -2282,6 +2395,65 @@ mod tests {
         if Path::new(r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe").is_file() {
             assert!(fallback_uwp_package_exe("Settings")
                 .is_some_and(|p| p.ends_with("SystemSettings.exe")));
+        }
+    }
+
+    #[test]
+    fn minimized_windows_bypass_offscreen_rect_and_app_cloak_filters() {
+        let minimized_rect = RECT {
+            left: -32000,
+            top: -32000,
+            right: -31840,
+            bottom: -31972,
+        };
+        assert!(!is_window_rect_excluded(minimized_rect, true));
+        assert!(is_window_rect_excluded(minimized_rect, false));
+
+        let tiny_rect = RECT {
+            left: 100,
+            top: 100,
+            right: 101,
+            bottom: 101,
+        };
+        assert!(is_window_rect_excluded(tiny_rect, false));
+
+        let normal_rect = RECT {
+            left: 120,
+            top: 80,
+            right: 1120,
+            bottom: 780,
+        };
+        assert!(!is_window_rect_excluded(normal_rect, false));
+
+        // DWM_CLOAKED_APP (1): hidden when non-minimized, preserved when minimized UWP frame.
+        assert!(is_window_cloaked_excluded(1, false));
+        assert!(!is_window_cloaked_excluded(1, true));
+        assert!(!is_window_cloaked_excluded(0, true));
+        // DWM_CLOAKED_SHELL (2): window lives on another virtual desktop, always excluded.
+        assert!(is_window_cloaked_excluded(2, false));
+        assert!(is_window_cloaked_excluded(2, true));
+        assert!(is_window_cloaked_excluded(3, true));
+    }
+
+    #[test]
+    fn uwp_resolved_cache_and_registry_fallback_preserve_exe_path() {
+        cache_uwp_resolved_exe(
+            999_001,
+            42_420,
+            r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe",
+        );
+        assert_eq!(
+            lookup_uwp_resolved_exe(999_001, 42_420).as_deref(),
+            Some(r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe")
+        );
+        assert_eq!(lookup_uwp_resolved_exe(999_001, 99_999), None);
+
+        if let Some(calc_exe) = fallback_uwp_package_exe("Calculator") {
+            assert!(
+                calc_exe.ends_with("CalculatorApp.exe"),
+                "unexpected Calculator path: {calc_exe}"
+            );
+            assert!(Path::new(&calc_exe).is_file());
         }
     }
 }

@@ -2545,29 +2545,29 @@ mod tests {
             dock.tick(1.0 / 60.0);
         }
 
-        // Dark backdrop under Auto mode -> Light Frosted White Glass with near-black text/icons.
+        // Dark backdrop under Auto mode -> Dark Smoked Glass with crisp white text/icons.
         surface.set_color_theme_mode(ColorThemeMode::Auto);
         let dark_bgra = vec![0x14, 0x14, 0x16, 0xFF].repeat(32 * 32);
         surface.set_backdrop_pixels(32, 32, &dark_bgra);
-        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
-        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
-        surface.begin_draw();
-        dock.render(&surface)
-            .expect("DockBar LightGlass over dark backdrop render");
-        surface
-            .end_draw_and_present()
-            .expect("DockBar LightGlass present");
-
-        // Bright backdrop under Auto mode -> Dark Smoked Glass with crisp white text/icons.
-        let light_bgra = vec![0xF2, 0xF2, 0xF4, 0xFF].repeat(32 * 32);
-        surface.set_backdrop_pixels(32, 32, &light_bgra);
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
         assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
         surface.begin_draw();
         dock.render(&surface)
-            .expect("DockBar DarkGlass over bright backdrop render");
+            .expect("DockBar DarkGlass over dark backdrop render");
         surface
             .end_draw_and_present()
             .expect("DockBar DarkGlass present");
+
+        // Bright backdrop under Auto mode -> Light Frosted White Glass with near-black text/icons.
+        let light_bgra = vec![0xF2, 0xF2, 0xF4, 0xFF].repeat(32 * 32);
+        surface.set_backdrop_pixels(32, 32, &light_bgra);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
+        surface.begin_draw();
+        dock.render(&surface)
+            .expect("DockBar LightGlass over bright backdrop render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar LightGlass present");
     }
 }
