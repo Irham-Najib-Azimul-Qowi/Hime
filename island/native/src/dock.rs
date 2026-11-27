@@ -11,7 +11,7 @@
 //!   + expandable tray flyout).
 //! - Apple Liquid Glass tooltips and full `hit_test_action` / `hit_test_context_action`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use windows::core::Result;
@@ -289,10 +289,13 @@ impl DockItem {
 /// Floating bottom Dock bar rendered in Apple Liquid Glass with invisible AutoHide/Smart
 /// minimization, pinned + grouped running apps, real Win32 HICONs, Virtual Desktop Switcher
 /// ("Spaces") flyout, System Tray badge + flyout, and Liquid Glass hover tooltips.
+const MAX_DOCK_ICON_CACHE: usize = 32;
+
 #[derive(Debug, Clone)]
 pub struct DockBar {
     items: Vec<DockItem>,
     icon_cache: HashMap<String, Option<IconRgba>>,
+    icon_cache_order: VecDeque<String>,
     tray_items: Vec<TrayEntry>,
     spaces: Vec<SpaceEntry>,
     pub mode: DockMode,
@@ -329,6 +332,7 @@ impl DockBar {
         Self {
             items: Vec::new(),
             icon_cache: HashMap::new(),
+            icon_cache_order: VecDeque::new(),
             tray_items: Vec::new(),
             spaces: vec![SpaceEntry::new("desktop-0", "Desktop 1", 0, true)],
             mode: DockMode::Fixed,
@@ -882,15 +886,31 @@ impl DockBar {
         }
 
         let extracted = extract_window_or_exe_icon(hwnd, trimmed, 64);
-        self.icon_cache.insert(cache_key, extracted.clone());
+        self.insert_icon_cache(cache_key, extracted.clone());
         extracted
+    }
+
+    fn insert_icon_cache(&mut self, key: String, icon: Option<IconRgba>) {
+        if self.icon_cache.contains_key(&key) {
+            self.icon_cache.insert(key, icon);
+            return;
+        }
+        while self.icon_cache.len() >= MAX_DOCK_ICON_CACHE {
+            let Some(oldest) = self.icon_cache_order.pop_front() else {
+                self.icon_cache.clear();
+                break;
+            };
+            self.icon_cache.remove(&oldest);
+        }
+        self.icon_cache_order.push_back(key.clone());
+        self.icon_cache.insert(key, icon);
     }
 
     /// Seeds or overrides a cached icon for `exe_path` (primarily for tests or custom icons).
     pub fn cache_icon_for_path(&mut self, exe_path: &str, icon: Option<IconRgba>) {
         let key = exe_path.trim().to_lowercase();
         if !key.is_empty() {
-            self.icon_cache.insert(key, icon);
+            self.insert_icon_cache(key, icon);
         }
     }
 
@@ -2993,6 +3013,12 @@ mod tests {
         dock.sync_running_windows(&windows);
         assert_eq!(dock.hovered_index(), Some(0));
         assert_eq!(dock.icon_cache_len(), 1);
+
+        // Icon cache stays bounded at MAX_DOCK_ICON_CACHE across long uptimes.
+        for idx in 0..(MAX_DOCK_ICON_CACHE + 12) {
+            dock.cache_icon_for_path(&format!(r"C:\Apps\App{idx}.exe"), None);
+        }
+        assert!(dock.icon_cache_len() <= MAX_DOCK_ICON_CACHE);
     }
 
     #[test]

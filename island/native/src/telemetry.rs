@@ -389,18 +389,23 @@ fn run_poller_loop(
         GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
             .and_then(|op| op.get())
             .ok();
+    let mut wmi_services: Option<ComRaw> = unsafe { connect_wmi_services() };
     let mut poll_tick: u64 = 0;
     let mut cached_wifi: Vec<WifiNetworkInfo> = Vec::new();
     let mut cached_tray_count: u32 = 0;
+    let mut cached_brightness: u8 = CACHED_BRIGHTNESS.load(Ordering::Relaxed);
 
     while !stop.load(Ordering::Relaxed) {
         let (hours, minutes) = read_local_clock();
         let network = read_network_status(&mut prev_net);
         let battery = read_battery_status();
         let volume = read_volume_status(enumerator.as_ref());
-        let brightness = read_brightness();
+        if poll_tick % 3 == 0 {
+            cached_brightness = read_brightness_with_wmi(&mut wmi_services);
+        }
+        let brightness = cached_brightness;
 
-        if poll_tick % 5 == 0 {
+        if poll_tick % 15 == 0 {
             cached_wifi = scan_available_wifi_networks();
         }
         if poll_tick % 3 == 0 {
@@ -966,6 +971,10 @@ unsafe fn connect_wmi_services() -> Option<ComRaw> {
 
 unsafe fn wmi_read_brightness() -> Option<u8> {
     let services = connect_wmi_services()?;
+    wmi_read_brightness_with_services(&services)
+}
+
+unsafe fn wmi_read_brightness_with_services(services: &ComRaw) -> Option<u8> {
     let wql = BSTR::from("WQL");
     let query = BSTR::from("SELECT CurrentBrightness FROM WmiMonitorBrightness");
     let mut enum_ptr: *mut c_void = std::ptr::null_mut();
@@ -1363,6 +1372,30 @@ unsafe fn dxva2_set_brightness(percent: u8) -> bool {
         LPARAM(&mut ctx as *mut Ctx<'_> as isize),
     );
     ctx.applied
+}
+
+/// Reads brightness using a persistent `IWbemServices` handle on the telemetry poller thread,
+/// falling back to DXVA2 DDC/CI and reconnecting lazily only if the WMI query fails.
+fn read_brightness_with_wmi(wmi_services: &mut Option<ComRaw>) -> u8 {
+    let hw = unsafe {
+        let mut reading = wmi_services
+            .as_ref()
+            .and_then(|svc| wmi_read_brightness_with_services(svc));
+        if reading.is_none() {
+            *wmi_services = connect_wmi_services();
+            if let Some(svc) = wmi_services.as_ref() {
+                reading = wmi_read_brightness_with_services(svc);
+            }
+        }
+        reading.or_else(|| dxva2_read_brightness())
+    };
+    if let Some(pct) = hw {
+        let clamped = clamp_brightness_percent(pct);
+        CACHED_BRIGHTNESS.store(clamped, Ordering::Relaxed);
+        clamped
+    } else {
+        CACHED_BRIGHTNESS.load(Ordering::Relaxed)
+    }
 }
 
 /// Reads the current system display brightness (`0..=100`) via WMI (`WmiMonitorBrightness`),
@@ -2270,6 +2303,9 @@ fn fallback_uwp_package_exe(title: &str) -> Option<String> {
     };
 
     if let Ok(mut guard) = map.lock() {
+        if guard.len() >= 128 && !guard.contains_key(&key) {
+            guard.clear();
+        }
         guard.insert(key, resolved.clone());
     }
     resolved

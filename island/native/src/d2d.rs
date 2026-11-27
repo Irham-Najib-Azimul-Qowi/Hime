@@ -48,9 +48,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIDevice3, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn, CreateRoundRectRgn, DeleteDC,
@@ -107,6 +107,7 @@ thread_local! {
     static SURFACE_EVENTS: RefCell<Vec<SurfaceEvent>> = const { RefCell::new(Vec::new()) };
     static SHARED_D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = const { RefCell::new(None) };
     static SHARED_DWRITE_FACTORY: RefCell<Option<IDWriteFactory>> = const { RefCell::new(None) };
+    static SHARED_GPU_CONTEXT: RefCell<Option<SharedGpuContext>> = const { RefCell::new(None) };
 }
 
 fn shared_d2d_factory() -> Result<ID2D1Factory1> {
@@ -134,8 +135,29 @@ fn shared_dwrite_factory() -> Result<IDWriteFactory> {
     })
 }
 
-/// Trims unused working-set pages from the current process back to the OS.
+/// Releases thread-local shared Direct2D, DirectWrite, DXGI, and Direct3D11 COM resources
+/// explicitly before CRT exit / Windows loader lock teardown.
+pub fn release_shared_gpu_resources() {
+    SHARED_GPU_CONTEXT.with(|cell| {
+        cell.borrow_mut().take();
+    });
+    SHARED_DWRITE_FACTORY.with(|cell| {
+        cell.borrow_mut().take();
+    });
+    SHARED_D2D_FACTORY.with(|cell| {
+        cell.borrow_mut().take();
+    });
+}
+
+/// Trims unused DXGI/GPU scratch buffers and OS working-set pages from the current process.
 pub fn trim_working_set() {
+    SHARED_GPU_CONTEXT.with(|cell| {
+        if let Some(ctx) = cell.borrow().as_ref() {
+            if let Ok(dxgi3) = ctx.dxgi_device.cast::<IDXGIDevice3>() {
+                unsafe { dxgi3.Trim() };
+            }
+        }
+    });
     unsafe {
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
@@ -1264,25 +1286,17 @@ fn apply_dwm_acrylic_blur(hwnd: HWND, gradient_aabbggrr: u32) -> bool {
     unsafe { SetWindowCompositionAttribute(hwnd, &mut data) != 0 }
 }
 
-struct GpuAcrylicState {
-    _d3d_device: ID3D11Device,
-    _d2d_device: ID2D1Device,
-    d2d_ctx: ID2D1DeviceContext,
-    swap_chain: IDXGISwapChain1,
-    _dcomp_device: IDCompositionDevice,
-    _dcomp_target: IDCompositionTarget,
-    _dcomp_visual: IDCompositionVisual,
-    active_target: Option<ID2D1Bitmap1>,
+#[derive(Clone)]
+struct SharedGpuContext {
+    d3d_device: ID3D11Device,
+    dxgi_device: IDXGIDevice,
+    dxgi_factory: IDXGIFactory2,
+    d2d_device: ID2D1Device,
+    dcomp_device: IDCompositionDevice,
 }
 
-impl GpuAcrylicState {
-    fn new(
-        hwnd: HWND,
-        d2d_factory: &ID2D1Factory1,
-        width: u32,
-        height: u32,
-        dpi: f32,
-    ) -> Result<(ID2D1RenderTarget, Self)> {
+impl SharedGpuContext {
+    fn create(d2d_factory: &ID2D1Factory1) -> Result<Self> {
         unsafe {
             let create_d3d = |driver_type| {
                 let mut dev: Option<ID3D11Device> = None;
@@ -1304,15 +1318,95 @@ impl GpuAcrylicState {
                 _ => create_d3d(D3D_DRIVER_TYPE_WARP)?
                     .ok_or_else(|| windows::core::Error::from_win32())?,
             };
-
             let dxgi_device: IDXGIDevice = d3d_device.cast()?;
             let d2d_device: ID2D1Device = d2d_factory.CreateDevice(&dxgi_device)?;
-            let d2d_ctx: ID2D1DeviceContext =
-                d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-            d2d_ctx.SetDpi(dpi, dpi);
-
             let dxgi_adapter = dxgi_device.GetAdapter()?;
             let dxgi_factory: IDXGIFactory2 = dxgi_adapter.GetParent()?;
+            let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
+            Ok(Self {
+                d3d_device,
+                dxgi_device,
+                dxgi_factory,
+                d2d_device,
+                dcomp_device,
+            })
+        }
+    }
+
+    fn get_or_init(d2d_factory: &ID2D1Factory1) -> Result<Self> {
+        SHARED_GPU_CONTEXT.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some(existing) = slot.as_ref() {
+                return Ok(existing.clone());
+            }
+            let created = Self::create(d2d_factory)?;
+            *slot = Some(created.clone());
+            Ok(created)
+        })
+    }
+
+    fn reset() {
+        SHARED_GPU_CONTEXT.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
+}
+
+struct GpuAcrylicState {
+    _shared: SharedGpuContext,
+    d2d_ctx: ID2D1DeviceContext,
+    swap_chain: IDXGISwapChain1,
+    dcomp_target: Option<IDCompositionTarget>,
+    dcomp_visual: Option<IDCompositionVisual>,
+    active_target: Option<ID2D1Bitmap1>,
+}
+
+impl Drop for GpuAcrylicState {
+    fn drop(&mut self) {
+        unsafe {
+            self.d2d_ctx.SetTarget(None);
+            if let Some(ref target) = self.dcomp_target {
+                let _ = target.SetRoot(None);
+            }
+        }
+        self.active_target = None;
+        self.dcomp_visual = None;
+        self.dcomp_target = None;
+    }
+}
+
+impl GpuAcrylicState {
+    fn new(
+        hwnd: HWND,
+        d2d_factory: &ID2D1Factory1,
+        width: u32,
+        height: u32,
+        dpi: f32,
+    ) -> Result<(ID2D1RenderTarget, Self)> {
+        match Self::new_with_shared(SharedGpuContext::get_or_init(d2d_factory)?, hwnd, width, height, dpi) {
+            Ok(res) => Ok(res),
+            Err(_) => {
+                // Recover once if the shared DXGI/D3D device was lost or reset.
+                SharedGpuContext::reset();
+                let fresh = SharedGpuContext::get_or_init(d2d_factory)?;
+                Self::new_with_shared(fresh, hwnd, width, height, dpi)
+            }
+        }
+    }
+
+    fn new_with_shared(
+        shared: SharedGpuContext,
+        hwnd: HWND,
+        width: u32,
+        height: u32,
+        dpi: f32,
+    ) -> Result<(ID2D1RenderTarget, Self)> {
+        unsafe {
+            let d2d_ctx: ID2D1DeviceContext = shared
+                .d2d_device
+                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            d2d_ctx.SetDpi(dpi, dpi);
+
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width.max(1),
                 Height: height.max(1),
@@ -1329,27 +1423,25 @@ impl GpuAcrylicState {
                 AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                 Flags: 0,
             };
-            let swap_chain: IDXGISwapChain1 =
-                dxgi_factory.CreateSwapChainForComposition(&d3d_device, &desc, None)?;
+            let swap_chain: IDXGISwapChain1 = shared
+                .dxgi_factory
+                .CreateSwapChainForComposition(&shared.d3d_device, &desc, None)?;
 
-            let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
-            let dcomp_target = dcomp_device.CreateTargetForHwnd(hwnd, true)?;
-            let dcomp_visual = dcomp_device.CreateVisual()?;
+            let dcomp_target = shared.dcomp_device.CreateTargetForHwnd(hwnd, true)?;
+            let dcomp_visual = shared.dcomp_device.CreateVisual()?;
             dcomp_visual.SetContent(&swap_chain)?;
             dcomp_target.SetRoot(&dcomp_visual)?;
-            dcomp_device.Commit()?;
+            shared.dcomp_device.Commit()?;
 
             let d2d_target: ID2D1RenderTarget = d2d_ctx.cast()?;
             Ok((
                 d2d_target,
                 Self {
-                    _d3d_device: d3d_device,
-                    _d2d_device: d2d_device,
+                    _shared: shared,
                     d2d_ctx,
                     swap_chain,
-                    _dcomp_device: dcomp_device,
-                    _dcomp_target: dcomp_target,
-                    _dcomp_visual: dcomp_visual,
+                    dcomp_target: Some(dcomp_target),
+                    dcomp_visual: Some(dcomp_visual),
                     active_target: None,
                 },
             ))
@@ -1661,8 +1753,10 @@ impl NativeSurface {
         }
     }
 
-    /// Hides the surface window.
+    /// Hides the surface window and drops transient layer/glass caches.
     pub fn hide(&self) {
+        self.cached_layer.borrow_mut().take();
+        self.glass_bitmap_cache.borrow_mut().clear();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }

@@ -1171,8 +1171,8 @@ struct AppShell {
     dock_surface: NativeSurface,
     dock_tooltip_surface: Option<NativeSurface>,
     last_dock_tooltip: Option<(i32, i32, u32, u32, String, u8)>,
-    overlay_left_surface: NativeSurface,
-    overlay_right_surface: NativeSurface,
+    overlay_left_surface: Option<NativeSurface>,
+    overlay_right_surface: Option<NativeSurface>,
     settings_surface: Option<NativeSurface>,
     drawer_surface: Option<NativeSurface>,
     backdrop_capturer: Option<os_shell::BackdropCapturer>,
@@ -1245,24 +1245,6 @@ impl AppShell {
         }
         subclass_surface(dock_surface.hwnd());
 
-        let (olx, oly, olw, olh) = left_overlay_bounds(screen, 1.0);
-        let mut overlay_left_surface = NativeSurface::new("HimeOverlayLeft", olx, oly, olw, olh)?;
-        let ol_scale = (overlay_left_surface.dpi() / 96.0).max(0.5);
-        if (ol_scale - 1.0).abs() > 0.01 {
-            let (sx, sy, sw, sh) = left_overlay_bounds(screen, ol_scale);
-            let _ = overlay_left_surface.set_bounds(sx, sy, sw, sh);
-        }
-        subclass_surface(overlay_left_surface.hwnd());
-
-        let (orx, ory, orw, orh) = right_overlay_bounds(screen, 1.0);
-        let mut overlay_right_surface = NativeSurface::new("HimeOverlayRight", orx, ory, orw, orh)?;
-        let or_scale = (overlay_right_surface.dpi() / 96.0).max(0.5);
-        if (or_scale - 1.0).abs() > 0.01 {
-            let (sx, sy, sw, sh) = right_overlay_bounds(screen, or_scale);
-            let _ = overlay_right_surface.set_bounds(sx, sy, sw, sh);
-        }
-        subclass_surface(overlay_right_surface.hwnd());
-
         d2d::set_surface_event_target(ctrl_hwnd);
         EXTRA_EVENT_TARGET.store(ctrl_hwnd.0 as isize, Ordering::Relaxed);
 
@@ -1316,8 +1298,8 @@ impl AppShell {
             dock_surface,
             dock_tooltip_surface: None,
             last_dock_tooltip: None,
-            overlay_left_surface,
-            overlay_right_surface,
+            overlay_left_surface: None,
+            overlay_right_surface: None,
             settings_surface: None,
             drawer_surface: None,
             backdrop_capturer: need_sw_backdrop.then(os_shell::BackdropCapturer::new),
@@ -1406,9 +1388,13 @@ impl AppShell {
         let mut hwnds = vec![
             self.notch_surface.hwnd().0 as isize,
             self.dock_surface.hwnd().0 as isize,
-            self.overlay_left_surface.hwnd().0 as isize,
-            self.overlay_right_surface.hwnd().0 as isize,
         ];
+        if let Some(ref s) = self.overlay_left_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
+        if let Some(ref s) = self.overlay_right_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
         if let Some(ref s) = self.settings_surface {
             hwnds.push(s.hwnd().0 as isize);
         }
@@ -1923,26 +1909,99 @@ impl AppShell {
         self.mark_all_dirty();
     }
 
+    fn ensure_overlay_surface(&mut self, is_left: bool) -> Option<HWND> {
+        let slot = if is_left {
+            &self.overlay_left_surface
+        } else {
+            &self.overlay_right_surface
+        };
+        if let Some(ref surf) = slot {
+            return Some(surf.hwnd());
+        }
+        let screen = os_shell::primary_screen_bounds();
+        let title = if is_left {
+            "HimeOverlayLeft"
+        } else {
+            "HimeOverlayRight"
+        };
+        let (ox, oy, ow, oh) = if is_left {
+            left_overlay_bounds(screen, 1.0)
+        } else {
+            right_overlay_bounds(screen, 1.0)
+        };
+        let mut surf = NativeSurface::new(title, ox, oy, ow, oh).ok()?;
+        let scale = (surf.dpi() / 96.0).max(0.5);
+        if (scale - 1.0).abs() > 0.01 {
+            let (sx, sy, sw, sh) = if is_left {
+                left_overlay_bounds(screen, scale)
+            } else {
+                right_overlay_bounds(screen, scale)
+            };
+            let _ = surf.set_bounds(sx, sy, sw, sh);
+        }
+        let hwnd = surf.hwnd();
+        subclass_surface(hwnd);
+        if is_left {
+            self.overlay_left_surface = Some(surf);
+            self.dirty_overlay_left = true;
+        } else {
+            self.overlay_right_surface = Some(surf);
+            self.dirty_overlay_right = true;
+        }
+        Some(hwnd)
+    }
+
+    fn release_overlay_surfaces_if_idle(&mut self) {
+        let mut released = false;
+        if !self.overlays.volume.is_visible() {
+            if let Some(surf) = self.overlay_left_surface.take() {
+                remove_tracked_hwnd(surf.hwnd());
+                drop(surf);
+                released = true;
+            }
+            self.dirty_overlay_left = false;
+        }
+        if !self.overlays.brightness.is_visible() {
+            if let Some(surf) = self.overlay_right_surface.take() {
+                remove_tracked_hwnd(surf.hwnd());
+                drop(surf);
+                released = true;
+            }
+            self.dirty_overlay_right = false;
+        }
+        if released {
+            d2d::trim_working_set();
+        }
+    }
+
     fn sync_overlay_visibility(&mut self) {
         if self.overlays.volume.is_visible() {
-            self.overlay_left_surface.show();
-            let interactive = self.overlays.volume.is_expanded()
-                || self.overlays.volume.is_hovered
-                || self.overlays.volume.is_dragging;
-            self.overlay_left_surface.set_click_through(!interactive);
-        } else {
-            self.overlay_left_surface.set_click_through(true);
-            self.overlay_left_surface.hide();
+            if self.ensure_overlay_surface(true).is_some() {
+                if let Some(ref surf) = self.overlay_left_surface {
+                    surf.show();
+                    let interactive = self.overlays.volume.is_expanded()
+                        || self.overlays.volume.is_hovered
+                        || self.overlays.volume.is_dragging;
+                    surf.set_click_through(!interactive);
+                }
+            }
+        } else if let Some(ref surf) = self.overlay_left_surface {
+            surf.set_click_through(true);
+            surf.hide();
         }
         if self.overlays.brightness.is_visible() {
-            self.overlay_right_surface.show();
-            let interactive = self.overlays.brightness.is_expanded()
-                || self.overlays.brightness.is_hovered
-                || self.overlays.brightness.is_dragging;
-            self.overlay_right_surface.set_click_through(!interactive);
-        } else {
-            self.overlay_right_surface.set_click_through(true);
-            self.overlay_right_surface.hide();
+            if self.ensure_overlay_surface(false).is_some() {
+                if let Some(ref surf) = self.overlay_right_surface {
+                    surf.show();
+                    let interactive = self.overlays.brightness.is_expanded()
+                        || self.overlays.brightness.is_hovered
+                        || self.overlays.brightness.is_dragging;
+                    surf.set_click_through(!interactive);
+                }
+            }
+        } else if let Some(ref surf) = self.overlay_right_surface {
+            surf.set_click_through(true);
+            surf.hide();
         }
     }
 
@@ -2399,7 +2458,9 @@ impl AppShell {
                     {
                         self.overlays.volume.hide();
                         self.dirty_overlay_left = true;
-                        self.overlay_left_surface.set_click_through(true);
+                        if let Some(ref surf) = self.overlay_left_surface {
+                            surf.set_click_through(true);
+                        }
                     }
                     if !over_right_overlay
                         && !self.overlays.brightness.is_dragging
@@ -2408,7 +2469,9 @@ impl AppShell {
                     {
                         self.overlays.brightness.hide();
                         self.dirty_overlay_right = true;
-                        self.overlay_right_surface.set_click_through(true);
+                        if let Some(ref surf) = self.overlay_right_surface {
+                            surf.set_click_through(true);
+                        }
                     }
                 }
             }
@@ -2431,12 +2494,17 @@ impl AppShell {
     ) -> bool {
         let (scale, sw, sh) = {
             let surface = if is_left {
-                &self.overlay_left_surface
+                self.overlay_left_surface.as_ref()
             } else {
-                &self.overlay_right_surface
+                self.overlay_right_surface.as_ref()
             };
-            let (w, h) = surface.dip_size();
-            ((surface.dpi() / 96.0).max(0.5), w, h)
+            if let Some(s) = surface {
+                let (w, h) = s.dip_size();
+                ((s.dpi() / 96.0).max(0.5), w, h)
+            } else {
+                let s = (self.notch_surface.dpi() / 96.0).max(0.5);
+                (s, OVERLAY_DIP_WIDTH, OVERLAY_DIP_HEIGHT)
+            }
         };
         let (ox, oy, _, _) = if is_left {
             left_overlay_bounds(screen, scale)
@@ -2464,11 +2532,13 @@ impl AppShell {
         };
         if !enabled {
             let surf = if is_left {
-                &self.overlay_left_surface
+                self.overlay_left_surface.as_ref()
             } else {
-                &self.overlay_right_surface
+                self.overlay_right_surface.as_ref()
             };
-            surf.set_click_through(true);
+            if let Some(s) = surf {
+                s.set_click_through(true);
+            }
             return false;
         }
         let over_edge = os_shell::is_overlay_edge_hovered(
@@ -2481,21 +2551,40 @@ impl AppShell {
         );
         let over = over_pill || over_wake_rect || over_edge;
         let _ = was_visible;
-        let (hud, surf) = if is_left {
-            (&mut self.overlays.volume, &self.overlay_left_surface)
-        } else {
-            (&mut self.overlays.brightness, &self.overlay_right_surface)
-        };
-        if over != is_hovered && (over || !is_dragging) {
-            hud.set_hovered(over);
-            if is_left {
-                self.dirty_overlay_left = true;
+        {
+            let hud = if is_left {
+                &mut self.overlays.volume
             } else {
-                self.dirty_overlay_right = true;
+                &mut self.overlays.brightness
+            };
+            if over != is_hovered && (over || !is_dragging) {
+                hud.set_hovered(over);
+                if is_left {
+                    self.dirty_overlay_left = true;
+                } else {
+                    self.dirty_overlay_right = true;
+                }
             }
         }
-        let interactive = is_expanded || hud.is_expanded() || hud.is_hovered || is_dragging;
-        surf.set_click_through(!interactive);
+        let interactive = {
+            let hud = if is_left {
+                &self.overlays.volume
+            } else {
+                &self.overlays.brightness
+            };
+            is_expanded || hud.is_expanded() || hud.is_hovered || is_dragging
+        };
+        if interactive {
+            let _ = self.ensure_overlay_surface(is_left);
+        }
+        let surf = if is_left {
+            self.overlay_left_surface.as_ref()
+        } else {
+            self.overlay_right_surface.as_ref()
+        };
+        if let Some(s) = surf {
+            s.set_click_through(!interactive);
+        }
         over
     }
 
@@ -2550,8 +2639,14 @@ impl AppShell {
         let raw = hwnd.0 as isize;
         raw == self.notch_surface.hwnd().0 as isize
             || raw == self.dock_surface.hwnd().0 as isize
-            || raw == self.overlay_left_surface.hwnd().0 as isize
-            || raw == self.overlay_right_surface.hwnd().0 as isize
+            || self
+                .overlay_left_surface
+                .as_ref()
+                .is_some_and(|s| raw == s.hwnd().0 as isize)
+            || self
+                .overlay_right_surface
+                .as_ref()
+                .is_some_and(|s| raw == s.hwnd().0 as isize)
             || self
                 .settings_surface
                 .as_ref()
@@ -2572,11 +2667,19 @@ impl AppShell {
             self.handle_dock_surface_event(ev.kind, ctrl_hwnd);
             return;
         }
-        if raw_hwnd == self.overlay_left_surface.hwnd().0 as isize {
+        if self
+            .overlay_left_surface
+            .as_ref()
+            .is_some_and(|s| raw_hwnd == s.hwnd().0 as isize)
+        {
             self.handle_overlay_surface_event(true, ev.kind, ctrl_hwnd);
             return;
         }
-        if raw_hwnd == self.overlay_right_surface.hwnd().0 as isize {
+        if self
+            .overlay_right_surface
+            .as_ref()
+            .is_some_and(|s| raw_hwnd == s.hwnd().0 as isize)
+        {
             self.handle_overlay_surface_event(false, ev.kind, ctrl_hwnd);
             return;
         }
@@ -2598,11 +2701,19 @@ impl AppShell {
     }
 
     fn handle_extra_surface_event(&mut self, ev: ExtraSurfaceEvent, ctrl_hwnd: HWND) {
-        if ev.hwnd == self.overlay_left_surface.hwnd().0 as isize {
+        if self
+            .overlay_left_surface
+            .as_ref()
+            .is_some_and(|s| ev.hwnd == s.hwnd().0 as isize)
+        {
             self.handle_overlay_extra_event(true, ev.kind, ctrl_hwnd);
             return;
         }
-        if ev.hwnd == self.overlay_right_surface.hwnd().0 as isize {
+        if self
+            .overlay_right_surface
+            .as_ref()
+            .is_some_and(|s| ev.hwnd == s.hwnd().0 as isize)
+        {
             self.handle_overlay_extra_event(false, ev.kind, ctrl_hwnd);
             return;
         }
@@ -3281,10 +3392,12 @@ impl AppShell {
         ctrl_hwnd: HWND,
     ) {
         let (surface_hwnd, scale, sw, sh) = {
-            let surf = if is_left {
-                &self.overlay_left_surface
+            let Some(surf) = (if is_left {
+                self.overlay_left_surface.as_ref()
             } else {
-                &self.overlay_right_surface
+                self.overlay_right_surface.as_ref()
+            }) else {
+                return;
             };
             let (w, h) = surf.dip_size();
             (surf.hwnd(), (surf.dpi() / 96.0).max(0.5), w, h)
@@ -4623,6 +4736,7 @@ impl AppShell {
         self.render_all();
         self.release_settings_surface_if_idle();
         self.release_drawer_surface_if_idle();
+        self.release_overlay_surfaces_if_idle();
 
         if !self.startup_trim_done && now.duration_since(self.startup_at) >= Duration::from_secs(2) {
             self.startup_trim_done = true;
@@ -4639,10 +4753,14 @@ impl AppShell {
                 os_shell::ensure_topmost(self.dock_surface.hwnd());
             }
             if self.overlays.volume.is_visible() {
-                os_shell::ensure_topmost(self.overlay_left_surface.hwnd());
+                if let Some(ref surf) = self.overlay_left_surface {
+                    os_shell::ensure_topmost(surf.hwnd());
+                }
             }
             if self.overlays.brightness.is_visible() {
-                os_shell::ensure_topmost(self.overlay_right_surface.hwnd());
+                if let Some(ref surf) = self.overlay_right_surface {
+                    os_shell::ensure_topmost(surf.hwnd());
+                }
             }
         }
 
@@ -4754,23 +4872,25 @@ impl AppShell {
             self.render_surface("HimeDock", &self.dock_surface, |s| self.dock.render(s));
             self.dirty_dock = false;
             self.sync_dock_tooltip_surface();
+        } else if !self.dock.visible || self.dock.is_hidden {
+            if self.last_dock_tooltip.take().is_some() {
+                self.dock_tooltip_surface.take();
+            }
         }
 
-        if (self.overlays.volume.enabled || self.overlays.volume.is_visible())
-            && self.dirty_overlay_left
-        {
-            self.render_surface("HimeOverlayLeft", &self.overlay_left_surface, |s| {
-                self.overlays.volume.render(s)
-            });
+        if self.overlays.volume.is_visible() && self.dirty_overlay_left {
+            if let Some(ref surf) = self.overlay_left_surface {
+                self.render_surface("HimeOverlayLeft", surf, |s| self.overlays.volume.render(s));
+            }
             self.dirty_overlay_left = false;
         }
 
-        if (self.overlays.brightness.enabled || self.overlays.brightness.is_visible())
-            && self.dirty_overlay_right
-        {
-            self.render_surface("HimeOverlayRight", &self.overlay_right_surface, |s| {
-                self.overlays.brightness.render(s)
-            });
+        if self.overlays.brightness.is_visible() && self.dirty_overlay_right {
+            if let Some(ref surf) = self.overlay_right_surface {
+                self.render_surface("HimeOverlayRight", surf, |s| {
+                    self.overlays.brightness.render(s)
+                });
+            }
             self.dirty_overlay_right = false;
         }
 
@@ -4865,6 +4985,14 @@ impl AppShell {
             drop(surf);
         }
         if let Some(surf) = self.dock_tooltip_surface.take() {
+            drop(surf);
+        }
+        if let Some(surf) = self.overlay_left_surface.take() {
+            remove_tracked_hwnd(surf.hwnd());
+            drop(surf);
+        }
+        if let Some(surf) = self.overlay_right_surface.take() {
+            remove_tracked_hwnd(surf.hwnd());
             drop(surf);
         }
         self.restore_suppressed_notifications();
@@ -5639,6 +5767,7 @@ fn main() {
             s.shutdown();
         }
     });
+    d2d::release_shared_gpu_resources();
     remove_tray_icon(ctrl_hwnd);
 }
 
