@@ -1195,6 +1195,7 @@ struct AppShell {
     last_snap_brightness: Option<u8>,
     last_volume_write_at: Option<Instant>,
     last_brightness_write_at: Option<Instant>,
+    last_external_osd_at: Option<Instant>,
     last_audio_device: Option<String>,
     last_running_windows: Vec<RunningWindow>,
     last_music_track: Option<(String, String)>,
@@ -1322,6 +1323,7 @@ impl AppShell {
             last_snap_brightness: None,
             last_volume_write_at: None,
             last_brightness_write_at: None,
+            last_external_osd_at: None,
             last_audio_device: None,
             last_running_windows: Vec::new(),
             last_music_track: None,
@@ -2161,6 +2163,10 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_left = true;
             } else if self.last_snap_volume != Some(vol_pair) {
+                self.last_external_osd_at = Some(Instant::now());
+                if self.dock.visible {
+                    os_shell::ensure_primary_taskbar_hidden();
+                }
                 self.overlays.show_volume(
                     snap.volume.percent,
                     snap.volume.muted,
@@ -2189,6 +2195,10 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_right = true;
             } else if self.last_snap_brightness != Some(bri) {
+                self.last_external_osd_at = Some(Instant::now());
+                if self.dock.visible {
+                    os_shell::ensure_primary_taskbar_hidden();
+                }
                 self.overlays.show_brightness(bri);
                 self.notch.set_brightness(bri);
                 self.dirty_notch = true;
@@ -2308,8 +2318,14 @@ impl AppShell {
                 let local_dx = (cx - dx) as f32 / dock_scale;
                 let local_dy = (cy - dy) as f32 / dock_scale;
 
-                let overlapped = self.is_foreground_overlapping_dock(primary);
-                self.dock.set_overlapped(overlapped);
+                let fg = unsafe { GetForegroundWindow() };
+                let external_osd_active = self
+                    .last_external_osd_at
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
+                if !os_shell::is_transient_system_flyout_hwnd(fg) && !external_osd_active {
+                    let overlapped = self.is_foreground_overlapping_dock(primary);
+                    self.dock.set_overlapped(overlapped);
+                }
 
                 let wake = self.dock.wake_hit_rect(surf_rect);
                 let over_wake = os_shell::is_dock_edge_hovered(
@@ -2353,6 +2369,9 @@ impl AppShell {
                     }
                     self.dock.set_edge_hovered(keep_awake);
                     self.dock_surface.set_click_through(!over_any);
+                }
+                if !self.dock.is_hidden && prev_dock_hidden {
+                    os_shell::ensure_topmost(self.dock_surface.hwnd());
                 }
                 if self.dock.is_hidden != prev_dock_hidden
                     || self.dock.is_edge_hovered != prev_dock_edge_hov
@@ -4625,8 +4644,12 @@ impl AppShell {
         if self.native_settings.suppress_native_notifications && self.tick_count % 2 == 0 {
             self.scan_and_suppress_notifications();
         }
-        if self.dock.visible && self.tick_count % 8 == 0 {
-            os_shell::ensure_taskbar_hidden();
+        if self.dock.visible {
+            if self.tick_count % 8 == 0 {
+                os_shell::ensure_taskbar_hidden();
+            } else {
+                os_shell::ensure_primary_taskbar_hidden();
+            }
         }
         if self.tick_count > 0 && self.tick_count % 20 == 0 {
             self.os_worker.send(OsCommand::ScanTrayEntries);

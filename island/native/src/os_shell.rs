@@ -470,18 +470,32 @@ pub fn set_taskbar_visible(visible: bool) -> bool {
     }
 }
 
-/// Re-hides `Shell_TrayWnd` if Windows Explorer made it visible again while Hime Dock is active.
+/// Fast path: re-hides primary `Shell_TrayWnd` immediately if Windows Explorer un-hid or moved it back onto the screen.
+pub fn ensure_primary_taskbar_hidden() -> bool {
+    unsafe {
+        let tray_class = PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
+        let Ok(tray_hwnd) = FindWindowA(tray_class, PCSTR::null()) else {
+            return false;
+        };
+        if IsWindowVisible(tray_hwnd).as_bool() || placed_taskbar_rect(tray_hwnd).is_some() {
+            return hide_taskbar();
+        }
+        true
+    }
+}
+
+/// Re-hides `Shell_TrayWnd` and secondary taskbars if Windows Explorer made them visible or moved them onscreen.
 pub fn ensure_taskbar_hidden() -> bool {
     unsafe {
         let tray_class = PCSTR(c"Shell_TrayWnd".as_ptr() as *const u8);
         let Ok(tray_hwnd) = FindWindowA(tray_class, PCSTR::null()) else {
             return false;
         };
-        if IsWindowVisible(tray_hwnd).as_bool() {
+        if IsWindowVisible(tray_hwnd).as_bool() || placed_taskbar_rect(tray_hwnd).is_some() {
             return hide_taskbar();
         }
         for sec_hwnd in secondary_taskbar_windows() {
-            if IsWindowVisible(sec_hwnd).as_bool() {
+            if IsWindowVisible(sec_hwnd).as_bool() || placed_taskbar_rect(sec_hwnd).is_some() {
                 return hide_taskbar();
             }
         }
@@ -913,6 +927,37 @@ pub fn is_desktop_shell_hwnd(hwnd: HWND) -> bool {
         return false;
     }
     matches!(&class[..len as usize], b"Progman" | b"WorkerW")
+}
+
+/// Pure classifier for transient Windows shell/flyout/OSD window classes (Taskbar, Quick Settings,
+/// Volume/Brightness OSD, tray overflow) that should not trigger `DockMode::Smart` visibility toggles.
+pub fn is_transient_system_flyout_class(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "NotifyIconOverflowWindow"
+            | "TopLevelWindowForOverflowXamlIsland"
+            | "ControlCenterWindow"
+            | "XamlExplorerHostIslandWindow"
+            | "Windows.UI.Core.CoreWindow"
+    )
+}
+
+/// Returns `true` if `hwnd` belongs to a transient Windows shell flyout or hardware Volume/Brightness OSD.
+pub fn is_transient_system_flyout_hwnd(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    let mut class = [0u8; 96];
+    let len = unsafe { GetClassNameA(hwnd, &mut class) };
+    if len <= 0 {
+        return false;
+    }
+    let Ok(class_name) = std::str::from_utf8(&class[..len as usize]) else {
+        return false;
+    };
+    is_transient_system_flyout_class(class_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -2247,6 +2292,17 @@ mod tests {
         assert_eq!(parsed_primary.right, 1920);
         let parsed_secs = parse_marker_secondaries(&text);
         assert_eq!(parsed_secs.get(&12345_isize).unwrap().left, -1920);
+    }
+
+    #[test]
+    fn transient_system_flyout_class_excludes_user_apps() {
+        assert!(is_transient_system_flyout_class("Shell_TrayWnd"));
+        assert!(is_transient_system_flyout_class("ControlCenterWindow"));
+        assert!(is_transient_system_flyout_class("XamlExplorerHostIslandWindow"));
+        assert!(is_transient_system_flyout_class("Windows.UI.Core.CoreWindow"));
+        assert!(!is_transient_system_flyout_class("CabinetWClass"));
+        assert!(!is_transient_system_flyout_class("Chrome_WidgetWin_1"));
+        assert!(!is_transient_system_flyout_class("ApplicationFrameWindow"));
     }
 
     #[test]
