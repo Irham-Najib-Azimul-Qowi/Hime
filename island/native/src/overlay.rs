@@ -1,14 +1,14 @@
 //! Native Dual Edge Overlays (`OverlayHud`, `DualEdgeOverlays`) rendered via Direct2D.
 //!
-//! Follows Apple Liquid Glass, AntiSlop contrast, and Motion HIG:
+//! Styled cleanly for low overhead:
 //! - **Minimized / Idle State:** 100% invisible (0 alpha, empty 0x0 region, click-through).
 //! - **Left Edge (`HudEdge::Left`, `HudKind::Volume`):** Smoothly emerges (`Spring::EMERGE`)
 //!   flush against the left screen edge with curved flare ears (`ear_w = 13`, `flares = true`)
-//!   on edge hover, scroll, or volume OSD change, displaying only percentage, monochrome
-//!   Liquid Glass slider bar, and `SfSymbol` speaker icon.
+//!   on edge hover, scroll, or volume OSD change over a plain black `#000000` background with
+//!   zero border strokes or gradients.
 //! - **Right Edge (`HudEdge::Right`, `HudKind::Brightness`):** Smoothly emerges flush against
-//!   the right screen edge with curved flare ears, displaying percentage, monochrome Liquid
-//!   Glass slider bar, and rotating `draw_brightness_sun` icon.
+//!   the right screen edge with curved flare ears over a plain black `#000000` background,
+//!   displaying percentage, slider bar, and rotating `draw_brightness_sun` icon.
 
 use std::f32::consts::TAU;
 
@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
 use crate::animation::{Spring, SpringValue};
-use crate::d2d::{EdgeSide, LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
+use crate::d2d::{EdgeSide, NativeSurface, Rect, SfSymbol, TextAlign};
+use crate::theme::{AdaptivePalette, Color};
 
 const DEFAULT_AUTO_HIDE_SECS: f32 = 2.5;
 const EXPANDED_PANEL_WIDTH: f32 = 64.0;
@@ -459,7 +460,7 @@ impl OverlayHud {
     }
 
     /// Renders either an invisible empty region (when idle) or the screen-edge curved-flare
-    /// Liquid Glass slider contour using `surface.palette()`.
+    /// Plain black `#000000` slider contour without strokes, glass blur, or gradients.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let vis_alpha = self.visibility.value.clamp(0.0, 1.0);
         let t = self.expand.value.clamp(0.0, 1.0);
@@ -494,18 +495,15 @@ impl OverlayHud {
 
         surface.set_edge_surface_region(rect, EDGE_EAR_WIDTH, PANEL_CORNER_RADIUS, edge_side, true);
 
-        // Screen-edge curved-flare Liquid Glass contour matching the upper Notch
-        let mut glass_style = LiquidGlassStyle::clear(PANEL_CORNER_RADIUS)
-            .with_shadow(8.0, 2.0, 0.20 * vis_alpha);
-        glass_style.hovered = self.is_hovered;
-        glass_style.pressed = self.is_dragging;
-        surface.draw_liquid_glass_edge_surface(
+        // Screen-edge curved-flare contour on plain solid black (#000000), zero stroke/glass
+        surface.draw_edge_surface(
             rect,
             EDGE_EAR_WIDTH,
             PANEL_CORNER_RADIUS,
             edge_side,
             true,
-            glass_style,
+            Color::rgba(0.0, 0.0, 0.0, vis_alpha),
+            None,
         )?;
 
         let content_alpha = ((t - 0.14) / 0.86).clamp(0.0, 1.0) * vis_alpha;
@@ -513,9 +511,9 @@ impl OverlayHud {
             return Ok(());
         }
 
-        let palette = surface.palette();
+        let palette = AdaptivePalette::dark_glass();
 
-        // 1. Adaptive monochrome percentage readout (no "Speakers"/"Display" text)
+        // 1. Fixed monochrome percentage readout on plain black (no "Speakers"/"Display" text)
         let pct_text = if self.kind == HudKind::Volume && self.muted {
             "0%".to_string()
         } else {
@@ -529,7 +527,7 @@ impl OverlayHud {
         let pct_rect = Rect::new(rect.x + 4.0, rect.y + 18.0, rect.width - 8.0, 18.0);
         surface.draw_text(&pct_text, pct_rect, 12.5, pct_color, TextAlign::Center)?;
 
-        // 2. Monochrome Liquid Glass vertical slider bar
+        // 2. Flat borderless vertical slider bar
         let track = Rect::new(
             rect.x + (rect.width - SLIDER_TRACK_WIDTH) * 0.5,
             rect.y + 44.0,
@@ -542,12 +540,6 @@ impl OverlayHud {
             track_r,
             palette.slider_track.with_alpha_mul(content_alpha),
         )?;
-        let track_border = if self.is_dragging {
-            palette.inner_rim.with_alpha_mul(content_alpha)
-        } else {
-            palette.hairline_border.with_alpha_mul(0.8 * content_alpha)
-        };
-        surface.stroke_rounded_rect(track, track_r, track_border, 1.0)?;
 
         let fill_ratio = self.bar_fill.value.clamp(0.0, 1.0);
         if fill_ratio > 0.01 {
@@ -582,7 +574,12 @@ impl OverlayHud {
                 32.0,
                 32.0,
             );
-            surface.draw_icon_button(pill, 16.0, self.is_hovered, self.is_dragging, self.muted)?;
+            let pill_fill = if self.is_dragging || self.muted {
+                palette.control_active
+            } else {
+                palette.control_hover
+            };
+            surface.fill_rounded_rect(pill, 16.0, pill_fill)?;
         }
         match self.kind {
             HudKind::Volume => {
@@ -827,9 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn dual_edge_overlays_render_invisible_idle_and_adaptive_flared_glass_without_error() {
+    fn dual_edge_overlays_render_invisible_idle_and_plain_black_without_error() {
         use crate::d2d::BackdropBuffer;
-        use crate::theme::{ColorThemeMode, ThemePolarity, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
+        use crate::theme::{ColorThemeMode, ThemePolarity};
 
         let surface = match NativeSurface::new("HimeOverlayTest", -2000, -2000, 80, 240) {
             Ok(s) => s,
@@ -846,7 +843,7 @@ mod tests {
         pair.brightness.render(&surface).expect("idle right render");
         surface.end_draw_and_present().expect("idle right present");
 
-        // Expanded edge-flared Liquid Glass under Auto dark-backdrop (DarkGlass) and bright-backdrop (LightGlass)
+        // Expanded edge-flared overlays render plain black under both dark and bright host surfaces
         pair.show_volume(72, false, Some("Headphones (USB)".into()));
         pair.show_brightness(84);
         pair.volume.expand.snap_to(1.0);
@@ -866,32 +863,29 @@ mod tests {
         surface.set_color_theme_mode(ColorThemeMode::Auto);
         surface.set_backdrop(Some(dark_bg));
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
-        assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
 
         surface.begin_draw();
-        pair.volume.render(&surface).expect("dark auto volume render");
-        surface.end_draw_and_present().expect("dark auto volume present");
+        pair.volume.render(&surface).expect("dark volume render");
+        surface.end_draw_and_present().expect("dark volume present");
         surface.begin_draw();
         pair.brightness
             .render(&surface)
-            .expect("dark auto brightness render");
+            .expect("dark brightness render");
         surface
             .end_draw_and_present()
-            .expect("dark auto brightness present");
+            .expect("dark brightness present");
 
         surface.set_backdrop(Some(bright_bg));
-        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
-        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
 
         surface.begin_draw();
-        pair.volume.render(&surface).expect("light auto volume render");
-        surface.end_draw_and_present().expect("light auto volume present");
+        pair.volume.render(&surface).expect("bright-bg volume render");
+        surface.end_draw_and_present().expect("bright-bg volume present");
         surface.begin_draw();
         pair.brightness
             .render(&surface)
-            .expect("light auto brightness render");
+            .expect("bright-bg brightness render");
         surface
             .end_draw_and_present()
-            .expect("light auto brightness present");
+            .expect("bright-bg brightness present");
     }
 }

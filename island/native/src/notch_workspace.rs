@@ -13,16 +13,15 @@ use windows::core::Result;
 
 use crate::d2d::{HimeExpression, NativeSurface, Rect, TextAlign};
 use crate::theme::{
-    ACCENT_CYAN, GLASS_BORDER, GLASS_SURFACE, STATUS_ALERT, STATUS_SUCCESS, STATUS_WARNING,
-    SURFACE_ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY,
+    ACCENT_CYAN, Color, STATUS_ALERT, STATUS_SUCCESS, STATUS_WARNING, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
-const CARD_BG: crate::theme::Color = crate::theme::Color::from_rgba_u8(255, 255, 255, 14);
-const CARD_BG_ACTIVE: crate::theme::Color = crate::theme::Color::from_rgba_u8(255, 255, 255, 28);
-const CARD_BORDER: crate::theme::Color = crate::theme::Color::from_rgba_u8(255, 255, 255, 26);
-const TRACK_BG: crate::theme::Color = crate::theme::Color::from_rgba_u8(255, 255, 255, 34);
-const HIME_CRIMSON: crate::theme::Color = crate::theme::Color::from_rgb_u8(0xE5, 0x09, 0x14);
-const TEXT_MUTED: crate::theme::Color = crate::theme::Color::from_rgba_u8(255, 255, 255, 175);
+const PLAIN_BLACK_BG: Color = Color::from_rgb_u8(0, 0, 0);
+const CARD_BG: Color = Color::from_rgb_u8(20, 20, 22);
+const CARD_BG_ACTIVE: Color = Color::from_rgb_u8(34, 34, 38);
+const TRACK_BG: Color = Color::from_rgb_u8(40, 40, 44);
+const HIME_CRIMSON: Color = Color::from_rgb_u8(0xE5, 0x09, 0x14);
+const TEXT_MUTED: Color = Color::from_rgba_u8(255, 255, 255, 175);
 
 /// Single timestamped LRC lyric line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -478,7 +477,6 @@ impl TasksWorkspaceState {
             TextAlign::Leading,
         )?;
         surface.fill_rounded_rect(layout.progress_rect, 9.0, CARD_BG)?;
-        surface.stroke_rounded_rect(layout.progress_rect, 9.0, CARD_BORDER, 1.0)?;
         surface.draw_text(
             &format!("{}/{} done", done_count, total),
             layout.progress_rect,
@@ -491,7 +489,6 @@ impl TasksWorkspaceState {
             let active = *tab == self.active_tab;
             surface.fill_rounded_rect(*rect, 8.0, if active { CARD_BG_ACTIVE } else { CARD_BG })?;
             if active {
-                surface.stroke_rounded_rect(*rect, 8.0, ACCENT_CYAN.with_alpha(0.75), 1.0)?;
                 surface.draw_text_bold(tab.label(), *rect, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
             } else {
                 surface.draw_text(tab.label(), *rect, 10.0, TEXT_MUTED, TextAlign::Center)?;
@@ -500,14 +497,12 @@ impl TasksWorkspaceState {
 
         if let Some(err) = &self.error {
             surface.fill_rounded_rect(layout.list_rect, 10.0, STATUS_ALERT.with_alpha(0.14))?;
-            surface.stroke_rounded_rect(layout.list_rect, 10.0, STATUS_ALERT.with_alpha(0.4), 1.0)?;
             surface.draw_text(err, layout.list_rect, 10.0, STATUS_ALERT, TextAlign::Center)?;
         } else if self.loading && layout.rows.is_empty() {
             surface.fill_rounded_rect(layout.list_rect, 10.0, CARD_BG)?;
             surface.draw_text("Loading tasks...", layout.list_rect, 10.5, TEXT_MUTED, TextAlign::Center)?;
         } else if layout.rows.is_empty() {
             surface.fill_rounded_rect(layout.list_rect, 10.0, CARD_BG)?;
-            surface.stroke_rounded_rect(layout.list_rect, 10.0, CARD_BORDER, 1.0)?;
             let empty_msg = match self.active_tab {
                 TaskTabFilter::Done => "No completed tasks yet",
                 TaskTabFilter::Upcoming => "No upcoming tasks scheduled",
@@ -522,7 +517,6 @@ impl TasksWorkspaceState {
                 let prio_color = item.priority.accent_color();
 
                 surface.fill_rounded_rect(row.row_rect, 9.0, CARD_BG)?;
-                surface.stroke_rounded_rect(row.row_rect, 9.0, CARD_BORDER, 1.0)?;
 
                 // Priority accent strip
                 if matches!(item.priority, TaskPriority::High | TaskPriority::Critical) {
@@ -587,7 +581,6 @@ impl TasksWorkspaceState {
 
         // Quick-add draft bar
         surface.fill_rounded_rect(layout.quick_add_input, 9.0, CARD_BG)?;
-        surface.stroke_rounded_rect(layout.quick_add_input, 9.0, CARD_BORDER, 1.0)?;
         let draft_text = if self.quick_add_draft.trim().is_empty() {
             "+ Quick add task..."
         } else {
@@ -612,7 +605,6 @@ impl TasksWorkspaceState {
 
         let p_color = self.quick_add_priority.accent_color();
         surface.fill_rounded_rect(layout.quick_add_priority_btn, 9.0, p_color.with_alpha(0.2))?;
-        surface.stroke_rounded_rect(layout.quick_add_priority_btn, 9.0, p_color.with_alpha(0.6), 1.0)?;
         surface.draw_text_bold(
             self.quick_add_priority.short_label(),
             layout.quick_add_priority_btn,
@@ -630,12 +622,6 @@ impl TasksWorkspaceState {
             } else {
                 CARD_BG
             },
-        )?;
-        surface.stroke_rounded_rect(
-            layout.quick_add_submit_btn,
-            9.0,
-            if can_submit { ACCENT_CYAN } else { CARD_BORDER },
-            1.0,
         )?;
         surface.draw_text_bold(
             "+ Add",
@@ -927,7 +913,6 @@ impl FocusWorkspaceState {
             TextAlign::Leading,
         )?;
         surface.fill_rounded_rect(layout.streak_badge, 9.0, STATUS_WARNING.with_alpha(0.18))?;
-        surface.stroke_rounded_rect(layout.streak_badge, 9.0, STATUS_WARNING.with_alpha(0.5), 1.0)?;
         surface.draw_text_bold(
             &format!("{}d streak", self.streak_days),
             layout.streak_badge,
@@ -938,16 +923,6 @@ impl FocusWorkspaceState {
 
         // Session card
         surface.fill_rounded_rect(layout.session_card, 12.0, CARD_BG)?;
-        surface.stroke_rounded_rect(
-            layout.session_card,
-            12.0,
-            if self.emergency_paused {
-                STATUS_ALERT.with_alpha(0.7)
-            } else {
-                CARD_BORDER
-            },
-            1.0,
-        )?;
 
         let status_color = match self.status {
             FocusSessionStatus::Active => ACCENT_CYAN,
@@ -1007,17 +982,14 @@ impl FocusWorkspaceState {
         // Action buttons
         if let Some(btn) = layout.start_btn {
             surface.fill_rounded_rect(btn, 9.0, ACCENT_CYAN.with_alpha(0.24))?;
-            surface.stroke_rounded_rect(btn, 9.0, ACCENT_CYAN, 1.0)?;
             surface.draw_text_bold("Start", btn, 10.5, TEXT_PRIMARY, TextAlign::Center)?;
         }
         if let Some(btn) = layout.complete_btn {
             surface.fill_rounded_rect(btn, 9.0, STATUS_SUCCESS.with_alpha(0.24))?;
-            surface.stroke_rounded_rect(btn, 9.0, STATUS_SUCCESS, 1.0)?;
             surface.draw_text_bold("Complete", btn, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
         }
         if let Some(btn) = layout.skip_btn {
             surface.fill_rounded_rect(btn, 9.0, CARD_BG_ACTIVE)?;
-            surface.stroke_rounded_rect(btn, 9.0, CARD_BORDER, 1.0)?;
             surface.draw_text("Skip", btn, 10.0, TEXT_MUTED, TextAlign::Center)?;
         }
 
@@ -1027,12 +999,6 @@ impl FocusWorkspaceState {
             STATUS_ALERT.with_alpha(0.18)
         };
         surface.fill_rounded_rect(layout.emergency_pause_btn, 9.0, pause_bg)?;
-        surface.stroke_rounded_rect(
-            layout.emergency_pause_btn,
-            9.0,
-            STATUS_ALERT.with_alpha(0.75),
-            1.0,
-        )?;
         surface.draw_text_bold(
             if self.emergency_paused {
                 "Resume"
@@ -1047,7 +1013,6 @@ impl FocusWorkspaceState {
 
         // Today's screen-time summary card
         surface.fill_rounded_rect(layout.screentime_card, 12.0, CARD_BG)?;
-        surface.stroke_rounded_rect(layout.screentime_card, 12.0, CARD_BORDER, 1.0)?;
         let total = self.screentime_total_secs();
         surface.draw_text_bold(
             "Screen-Time Today",
@@ -1307,8 +1272,7 @@ impl ProactiveBannerState {
         let layout = self.layout(area);
         let accent = self.level.accent_color();
 
-        surface.fill_rounded_rect(layout.card_rect, 12.0, GLASS_SURFACE)?;
-        surface.stroke_rounded_rect(layout.card_rect, 12.0, accent.with_alpha(0.55), 1.0)?;
+        surface.fill_rounded_rect(layout.card_rect, 12.0, PLAIN_BLACK_BG)?;
 
         surface.draw_hime_eyes(
             layout.card_rect.x + 22.0,
@@ -1344,7 +1308,6 @@ impl ProactiveBannerState {
 
         // Accept / Snooze / OpenDrawer
         surface.fill_rounded_rect(layout.accept_btn, 7.0, accent.with_alpha(0.28))?;
-        surface.stroke_rounded_rect(layout.accept_btn, 7.0, accent, 1.0)?;
         surface.draw_text_bold(
             &self.accept_label,
             layout.accept_btn,
@@ -1354,7 +1317,6 @@ impl ProactiveBannerState {
         )?;
 
         surface.fill_rounded_rect(layout.snooze_btn, 7.0, CARD_BG)?;
-        surface.stroke_rounded_rect(layout.snooze_btn, 7.0, GLASS_BORDER, 1.0)?;
         surface.draw_text(
             &self.snooze_label,
             layout.snooze_btn,
@@ -1364,7 +1326,6 @@ impl ProactiveBannerState {
         )?;
 
         surface.fill_rounded_rect(layout.open_drawer_btn, 7.0, CARD_BG_ACTIVE)?;
-        surface.stroke_rounded_rect(layout.open_drawer_btn, 7.0, GLASS_BORDER, 1.0)?;
         surface.draw_text(
             "Open AI",
             layout.open_drawer_btn,
@@ -1497,8 +1458,7 @@ impl TranslateBannerState {
             return Ok(());
         }
         let layout = self.layout(area);
-        surface.fill_rounded_rect(layout.card_rect, 12.0, SURFACE_ELEVATED)?;
-        surface.stroke_rounded_rect(layout.card_rect, 12.0, ACCENT_CYAN.with_alpha(0.45), 1.0)?;
+        surface.fill_rounded_rect(layout.card_rect, 12.0, PLAIN_BLACK_BG)?;
 
         let lang_badge = Rect::new(layout.card_rect.x + 10.0, layout.card_rect.y + 8.0, 46.0, 16.0);
         surface.fill_rounded_rect(lang_badge, 6.0, ACCENT_CYAN.with_alpha(0.2))?;
@@ -1559,7 +1519,6 @@ impl TranslateBannerState {
         }
 
         surface.fill_rounded_rect(layout.open_drawer_btn, 7.0, ACCENT_CYAN.with_alpha(0.22))?;
-        surface.stroke_rounded_rect(layout.open_drawer_btn, 7.0, ACCENT_CYAN, 1.0)?;
         surface.draw_text_bold(
             "Open Drawer",
             layout.open_drawer_btn,
@@ -1569,7 +1528,6 @@ impl TranslateBannerState {
         )?;
 
         surface.fill_rounded_rect(layout.close_btn, 7.0, CARD_BG)?;
-        surface.stroke_rounded_rect(layout.close_btn, 7.0, GLASS_BORDER, 1.0)?;
         surface.draw_text(
             "Close",
             layout.close_btn,

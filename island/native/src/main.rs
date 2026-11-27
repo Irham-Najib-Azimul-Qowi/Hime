@@ -980,10 +980,7 @@ struct AppShell {
     settings_surface: Option<NativeSurface>,
     drawer_surface: Option<NativeSurface>,
     backdrop_capturer: os_shell::BackdropCapturer,
-    backdrop_notch: BackdropSlot,
     backdrop_dock: BackdropSlot,
-    backdrop_overlay_left: BackdropSlot,
-    backdrop_overlay_right: BackdropSlot,
     backdrop_settings: BackdropSlot,
     backdrop_drawer: BackdropSlot,
     last_tick: Instant,
@@ -1123,10 +1120,7 @@ impl AppShell {
             settings_surface: None,
             drawer_surface: None,
             backdrop_capturer: os_shell::BackdropCapturer::new(),
-            backdrop_notch: BackdropSlot::default(),
             backdrop_dock: BackdropSlot::default(),
-            backdrop_overlay_left: BackdropSlot::default(),
-            backdrop_overlay_right: BackdropSlot::default(),
             backdrop_settings: BackdropSlot::default(),
             backdrop_drawer: BackdropSlot::default(),
             last_tick: now,
@@ -1196,10 +1190,7 @@ impl AppShell {
 
     fn apply_color_theme_to_surfaces(&self) {
         let mode = ColorThemeMode::from_str_lossy(&self.native_settings.color_theme);
-        self.notch_surface.set_color_theme_mode(mode);
         self.dock_surface.set_color_theme_mode(mode);
-        self.overlay_left_surface.set_color_theme_mode(mode);
-        self.overlay_right_surface.set_color_theme_mode(mode);
         if let Some(ref surf) = self.settings_surface {
             surf.set_color_theme_mode(mode);
         }
@@ -1227,17 +1218,6 @@ impl AppShell {
     fn refresh_all_backdrops_startup(&mut self) {
         let screen = os_shell::primary_screen_bounds();
         let exclude = self.own_hwnds();
-        let n_scale = (self.notch_surface.dpi() / 96.0).max(0.5);
-        let n_bounds = notch_surface_bounds(self.notch.edge, screen, n_scale);
-        let _ = update_surface_backdrop(
-            &mut self.backdrop_capturer,
-            &self.notch_surface,
-            &mut self.backdrop_notch,
-            n_bounds,
-            &exclude,
-            true,
-            true,
-        );
         let d_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
         let d_bounds = dock_surface_bounds(screen, d_scale);
         let _ = update_surface_backdrop(
@@ -1249,24 +1229,6 @@ impl AppShell {
             true,
             true,
         );
-    }
-
-    fn capture_notch_backdrop(&mut self, force: bool, is_hidden: bool) {
-        let screen = os_shell::primary_screen_bounds();
-        let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
-        let bounds = notch_surface_bounds(self.notch.edge, screen, scale);
-        let exclude = self.own_hwnds();
-        if update_surface_backdrop(
-            &mut self.backdrop_capturer,
-            &self.notch_surface,
-            &mut self.backdrop_notch,
-            bounds,
-            &exclude,
-            is_hidden,
-            force,
-        ) {
-            self.dirty_notch = true;
-        }
     }
 
     fn capture_dock_backdrop(&mut self, force: bool, is_hidden: bool) {
@@ -1287,23 +1249,6 @@ impl AppShell {
         }
     }
 
-    /// Ensures the Notch has a fresh exact backdrop before unhiding or expanding.
-    fn ensure_notch_wake_backdrop(&mut self) {
-        if self.notch.is_hidden {
-            self.capture_notch_backdrop(true, true);
-        } else if self.backdrop_notch.last_hash.is_none() {
-            self.capture_notch_backdrop(true, false);
-        } else {
-            let screen = os_shell::primary_screen_bounds();
-            let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
-            let bounds = notch_surface_bounds(self.notch.edge, screen, scale);
-            let cur_layout = os_shell::visible_window_layout_hash(bounds, &self.own_hwnds());
-            if self.backdrop_notch.layout_hash != Some(cur_layout) {
-                self.capture_notch_backdrop(true, false);
-            }
-        }
-    }
-
     /// Ensures the Dock has a crisp backdrop before waking from auto-hide/smart-hide or enabling,
     /// using `StretchBlt` only while completely invisible (`show_progress <= 0.02`) and keeping the
     /// cached wake capture during mid-recede re-hovers so no semi-transparent dock pixels bleed in.
@@ -1312,46 +1257,6 @@ impl AppShell {
             self.capture_dock_backdrop(true, true);
         } else if self.backdrop_dock.last_hash.is_none() {
             self.capture_dock_backdrop(true, false);
-        }
-    }
-
-    fn capture_overlay_backdrop(&mut self, is_left: bool, force: bool, is_hidden: bool) {
-        let screen = os_shell::primary_screen_bounds();
-        let exclude = self.own_hwnds();
-        let (bounds, changed) = if is_left {
-            let scale = (self.overlay_left_surface.dpi() / 96.0).max(0.5);
-            let b = left_overlay_bounds(screen, scale);
-            let c = update_surface_backdrop(
-                &mut self.backdrop_capturer,
-                &self.overlay_left_surface,
-                &mut self.backdrop_overlay_left,
-                b,
-                &exclude,
-                is_hidden,
-                force,
-            );
-            (b, c)
-        } else {
-            let scale = (self.overlay_right_surface.dpi() / 96.0).max(0.5);
-            let b = right_overlay_bounds(screen, scale);
-            let c = update_surface_backdrop(
-                &mut self.backdrop_capturer,
-                &self.overlay_right_surface,
-                &mut self.backdrop_overlay_right,
-                b,
-                &exclude,
-                is_hidden,
-                force,
-            );
-            (b, c)
-        };
-        let _ = bounds;
-        if changed {
-            if is_left {
-                self.dirty_overlay_left = true;
-            } else {
-                self.dirty_overlay_right = true;
-            }
         }
     }
 
@@ -1413,24 +1318,12 @@ impl AppShell {
 
     fn refresh_visible_backdrops(
         &mut self,
-        notch_settled: bool,
         dock_settled: bool,
-        vol_settled: bool,
-        bri_settled: bool,
         set_settled: bool,
         drw_settled: bool,
     ) {
-        if notch_settled && !self.notch.is_hidden {
-            self.capture_notch_backdrop(false, false);
-        }
         if dock_settled && self.dock.visible && !self.dock.is_hidden {
             self.capture_dock_backdrop(false, false);
-        }
-        if vol_settled && self.overlays.volume.is_visible() {
-            self.capture_overlay_backdrop(true, false, false);
-        }
-        if bri_settled && self.overlays.brightness.is_visible() {
-            self.capture_overlay_backdrop(false, false, false);
         }
         if set_settled && self.settings.visible {
             self.capture_settings_backdrop(false, false);
@@ -1631,9 +1524,6 @@ impl AppShell {
         self.notch.notif_suppression_enabled = norm.suppress_native_notifications;
         self.notch.set_ai_enabled(norm.hime_ai_enabled);
         if norm.notch_mode == "fixed" {
-            if self.notch.is_hidden {
-                self.capture_notch_backdrop(true, true);
-            }
             self.notch.set_hidden(false);
         } else if norm.notch_mode == "peek" && !self.notch.is_expanded {
             self.notch.set_hidden(true);
@@ -1879,9 +1769,6 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_left = true;
             } else if self.last_snap_volume != Some(vol_pair) {
-                if !self.overlays.volume.is_visible() {
-                    self.capture_overlay_backdrop(true, true, true);
-                }
                 self.overlays.show_volume(
                     snap.volume.percent,
                     snap.volume.muted,
@@ -1910,9 +1797,6 @@ impl AppShell {
                 self.dirty_notch = true;
                 self.dirty_overlay_right = true;
             } else if self.last_snap_brightness != Some(bri) {
-                if !self.overlays.brightness.is_visible() {
-                    self.capture_overlay_backdrop(false, true, true);
-                }
                 self.overlays.show_brightness(bri);
                 self.notch.set_brightness(bri);
                 self.dirty_notch = true;
@@ -1989,7 +1873,6 @@ impl AppShell {
             if keep_notch_visible {
                 self.notch_leave_at = None;
                 if (near_wake || over_notch || drag_near_notch) && self.notch.is_hidden {
-                    self.capture_notch_backdrop(true, true);
                     self.notch.set_hidden(false);
                 }
             } else if self.native_settings.notch_mode == "peek" {
@@ -2251,9 +2134,7 @@ impl AppShell {
             OVERLAY_DIP_HEIGHT * scale,
         );
         let over = over_pill || over_wake_rect || over_edge;
-        if over && !was_visible {
-            self.capture_overlay_backdrop(is_left, true, true);
-        }
+        let _ = was_visible;
         let (hud, surf) = if is_left {
             (&mut self.overlays.volume, &self.overlay_left_surface)
         } else {
@@ -2584,16 +2465,6 @@ impl AppShell {
     }
 
     fn execute_notch_action(&mut self, action: NotchAction, ctrl_hwnd: HWND) {
-        if matches!(
-            action,
-            NotchAction::ExpandPanel(_)
-                | NotchAction::OpenWifiList
-                | NotchAction::OpenShortcuts
-                | NotchAction::PrevPanel
-                | NotchAction::NextPanel
-        ) {
-            self.ensure_notch_wake_backdrop();
-        }
         let was_vol_muted = self.notch.volume_muted;
         let quick_add_prio = self.notch.tasks_ws.quick_add_priority;
         let quick_add_tab = self.notch.tasks_ws.active_tab;
@@ -3546,7 +3417,6 @@ impl AppShell {
         } else {
             self.ai_drawer.translation.target_lang.to_ascii_lowercase()
         };
-        self.ensure_notch_wake_backdrop();
         self.notch
             .translate_banner
             .show_loading("Selected text", &target_lang);
@@ -3736,9 +3606,6 @@ impl AppShell {
             }
             HotkeyAction::ToggleNotch => {
                 let next = !self.notch.is_expanded;
-                if next {
-                    self.ensure_notch_wake_backdrop();
-                }
                 self.notch.set_expanded(next);
                 self.dirty_notch = true;
                 self.update_surface_click_through();
@@ -3748,7 +3615,6 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Calendar {
                     self.notch.set_expanded(false);
                 } else {
-                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Calendar);
                 }
                 self.dirty_notch = true;
@@ -3759,7 +3625,6 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Music {
                     self.notch.set_expanded(false);
                 } else {
-                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Music);
                 }
                 self.dirty_notch = true;
@@ -3777,7 +3642,6 @@ impl AppShell {
                 if self.notch.is_expanded && self.notch.active_panel == NotchPanel::Shortcuts {
                     self.notch.set_expanded(false);
                 } else {
-                    self.ensure_notch_wake_backdrop();
                     self.notch.set_panel(NotchPanel::Shortcuts);
                 }
                 self.dirty_notch = true;
@@ -4326,14 +4190,7 @@ impl AppShell {
             || watch_outside_click
             || self.notch.has_active_banner();
 
-        self.refresh_visible_backdrops(
-            !notch_anim,
-            !dock_anim,
-            !vol_anim,
-            !bri_anim,
-            !set_anim,
-            !drw_anim,
-        );
+        self.refresh_visible_backdrops(!dock_anim, !set_anim, !drw_anim);
         self.sync_overlay_visibility();
         self.render_all();
         self.release_settings_surface_if_idle();
