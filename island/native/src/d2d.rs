@@ -973,6 +973,8 @@ pub enum SfSymbol {
     Document,
     Globe,
     Refresh,
+    StopCircle,
+    PrivateMask,
 }
 
 /// Cached 32-bit premultiplied BGRA DIB section backing an `UpdateLayeredWindow` surface.
@@ -3062,6 +3064,31 @@ impl NativeSurface {
                     sw,
                 )?;
             }
+            SfSymbol::StopCircle => {
+                let r = s * 0.34;
+                self.stroke_circle(cx, cy, r, color, sw)?;
+                let d = r * 0.68;
+                self.draw_line(cx - d, cy - d, cx + d, cy + d, color, sw)?;
+            }
+            SfSymbol::PrivateMask => {
+                // Minimal monochrome private-browsing glasses/hat glyph
+                self.draw_line(cx - s * 0.38, cy - s * 0.08, cx + s * 0.38, cy - s * 0.08, color, sw)?;
+                self.draw_polyline(
+                    &[
+                        (cx - s * 0.22, cy - s * 0.08),
+                        (cx - s * 0.15, cy - s * 0.32),
+                        (cx + s * 0.15, cy - s * 0.32),
+                        (cx + s * 0.22, cy - s * 0.08),
+                    ],
+                    false,
+                    color,
+                    sw,
+                )?;
+                let lr = s * 0.13;
+                self.stroke_circle(cx - s * 0.18, cy + s * 0.16, lr, color, sw)?;
+                self.stroke_circle(cx + s * 0.18, cy + s * 0.16, lr, color, sw)?;
+                self.draw_line(cx - s * 0.05, cy + s * 0.16, cx + s * 0.05, cy + s * 0.16, color, sw)?;
+            }
         }
         Ok(())
     }
@@ -4702,6 +4729,8 @@ mod tests {
             SfSymbol::Document,
             SfSymbol::Globe,
             SfSymbol::Refresh,
+            SfSymbol::StopCircle,
+            SfSymbol::PrivateMask,
         ];
         surface.begin_draw();
         for (idx, &sym) in symbols.iter().enumerate() {

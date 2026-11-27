@@ -42,13 +42,20 @@ const MAGNIFY_EFFECT_WIDTH: f32 = 190.0;
 const BOUNCE_DURATION_SECS: f32 = 0.38;
 const MAX_RUNNING_GROUPS: usize = 12;
 const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
-const TRAY_ITEM_SIZE: f32 = 24.0;
-const TRAY_FLYOUT_PAD: f32 = 6.0;
+const TRAY_ITEM_SIZE: f32 = 30.0;
+const TRAY_GRID_COLS: usize = 5;
+const TRAY_FLYOUT_PAD: f32 = 8.0;
 const TRAY_FLYOUT_GAP: f32 = 6.0;
 const SPACES_FLYOUT_PAD: f32 = 5.0;
 const SPACES_FLYOUT_GAP: f32 = 5.0;
 const SPACES_PILL_HEIGHT: f32 = 26.0;
 const SPACES_NEW_BTN_SIZE: f32 = 26.0;
+const CONTEXT_MENU_WIDTH: f32 = 224.0;
+const CONTEXT_MENU_ROW_H: f32 = 30.0;
+const CONTEXT_MENU_HEADER_H: f32 = 22.0;
+const CONTEXT_MENU_DIVIDER_H: f32 = 9.0;
+const CONTEXT_MENU_PAD_X: f32 = 8.0;
+const CONTEXT_MENU_PAD_Y: f32 = 8.0;
 
 /// Dock visibility behavior mode matching `Dock.tsx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,12 +139,76 @@ pub enum DockAction {
     SwitchDesktop(usize),
     /// Create a new Virtual Desktop.
     NewDesktop,
-    /// Open or toggle the System Tray flyout / menu.
+    /// Open the Windows 11 Notification Center (`Win + N`).
+    OpenNotifications,
+    /// Open or toggle the Windows "Show hidden icons" flyout grid.
     ToggleTray,
     /// Restore or activate the System Tray item at `index`.
     ActivateTrayItem(usize),
+    /// Open the Liquid Glass right-click menu for a Dock application item at `index`.
+    OpenAppContextMenu(usize),
+    /// Open the Liquid Glass right-click menu for a hidden System Tray item at `index`.
+    OpenTrayContextMenu(usize),
+    /// Execute a selected item inside the open right-click context menu.
+    ExecuteContextMenuItem(usize),
+    /// Dismiss any open right-click context menu.
+    CloseContextMenu,
     /// Wake / reveal an auto-hidden Dock from its bottom-edge wake region.
     WakeHiddenDock,
+}
+
+/// Operation executed by choosing a row inside [`DockContextMenu`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuOp {
+    Launch { exe_path: String, args: String },
+    FocusOrLaunchApp(usize),
+    TogglePin(usize),
+    OpenFileLocation(String),
+    CloseWindows(Vec<isize>),
+    EndTask(Vec<isize>),
+    FocusOrLaunchTray(usize),
+    OpenTaskbarSettings,
+}
+
+/// Icon glyph rendered for a [`ContextMenuItem`] row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuIcon {
+    AppIcon,
+    NewWindow,
+    PrivateWindow,
+    Folder,
+    Pin,
+    EndTask,
+    CloseWindow,
+    Settings,
+}
+
+/// Single actionable row inside [`DockContextMenu`].
+#[derive(Debug, Clone)]
+pub struct ContextMenuItem {
+    pub label: String,
+    pub icon: ContextMenuIcon,
+    pub op: ContextMenuOp,
+    pub is_task: bool,
+}
+
+/// Liquid Glass right-click menu floating above a Dock app or System Tray icon.
+#[derive(Debug, Clone)]
+pub struct DockContextMenu {
+    pub anchor_rect: Rect,
+    pub app_icon: Option<IconRgba>,
+    pub items: Vec<ContextMenuItem>,
+}
+
+/// Layout coordinates of right-side Dock utility buttons.
+#[derive(Debug, Clone, Copy)]
+pub struct UtilityLayout {
+    pub pinned_div_x: Option<f32>,
+    pub utils_div_x: Option<f32>,
+    pub ai_rect: Option<Rect>,
+    pub spaces_rect: Rect,
+    pub notif_rect: Rect,
+    pub tray_rect: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +218,10 @@ enum DockHoverTarget {
     Spaces,
     SpaceItem(usize),
     NewSpace,
+    Notifications,
     Tray,
     TrayItem(usize),
+    ContextMenuItem(usize),
     HandleStrip,
 }
 
@@ -220,6 +293,7 @@ pub struct DockBar {
     pub ai_enabled: bool,
     pub tray_open: bool,
     pub spaces_open: bool,
+    pub context_menu: Option<DockContextMenu>,
     pub system_tray_count: u32,
     pub visible: bool,
     pub visibility: SpringValue,
@@ -227,6 +301,7 @@ pub struct DockBar {
     tooltip_progress: SpringValue,
     spaces_flyout_progress: SpringValue,
     tray_flyout_progress: SpringValue,
+    context_menu_progress: SpringValue,
     hovered_index: Option<usize>,
     hovered_target: Option<DockHoverTarget>,
     hover_mouse_x: Option<f32>,
@@ -254,6 +329,7 @@ impl DockBar {
             ai_enabled: true,
             tray_open: false,
             spaces_open: false,
+            context_menu: None,
             system_tray_count: 0,
             visible: true,
             visibility: SpringValue::emerge(1.0),
@@ -261,6 +337,7 @@ impl DockBar {
             tooltip_progress: SpringValue::emerge(0.0),
             spaces_flyout_progress: SpringValue::emerge(0.0),
             tray_flyout_progress: SpringValue::emerge(0.0),
+            context_menu_progress: SpringValue::emerge(0.0),
             hovered_index: None,
             hovered_target: None,
             hover_mouse_x: None,
@@ -301,6 +378,7 @@ impl DockBar {
             || !self.tooltip_progress.is_settled()
             || !self.spaces_flyout_progress.is_settled()
             || !self.tray_flyout_progress.is_settled()
+            || !self.context_menu_progress.is_settled()
             || self.hide_grace_timer > 0.0
             || self
                 .items
@@ -322,8 +400,13 @@ impl DockBar {
     }
 
     fn should_show_tooltip_for(&self, target: Option<DockHoverTarget>) -> bool {
+        if self.context_menu.is_some() {
+            return false;
+        }
         match target {
-            None | Some(DockHoverTarget::HandleStrip) => false,
+            None
+            | Some(DockHoverTarget::HandleStrip)
+            | Some(DockHoverTarget::ContextMenuItem(_)) => false,
             Some(DockHoverTarget::Spaces) => !self.spaces_open,
             Some(DockHoverTarget::Tray) => !self.tray_open,
             Some(_) => true,
@@ -371,6 +454,7 @@ impl DockBar {
         self.is_edge_hovered = false;
         self.set_tray_open(false);
         self.set_spaces_open(false);
+        self.close_context_menu();
         self.hide_grace_timer = 0.0;
         for item in &mut self.items {
             item.hover_scale.snap_to(1.0);
@@ -416,7 +500,7 @@ impl DockBar {
         }
     }
 
-    /// Toggles the inline System Tray flyout strip (mutually exclusive with Spaces) and returns `tray_open`.
+    /// Toggles the inline "Show hidden icons" flyout grid (mutually exclusive with Spaces & Context Menu) and returns `tray_open`.
     pub fn toggle_tray(&mut self) -> bool {
         self.tray_open = !self.tray_open;
         if self.tray_open {
@@ -424,6 +508,7 @@ impl DockBar {
                 self.spaces_open = false;
                 self.spaces_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
             }
+            self.close_context_menu();
             self.tray_flyout_progress.launch_to(1.0, Spring::EMERGE, 1.0);
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
         } else {
@@ -444,7 +529,7 @@ impl DockBar {
         }
     }
 
-    /// Toggles the Windows Virtual Desktops ("Spaces") flyout (mutually exclusive with Tray) and returns `spaces_open`.
+    /// Toggles the Windows Virtual Desktops ("Spaces") flyout (mutually exclusive with Tray & Context Menu) and returns `spaces_open`.
     pub fn toggle_spaces(&mut self) -> bool {
         self.spaces_open = !self.spaces_open;
         if self.spaces_open {
@@ -452,6 +537,7 @@ impl DockBar {
                 self.tray_open = false;
                 self.tray_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
             }
+            self.close_context_menu();
             self.spaces_flyout_progress.launch_to(1.0, Spring::EMERGE, 1.0);
             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
         } else {
@@ -475,6 +561,221 @@ impl DockBar {
         }
     }
 
+    /// Closes any open right-click context menu immediately.
+    pub fn close_context_menu(&mut self) {
+        if self.context_menu.take().is_some() {
+            self.context_menu_progress.snap_to(0.0);
+            if matches!(self.hovered_target, Some(DockHoverTarget::ContextMenuItem(_))) {
+                self.set_hover_target(None);
+            }
+            self.refresh_tooltip_target();
+            self.recompute_hidden();
+        }
+    }
+
+    /// Opens the Windows-style Liquid Glass right-click menu above Dock application `index`.
+    pub fn open_app_context_menu(&mut self, index: usize, surface_rect: Rect) -> bool {
+        let Some(item) = self.items.get(index).cloned() else {
+            return false;
+        };
+        let rects = self.item_rects(surface_rect);
+        let Some(&anchor_rect) = rects.get(index) else {
+            return false;
+        };
+
+        self.set_tray_open(false);
+        self.set_spaces_open(false);
+
+        let exe_target = if !item.exe_path.trim().is_empty() {
+            item.exe_path.clone()
+        } else {
+            item.executable.clone()
+        };
+        let exe_lower = item.executable.to_ascii_lowercase();
+        let mut menu_items = Vec::new();
+
+        // App-specific Windows Tasks matching Windows 11 Taskbar Jump Lists
+        if matches!(
+            exe_lower.as_str(),
+            "brave.exe" | "chrome.exe" | "msedge.exe" | "vivaldi.exe" | "opera.exe"
+        ) {
+            menu_items.push(ContextMenuItem {
+                label: "New window".to_string(),
+                icon: ContextMenuIcon::NewWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: "--new-window".to_string(),
+                },
+                is_task: true,
+            });
+            let (priv_label, priv_flag) = match exe_lower.as_str() {
+                "chrome.exe" => ("New Incognito window", "--incognito"),
+                "msedge.exe" => ("New InPrivate window", "--inprivate"),
+                _ => ("New private window", "--incognito"),
+            };
+            menu_items.push(ContextMenuItem {
+                label: priv_label.to_string(),
+                icon: ContextMenuIcon::PrivateWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: priv_flag.to_string(),
+                },
+                is_task: true,
+            });
+        } else if exe_lower == "firefox.exe" {
+            menu_items.push(ContextMenuItem {
+                label: "New window".to_string(),
+                icon: ContextMenuIcon::NewWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: "-new-window".to_string(),
+                },
+                is_task: true,
+            });
+            menu_items.push(ContextMenuItem {
+                label: "New private window".to_string(),
+                icon: ContextMenuIcon::PrivateWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: "-private-window".to_string(),
+                },
+                is_task: true,
+            });
+        } else if exe_lower == "code.exe" {
+            menu_items.push(ContextMenuItem {
+                label: "New window".to_string(),
+                icon: ContextMenuIcon::NewWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: "-n".to_string(),
+                },
+                is_task: true,
+            });
+        } else if !exe_target.trim().is_empty() {
+            menu_items.push(ContextMenuItem {
+                label: "New window".to_string(),
+                icon: ContextMenuIcon::NewWindow,
+                op: ContextMenuOp::Launch {
+                    exe_path: exe_target.clone(),
+                    args: String::new(),
+                },
+                is_task: true,
+            });
+        }
+
+        if !item.exe_path.trim().is_empty() {
+            menu_items.push(ContextMenuItem {
+                label: "Open file location".to_string(),
+                icon: ContextMenuIcon::Folder,
+                op: ContextMenuOp::OpenFileLocation(item.exe_path.clone()),
+                is_task: true,
+            });
+        }
+
+        // Standard Windows taskbar icon actions
+        menu_items.push(ContextMenuItem {
+            label: item.label.clone(),
+            icon: ContextMenuIcon::AppIcon,
+            op: ContextMenuOp::FocusOrLaunchApp(index),
+            is_task: false,
+        });
+        menu_items.push(ContextMenuItem {
+            label: if item.pinned {
+                "Unpin from taskbar".to_string()
+            } else {
+                "Pin to taskbar".to_string()
+            },
+            icon: ContextMenuIcon::Pin,
+            op: ContextMenuOp::TogglePin(index),
+            is_task: false,
+        });
+
+        if item.running && !item.hwnds.is_empty() {
+            menu_items.push(ContextMenuItem {
+                label: "End task".to_string(),
+                icon: ContextMenuIcon::EndTask,
+                op: ContextMenuOp::EndTask(item.hwnds.clone()),
+                is_task: false,
+            });
+            menu_items.push(ContextMenuItem {
+                label: if item.hwnds.len() > 1 {
+                    "Close all windows".to_string()
+                } else {
+                    "Close window".to_string()
+                },
+                icon: ContextMenuIcon::CloseWindow,
+                op: ContextMenuOp::CloseWindows(item.hwnds.clone()),
+                is_task: false,
+            });
+        }
+
+        self.context_menu = Some(DockContextMenu {
+            anchor_rect,
+            app_icon: item.icon,
+            items: menu_items,
+        });
+        self.context_menu_progress.snap_to(0.0);
+        self.context_menu_progress.launch_to(1.0, Spring::EMERGE, 1.0);
+        self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+        self.refresh_tooltip_target();
+        self.recompute_hidden();
+        true
+    }
+
+    /// Opens the right-click options menu above a hidden System Tray item at `index`.
+    pub fn open_tray_context_menu(&mut self, index: usize, surface_rect: Rect) -> bool {
+        let Some(entry) = self.tray_items.get(index).cloned() else {
+            return false;
+        };
+        let dock = self.dock_rect(surface_rect);
+        let rects = self.tray_item_rects(surface_rect, dock);
+        let anchor_rect = rects.get(index).copied().unwrap_or(dock);
+
+        self.set_tray_open(false);
+        self.set_spaces_open(false);
+
+        let mut menu_items = vec![ContextMenuItem {
+            label: format!("Open {}", entry.label),
+            icon: ContextMenuIcon::AppIcon,
+            op: ContextMenuOp::FocusOrLaunchTray(index),
+            is_task: false,
+        }];
+        if !entry.exe_path.trim().is_empty() {
+            menu_items.push(ContextMenuItem {
+                label: "Open file location".to_string(),
+                icon: ContextMenuIcon::Folder,
+                op: ContextMenuOp::OpenFileLocation(entry.exe_path.clone()),
+                is_task: false,
+            });
+        }
+        if entry.hwnd != 0 {
+            menu_items.push(ContextMenuItem {
+                label: "End task".to_string(),
+                icon: ContextMenuIcon::EndTask,
+                op: ContextMenuOp::EndTask(vec![entry.hwnd]),
+                is_task: false,
+            });
+        }
+        menu_items.push(ContextMenuItem {
+            label: "Taskbar settings".to_string(),
+            icon: ContextMenuIcon::Settings,
+            op: ContextMenuOp::OpenTaskbarSettings,
+            is_task: false,
+        });
+
+        self.context_menu = Some(DockContextMenu {
+            anchor_rect,
+            app_icon: entry.icon,
+            items: menu_items,
+        });
+        self.context_menu_progress.snap_to(0.0);
+        self.context_menu_progress.launch_to(1.0, Spring::EMERGE, 1.0);
+        self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+        self.refresh_tooltip_target();
+        self.recompute_hidden();
+        true
+    }
+
     /// Replaces the Virtual Desktops list displayed inside the Spaces flyout.
     pub fn set_spaces(&mut self, spaces: Vec<SpaceEntry>) {
         self.spaces = spaces;
@@ -494,13 +795,11 @@ impl DockBar {
         }
         self.system_tray_count = items.len() as u32;
         self.tray_items = items;
-        if self.tray_items.is_empty() && self.tray_open {
-            self.set_tray_open(false);
-        }
     }
 
     /// Recomputes `is_hidden` from `mode`, overlap state, hover state, open flyouts, and grace timer.
     pub fn recompute_hidden(&mut self) {
+        let has_menu = self.context_menu.is_some();
         let should_hide = match self.mode {
             DockMode::Fixed => false,
             DockMode::AutoHide => {
@@ -508,6 +807,7 @@ impl DockBar {
                     && !self.is_edge_hovered
                     && !self.tray_open
                     && !self.spaces_open
+                    && !has_menu
                     && self.hide_grace_timer <= 0.0
             }
             DockMode::Smart => {
@@ -516,6 +816,7 @@ impl DockBar {
                     && !self.is_edge_hovered
                     && !self.tray_open
                     && !self.spaces_open
+                    && !has_menu
                     && self.hide_grace_timer <= 0.0
             }
         };
@@ -537,6 +838,7 @@ impl DockBar {
                 self.spaces_open = false;
                 self.spaces_flyout_progress.launch_to(0.0, Spring::RECEDE, 1.0);
             }
+            self.close_context_menu();
         }
     }
 
@@ -782,6 +1084,7 @@ impl DockBar {
             self.visibility.launch_to(0.0, Spring::RECEDE, 1.0);
             self.set_tray_open(false);
             self.set_spaces_open(false);
+            self.close_context_menu();
             self.clear_hover();
         }
     }
@@ -960,6 +1263,15 @@ impl DockBar {
                 self.recompute_hidden();
                 None
             }
+            Some(DockAction::OpenNotifications) => {
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
+                self.set_hover_target(Some(DockHoverTarget::Notifications));
+                self.update_magnification_targets();
+                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                self.recompute_hidden();
+                None
+            }
             Some(DockAction::ToggleTray) => {
                 self.hovered_index = None;
                 self.hover_mouse_x = None;
@@ -978,12 +1290,27 @@ impl DockBar {
                 self.recompute_hidden();
                 None
             }
+            Some(DockAction::ExecuteContextMenuItem(row_idx)) => {
+                self.hovered_index = None;
+                self.hover_mouse_x = None;
+                self.set_hover_target(Some(DockHoverTarget::ContextMenuItem(row_idx)));
+                self.update_magnification_targets();
+                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                self.recompute_hidden();
+                None
+            }
             Some(DockAction::WakeHiddenDock) => {
                 self.set_edge_hovered(true);
                 self.set_hover_target(Some(DockHoverTarget::HandleStrip));
                 None
             }
-            Some(DockAction::TogglePin(_)) | None => {
+            Some(
+                DockAction::TogglePin(_)
+                | DockAction::OpenAppContextMenu(_)
+                | DockAction::OpenTrayContextMenu(_)
+                | DockAction::CloseContextMenu,
+            )
+            | None => {
                 let dock = self.dock_rect(surface_rect);
                 let rects = self.item_rects(surface_rect);
                 let in_items_band = !rects.is_empty() && {
@@ -1020,6 +1347,7 @@ impl DockBar {
             && !self.is_edge_hovered
             && !self.tray_open
             && !self.spaces_open
+            && self.context_menu.is_none()
             && self.hide_grace_timer > 0.0
         {
             self.hide_grace_timer = (self.hide_grace_timer - dt).max(0.0);
@@ -1033,12 +1361,14 @@ impl DockBar {
         self.tooltip_progress.tick(dt);
         self.spaces_flyout_progress.tick(dt);
         self.tray_flyout_progress.tick(dt);
+        self.context_menu_progress.tick(dt);
 
         let mut animating = !self.visibility.is_settled()
             || !self.show_progress.is_settled()
             || !self.tooltip_progress.is_settled()
             || !self.spaces_flyout_progress.is_settled()
             || !self.tray_flyout_progress.is_settled()
+            || !self.context_menu_progress.is_settled()
             || self.hide_grace_timer > 0.0;
 
         for item in &mut self.items {
@@ -1128,11 +1458,11 @@ impl DockBar {
 
     fn utilities_width(&self) -> f32 {
         if self.ai_enabled {
-            // Hime AI + gap + Spaces + gap + Tray
-            UTIL_BTN_SIZE * 2.0 + self.tray_btn_width() + ITEM_GAP * 2.0
+            // Hime AI + Spaces + Notifications + Show Hidden Icons
+            UTIL_BTN_SIZE * 3.0 + self.tray_btn_width() + ITEM_GAP * 3.0
         } else {
-            // Spaces + gap + Tray
-            UTIL_BTN_SIZE + self.tray_btn_width() + ITEM_GAP
+            // Spaces + Notifications + Show Hidden Icons
+            UTIL_BTN_SIZE * 2.0 + self.tray_btn_width() + ITEM_GAP * 2.0
         }
     }
 
@@ -1177,9 +1507,10 @@ impl DockBar {
         self.layout_items_internal(dock.x, dock.y).0
     }
 
-    /// Returns `(pinned_divider_x, utils_divider_x, ai_rect, spaces_rect, tray_rect)`.
-    fn utility_rects(&self, dock: Rect) -> (Option<f32>, Option<f32>, Option<Rect>, Rect, Rect) {
-        let (_, pinned_div_x, items_w) = self.layout_items_internal(dock.x, dock.y);
+    /// Returns the layout coordinates of the right-side Dock utility cluster.
+    pub fn utility_rects(&self, dock: Rect) -> UtilityLayout {
+        let (rects, pinned_div_x, items_w) = self.layout_items_internal(dock.x, dock.y);
+        let _ = rects;
 
         let (utils_div_x, utils_start_x) = if self.items.is_empty() {
             (None, dock.x + DOCK_PAD_X)
@@ -1197,37 +1528,56 @@ impl DockBar {
         };
 
         let spaces_rect = Rect::new(spaces_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
-        let tray_rect = Rect::new(
+        let notif_rect = Rect::new(
             spaces_rect.x + spaces_rect.width + ITEM_GAP,
+            btn_y,
+            UTIL_BTN_SIZE,
+            UTIL_BTN_SIZE,
+        );
+        let tray_rect = Rect::new(
+            notif_rect.x + notif_rect.width + ITEM_GAP,
             btn_y,
             self.tray_btn_width(),
             UTIL_BTN_SIZE,
         );
-        (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect)
+        UtilityLayout {
+            pinned_div_x,
+            utils_div_x,
+            ai_rect,
+            spaces_rect,
+            notif_rect,
+            tray_rect,
+        }
     }
 
-    /// Computes the System Tray flyout bar rectangle when open or receding.
+    /// Computes the Windows 11-style "Show hidden icons" multi-row grid rectangle when open.
     pub fn tray_flyout_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
         let tray_t = self.tray_flyout_progress.value.clamp(0.0, 1.0);
-        if self.tray_items.is_empty()
-            || (self.is_hidden && self.show_progress.value <= 0.08)
+        if (self.is_hidden && self.show_progress.value <= 0.08)
             || (!self.tray_open && tray_t <= 0.02)
         {
             return None;
         }
-        let (_, _, _, _, tray_rect) = self.utility_rects(dock);
-        let count = self.tray_items.len() as f32;
-        let width = TRAY_FLYOUT_PAD * 2.0 + count * TRAY_ITEM_SIZE + (count - 1.0) * TRAY_FLYOUT_GAP;
-        let height = TRAY_ITEM_SIZE + TRAY_FLYOUT_PAD * 2.0;
+        let util = self.utility_rects(dock);
+        let (width, height) = if self.tray_items.is_empty() {
+            (156.0_f32, 36.0_f32)
+        } else {
+            let count = self.tray_items.len();
+            let cols = count.min(TRAY_GRID_COLS).max(1) as f32;
+            let rows = count.div_ceil(TRAY_GRID_COLS).max(1) as f32;
+            let w = TRAY_FLYOUT_PAD * 2.0 + cols * TRAY_ITEM_SIZE + (cols - 1.0) * TRAY_FLYOUT_GAP;
+            let h = TRAY_FLYOUT_PAD * 2.0 + rows * TRAY_ITEM_SIZE + (rows - 1.0) * TRAY_FLYOUT_GAP;
+            (w, h)
+        };
         let max_x = (surface_rect.x + surface_rect.width - width - 4.0).max(surface_rect.x + 4.0);
-        let center_x = tray_rect.x + tray_rect.width * 0.5;
+        let center_x = util.tray_rect.x + util.tray_rect.width * 0.5;
         let x = (center_x - width * 0.5).clamp(surface_rect.x + 4.0, max_x);
         let slide_y = (1.0 - tray_t) * 8.0;
         let y = (dock.y - height - 6.0 + slide_y).max(surface_rect.y + 2.0);
         Some(Rect::new(x, y, width, height))
     }
 
-    /// Computes item rectangles inside the open System Tray flyout bar.
+    /// Computes item rectangles inside the open 5-column "Show hidden icons" grid.
     pub fn tray_item_rects(&self, surface_rect: Rect, dock: Rect) -> Vec<Rect> {
         let Some(flyout) = self.tray_flyout_rect(surface_rect, dock) else {
             return Vec::new();
@@ -1236,11 +1586,70 @@ impl DockBar {
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                let x = flyout.x + TRAY_FLYOUT_PAD + i as f32 * (TRAY_ITEM_SIZE + TRAY_FLYOUT_GAP);
-                let y = flyout.y + TRAY_FLYOUT_PAD;
+                let col = (i % TRAY_GRID_COLS) as f32;
+                let row = (i / TRAY_GRID_COLS) as f32;
+                let x = flyout.x + TRAY_FLYOUT_PAD + col * (TRAY_ITEM_SIZE + TRAY_FLYOUT_GAP);
+                let y = flyout.y + TRAY_FLYOUT_PAD + row * (TRAY_ITEM_SIZE + TRAY_FLYOUT_GAP);
                 Rect::new(x, y, TRAY_ITEM_SIZE, TRAY_ITEM_SIZE)
             })
             .collect()
+    }
+
+    /// Computes the floating Liquid Glass right-click context menu rectangle when open.
+    pub fn context_menu_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
+        let menu = self.context_menu.as_ref()?;
+        if self.is_hidden && self.show_progress.value <= 0.08 {
+            return None;
+        }
+        let menu_t = self.context_menu_progress.value.clamp(0.0, 1.0);
+        let has_tasks = menu.items.iter().any(|it| it.is_task);
+        let has_non_tasks = menu.items.iter().any(|it| !it.is_task);
+        let header_h = if has_tasks { CONTEXT_MENU_HEADER_H } else { 0.0 };
+        let divider_h = if has_tasks && has_non_tasks {
+            CONTEXT_MENU_DIVIDER_H
+        } else {
+            0.0
+        };
+        let height = CONTEXT_MENU_PAD_Y * 2.0
+            + header_h
+            + divider_h
+            + (menu.items.len() as f32) * CONTEXT_MENU_ROW_H;
+        let width = CONTEXT_MENU_WIDTH.min((surface_rect.width - 12.0).max(160.0));
+        let max_x = (surface_rect.x + surface_rect.width - width - 6.0).max(surface_rect.x + 6.0);
+        let center_x = menu.anchor_rect.x + menu.anchor_rect.width * 0.5;
+        let x = (center_x - width * 0.5).clamp(surface_rect.x + 6.0, max_x);
+        let slide_y = (1.0 - menu_t) * 6.0;
+        let y = (dock.y - height - 8.0 + slide_y).max(surface_rect.y + 4.0);
+        Some(Rect::new(x, y, width, height))
+    }
+
+    /// Returns `(item_index, row_rect, draw_divider_above)` for each row in [`DockContextMenu`].
+    pub fn context_menu_item_rects(&self, menu_rect: Rect) -> Vec<(usize, Rect, bool)> {
+        let Some(menu) = self.context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let has_tasks = menu.items.iter().any(|it| it.is_task);
+        let mut cursor_y = menu_rect.y + CONTEXT_MENU_PAD_Y + if has_tasks { CONTEXT_MENU_HEADER_H } else { 0.0 };
+        let row_w = (menu_rect.width - CONTEXT_MENU_PAD_X * 2.0).max(40.0);
+        let mut out = Vec::with_capacity(menu.items.len());
+        let mut passed_divider = false;
+        for (idx, item) in menu.items.iter().enumerate() {
+            let mut div_above = false;
+            if has_tasks && !item.is_task && !passed_divider {
+                cursor_y += CONTEXT_MENU_DIVIDER_H;
+                div_above = true;
+                passed_divider = true;
+            }
+            let r = Rect::new(
+                menu_rect.x + CONTEXT_MENU_PAD_X,
+                cursor_y,
+                row_w,
+                CONTEXT_MENU_ROW_H,
+            );
+            out.push((idx, r, div_above));
+            cursor_y += CONTEXT_MENU_ROW_H;
+        }
+        out
     }
 
     fn space_pill_widths(&self, max_flyout_width: f32) -> Vec<f32> {
@@ -1277,7 +1686,7 @@ impl DockBar {
         {
             return None;
         }
-        let (_, _, _, spaces_rect, _) = self.utility_rects(dock);
+        let util = self.utility_rects(dock);
         let max_w = (surface_rect.width - 12.0).max(80.0);
         let pill_widths = self.space_pill_widths(max_w);
         let pills_w: f32 = pill_widths.iter().sum();
@@ -1291,7 +1700,7 @@ impl DockBar {
         let width = (SPACES_FLYOUT_PAD * 2.0 + pills_w + gaps_w + SPACES_NEW_BTN_SIZE).min(max_w);
         let height = SPACES_PILL_HEIGHT + SPACES_FLYOUT_PAD * 2.0;
         let max_x = (surface_rect.x + surface_rect.width - width - 4.0).max(surface_rect.x + 4.0);
-        let center_x = spaces_rect.x + spaces_rect.width * 0.5;
+        let center_x = util.spaces_rect.x + util.spaces_rect.width * 0.5;
         let x = (center_x - width * 0.5).clamp(surface_rect.x + 4.0, max_x);
         let slide_y = (1.0 - spaces_t) * 8.0;
         let y = (dock.y - height - 6.0 + slide_y).max(surface_rect.y + 2.0);
@@ -1358,6 +1767,16 @@ impl DockBar {
         }
 
         let dock = self.dock_rect(surface_rect);
+        if let Some(menu_rect) = self.context_menu_rect(surface_rect, dock) {
+            if point_in_rect(x, y, menu_rect) {
+                for (row_idx, row_rect, _) in self.context_menu_item_rects(menu_rect) {
+                    if point_in_rect(x, y, row_rect) {
+                        return Some(DockAction::ExecuteContextMenuItem(row_idx));
+                    }
+                }
+                return Some(DockAction::CloseContextMenu);
+            }
+        }
         if self.spaces_open {
             if let Some(new_r) = self.new_space_rect(surface_rect, dock) {
                 if point_in_rect(x, y, new_r) {
@@ -1386,35 +1805,48 @@ impl DockBar {
             return Some(DockAction::App(idx));
         }
 
-        let (_, _, ai_rect, spaces_rect, tray_rect) = self.utility_rects(dock);
-        if let Some(ai) = ai_rect {
+        let util = self.utility_rects(dock);
+        if let Some(ai) = util.ai_rect {
             if point_in_rect(x, y, ai) {
                 return Some(DockAction::ToggleAiDrawer);
             }
         }
-        if point_in_rect(x, y, spaces_rect) {
+        if point_in_rect(x, y, util.spaces_rect) {
             Some(DockAction::ToggleSpaces)
-        } else if point_in_rect(x, y, tray_rect) {
+        } else if point_in_rect(x, y, util.notif_rect) {
+            Some(DockAction::OpenNotifications)
+        } else if point_in_rect(x, y, util.tray_rect) {
             Some(DockAction::ToggleTray)
         } else {
             None
         }
     }
 
-    /// Right-click / context-action hit test (e.g. Pin/Unpin on an app icon, or Spaces/Tray/AI).
+    /// Right-click hit test: opens the Windows-style options menu above Dock app or hidden tray icons.
     pub fn hit_test_context_action(&self, x: f32, y: f32, surface_rect: Rect) -> Option<DockAction> {
         if (!self.visible && self.visibility.value <= 0.01)
             || (self.is_hidden && self.show_progress.value <= 0.2)
         {
             return None;
         }
+        let dock = self.dock_rect(surface_rect);
+        if self.tray_open {
+            for (idx, r) in self.tray_item_rects(surface_rect, dock).into_iter().enumerate() {
+                if point_in_rect(x, y, r) {
+                    return Some(DockAction::OpenTrayContextMenu(idx));
+                }
+            }
+        }
         if let Some(idx) = self.hit_test(x, y, surface_rect) {
-            return Some(DockAction::TogglePin(idx));
+            return Some(DockAction::OpenAppContextMenu(idx));
         }
         self.hit_test_action(x, y, surface_rect)
     }
 
     fn active_tooltip(&self, surface_rect: Rect, dock: Rect) -> Option<(Rect, String)> {
+        if self.context_menu.is_some() {
+            return None;
+        }
         let target = self.hovered_target?;
         let is_flyout_item = matches!(
             target,
@@ -1430,15 +1862,15 @@ impl DockBar {
                 (r, item.label.clone())
             }
             DockHoverTarget::AiDrawer => {
-                let (_, _, ai_rect, _, _) = self.utility_rects(dock);
-                (ai_rect?, "Hime AI".to_string())
+                let util = self.utility_rects(dock);
+                (util.ai_rect?, "Hime AI".to_string())
             }
             DockHoverTarget::Spaces => {
                 if self.spaces_open {
                     return None;
                 }
-                let (_, _, _, spaces_rect, _) = self.utility_rects(dock);
-                (spaces_rect, "Spaces".to_string())
+                let util = self.utility_rects(dock);
+                (util.spaces_rect, "Spaces".to_string())
             }
             DockHoverTarget::SpaceItem(idx) => {
                 let space = self.spaces.get(idx)?;
@@ -1450,17 +1882,21 @@ impl DockBar {
                 let r = self.new_space_rect(surface_rect, dock)?;
                 (r, "New Desktop".to_string())
             }
+            DockHoverTarget::Notifications => {
+                let util = self.utility_rects(dock);
+                (util.notif_rect, "Notifications".to_string())
+            }
             DockHoverTarget::Tray => {
                 if self.tray_open {
                     return None;
                 }
-                let (_, _, _, _, tray_rect) = self.utility_rects(dock);
+                let util = self.utility_rects(dock);
                 let label = if self.system_tray_count > 0 {
-                    format!("System Tray ({})", self.system_tray_count)
+                    format!("Show hidden icons ({})", self.system_tray_count)
                 } else {
-                    "System Tray".to_string()
+                    "Show hidden icons".to_string()
                 };
-                (tray_rect, label)
+                (util.tray_rect, label)
             }
             DockHoverTarget::TrayItem(idx) => {
                 let item = self.tray_items.get(idx)?;
@@ -1468,7 +1904,7 @@ impl DockBar {
                 let r = *rects.get(idx)?;
                 (r, item.label.clone())
             }
-            DockHoverTarget::HandleStrip => return None,
+            DockHoverTarget::ContextMenuItem(_) | DockHoverTarget::HandleStrip => return None,
         };
 
         let text_w = (label.chars().count() as f32 * 6.8 + 18.0).clamp(54.0, 210.0);
@@ -1518,9 +1954,10 @@ impl DockBar {
         let rects = self.item_rects(surface_rect);
         let tray_flyout = self.tray_flyout_rect(surface_rect, dock);
         let spaces_flyout = self.spaces_flyout_rect(surface_rect, dock);
+        let menu_rect = self.context_menu_rect(surface_rect, dock);
         let tooltip = self.active_tooltip(surface_rect, dock);
 
-        let mut regions = Vec::with_capacity(4 + rects.len());
+        let mut regions = Vec::with_capacity(5 + rects.len());
         regions.push((dock, CORNER_RADIUS));
         for r in &rects {
             if r.y < dock.y {
@@ -1531,10 +1968,13 @@ impl DockBar {
             }
         }
         if let Some(fly) = tray_flyout {
-            regions.push((fly, 10.0));
+            regions.push((fly, 12.0));
         }
         if let Some(fly) = spaces_flyout {
             regions.push((fly, 12.0));
+        }
+        if let Some(mr) = menu_rect {
+            regions.push((mr, 12.0));
         }
         if let Some((tip_rect, _)) = &tooltip {
             regions.push((*tip_rect, 7.0));
@@ -1656,19 +2096,18 @@ impl DockBar {
             }
         }
 
-        // Hairline separators + right-side Hime AI / Spaces / System Tray controls
-        let (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect) =
-            self.utility_rects(dock);
-        if let Some(px) = pinned_div_x {
+        // Hairline separators + right-side Hime AI / Spaces / Notifications / Show Hidden Icons controls
+        let util = self.utility_rects(dock);
+        if let Some(px) = util.pinned_div_x {
             let div_rect = Rect::new(px, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
             surface.fill_rounded_rect(div_rect, 0.5, palette.divider.with_alpha_mul(alpha))?;
         }
-        if let Some(dx) = utils_div_x {
+        if let Some(dx) = util.utils_div_x {
             let div_rect = Rect::new(dx, dock.y + (dock.height - 26.0) * 0.5, DIVIDER_WIDTH, 26.0);
             surface.fill_rounded_rect(div_rect, 0.5, palette.divider.with_alpha_mul(alpha))?;
         }
 
-        self.render_utility_buttons(surface, &palette, ai_rect, spaces_rect, tray_rect, alpha)?;
+        self.render_utility_buttons(surface, &palette, &util, alpha)?;
 
         // Expanded Virtual Desktops ("Spaces") Liquid Glass flyout
         if let Some(flyout) = spaces_flyout {
@@ -1730,44 +2169,146 @@ impl DockBar {
             }
         }
 
-        // Expanded System Tray Liquid Glass flyout strip (when toggled open)
+        // Expanded "Show hidden icons" 5-column Liquid Glass overflow grid
         if let Some(flyout) = tray_flyout {
             let tray_t = self.tray_flyout_progress.value.clamp(0.0, 1.0);
             let tray_alpha = alpha * tray_t;
             if tray_alpha > 0.02 {
                 surface.draw_liquid_glass_panel(
                     flyout,
-                    LiquidGlassStyle::regular(10.0)
-                        .with_shadow(8.0, 2.5, palette.shadow_color.a * tray_alpha),
+                    LiquidGlassStyle::regular(12.0)
+                        .with_shadow(10.0, 3.0, palette.shadow_color.a * tray_alpha),
                 )?;
-                let tray_rects = self.tray_item_rects(surface_rect, dock);
-                for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
-                    let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
-                    surface.draw_icon_button(*r, 6.0, hovered, false, false)?;
-                    if let Some(ref icon_rgba) = entry.icon {
-                        surface.draw_bgra_bitmap(
-                            *r,
-                            icon_rgba.width,
-                            icon_rgba.height,
-                            &icon_rgba.bgra_premul,
-                            5.0,
-                        )?;
-                    } else {
-                        let initial = entry
-                            .label
-                            .chars()
-                            .next()
-                            .unwrap_or('?')
-                            .to_uppercase()
-                            .to_string();
-                        surface.draw_text(
-                            &initial,
-                            *r,
-                            11.0,
-                            palette.text_primary.with_alpha_mul(tray_alpha),
-                            TextAlign::Center,
+                if self.tray_items.is_empty() {
+                    surface.draw_text(
+                        "No hidden icons",
+                        flyout,
+                        11.0,
+                        palette.text_secondary.with_alpha_mul(tray_alpha),
+                        TextAlign::Center,
+                    )?;
+                } else {
+                    let tray_rects = self.tray_item_rects(surface_rect, dock);
+                    for (idx, (entry, r)) in self.tray_items.iter().zip(tray_rects.iter()).enumerate() {
+                        let hovered = self.hovered_target == Some(DockHoverTarget::TrayItem(idx));
+                        surface.draw_icon_button(*r, 7.0, hovered, false, false)?;
+                        let icon_inset = 4.0_f32;
+                        let icon_rect = Rect::new(
+                            r.x + icon_inset,
+                            r.y + icon_inset,
+                            (r.width - icon_inset * 2.0).max(14.0),
+                            (r.height - icon_inset * 2.0).max(14.0),
+                        );
+                        if let Some(ref icon_rgba) = entry.icon {
+                            surface.draw_bgra_bitmap(
+                                icon_rect,
+                                icon_rgba.width,
+                                icon_rgba.height,
+                                &icon_rgba.bgra_premul,
+                                4.0,
+                            )?;
+                        } else {
+                            let initial = entry
+                                .label
+                                .chars()
+                                .next()
+                                .unwrap_or('?')
+                                .to_uppercase()
+                                .to_string();
+                            surface.draw_text(
+                                &initial,
+                                *r,
+                                11.5,
+                                palette.text_primary.with_alpha_mul(tray_alpha),
+                                TextAlign::Center,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Windows 11-style Liquid Glass right-click options menu above clicked icon
+        if let (Some(menu), Some(mrect)) = (self.context_menu.as_ref(), menu_rect) {
+            let menu_t = self.context_menu_progress.value.clamp(0.0, 1.0);
+            let menu_alpha = alpha * menu_t;
+            if menu_alpha > 0.02 {
+                surface.draw_liquid_glass_panel(
+                    mrect,
+                    LiquidGlassStyle::regular(12.0)
+                        .with_shadow(12.0, 3.0, palette.shadow_color.a * menu_alpha),
+                )?;
+                let has_tasks = menu.items.iter().any(|it| it.is_task);
+                if has_tasks {
+                    surface.draw_text(
+                        "Tasks",
+                        Rect::new(
+                            mrect.x + CONTEXT_MENU_PAD_X + 8.0,
+                            mrect.y + CONTEXT_MENU_PAD_Y,
+                            mrect.width - CONTEXT_MENU_PAD_X * 2.0 - 16.0,
+                            CONTEXT_MENU_HEADER_H,
+                        ),
+                        11.0,
+                        palette.text_secondary.with_alpha_mul(menu_alpha),
+                        TextAlign::Leading,
+                    )?;
+                }
+
+                for (row_idx, row_rect, div_above) in self.context_menu_item_rects(mrect) {
+                    if div_above {
+                        let div_y = row_rect.y - CONTEXT_MENU_DIVIDER_H * 0.5;
+                        surface.fill_rounded_rect(
+                            Rect::new(
+                                mrect.x + CONTEXT_MENU_PAD_X,
+                                div_y,
+                                mrect.width - CONTEXT_MENU_PAD_X * 2.0,
+                                1.0,
+                            ),
+                            0.5,
+                            palette.divider.with_alpha_mul(menu_alpha),
                         )?;
                     }
+                    let item = &menu.items[row_idx];
+                    let hovered = self.hovered_target == Some(DockHoverTarget::ContextMenuItem(row_idx));
+                    if hovered {
+                        surface.draw_liquid_glass_button(row_rect, 7.0, None, true, false)?;
+                    }
+
+                    let icon_rect = Rect::new(row_rect.x + 8.0, row_rect.y + 7.0, 16.0, 16.0);
+                    let fg = palette.text_primary.with_alpha_mul(menu_alpha);
+                    if item.icon == ContextMenuIcon::AppIcon {
+                        if let Some(ref icon_rgba) = menu.app_icon {
+                            surface.draw_bgra_bitmap(
+                                icon_rect,
+                                icon_rgba.width,
+                                icon_rgba.height,
+                                &icon_rgba.bgra_premul,
+                                4.0,
+                            )?;
+                        } else {
+                            surface.draw_sf_symbol(icon_rect, SfSymbol::Desktops, fg, 1.35)?;
+                        }
+                    } else {
+                        let sym = match item.icon {
+                            ContextMenuIcon::NewWindow => SfSymbol::Plus,
+                            ContextMenuIcon::PrivateWindow => SfSymbol::PrivateMask,
+                            ContextMenuIcon::Folder => SfSymbol::FolderDrop,
+                            ContextMenuIcon::Pin => SfSymbol::Pin,
+                            ContextMenuIcon::EndTask => SfSymbol::StopCircle,
+                            ContextMenuIcon::CloseWindow => SfSymbol::CloseX,
+                            ContextMenuIcon::Settings => SfSymbol::Gear,
+                            ContextMenuIcon::AppIcon => SfSymbol::Desktops,
+                        };
+                        surface.draw_sf_symbol(icon_rect, sym, fg, 1.35)?;
+                    }
+
+                    let label_rect = Rect::new(
+                        row_rect.x + 32.0,
+                        row_rect.y,
+                        (row_rect.width - 40.0).max(24.0),
+                        row_rect.height,
+                    );
+                    surface.draw_text(&item.label, label_rect, 11.5, fg, TextAlign::Leading)?;
                 }
             }
         }
@@ -1799,17 +2340,16 @@ impl DockBar {
         &self,
         surface: &NativeSurface,
         palette: &AdaptivePalette,
-        ai_rect: Option<Rect>,
-        spaces_rect: Rect,
-        tray_rect: Rect,
+        util: &UtilityLayout,
         alpha: f32,
     ) -> Result<()> {
         let ai_hovered = self.hovered_target == Some(DockHoverTarget::AiDrawer);
         let spaces_hovered = self.hovered_target == Some(DockHoverTarget::Spaces);
+        let notif_hovered = self.hovered_target == Some(DockHoverTarget::Notifications);
         let tray_hovered = self.hovered_target == Some(DockHoverTarget::Tray);
 
         // 1. Hime AI button (expressive Hime eyes badge — frameless at rest, concentric r=8.0)
-        if let Some(ai_r) = ai_rect {
+        if let Some(ai_r) = util.ai_rect {
             surface.draw_icon_button(ai_r, 8.0, ai_hovered, false, false)?;
             surface.draw_hime_eyes(
                 ai_r.x + ai_r.width * 0.5,
@@ -1821,12 +2361,12 @@ impl DockBar {
         }
 
         // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`, frameless at rest)
-        surface.draw_icon_button(spaces_rect, 8.0, spaces_hovered, false, self.spaces_open)?;
+        surface.draw_icon_button(util.spaces_rect, 8.0, spaces_hovered, false, self.spaces_open)?;
         let spaces_icon = Rect::new(
-            spaces_rect.x + 8.0,
-            spaces_rect.y + 8.0,
-            spaces_rect.width - 16.0,
-            spaces_rect.height - 16.0,
+            util.spaces_rect.x + 8.0,
+            util.spaces_rect.y + 8.0,
+            util.spaces_rect.width - 16.0,
+            util.spaces_rect.height - 16.0,
         );
         surface.draw_sf_symbol(
             spaces_icon,
@@ -1837,29 +2377,52 @@ impl DockBar {
             1.5,
         )?;
 
-        // 3. System Tray button (`SfSymbol::TrayGrid` + optional `+N` count, concentric r=8.0)
+        // 3. Open Windows Notifications Center button (`SfSymbol::Bell`)
+        surface.draw_icon_button(util.notif_rect, 8.0, notif_hovered, false, false)?;
+        let notif_icon = Rect::new(
+            util.notif_rect.x + 8.0,
+            util.notif_rect.y + 8.0,
+            util.notif_rect.width - 16.0,
+            util.notif_rect.height - 16.0,
+        );
+        surface.draw_sf_symbol(
+            notif_icon,
+            SfSymbol::Bell,
+            palette
+                .text_primary
+                .with_alpha_mul(if notif_hovered { 1.0 } else { 0.88 } * alpha),
+            1.45,
+        )?;
+
+        // 4. Windows "Show hidden icons" overflow toggle (`ChevronUp`/`ChevronDown` + optional `+N`)
+        let tray_r = util.tray_rect;
         if self.system_tray_count > 0 {
             surface.draw_liquid_glass_button(
-                tray_rect,
+                tray_r,
                 8.0,
                 None,
                 tray_hovered,
                 self.tray_open,
             )?;
         } else {
-            surface.draw_icon_button(tray_rect, 8.0, tray_hovered, false, self.tray_open)?;
+            surface.draw_icon_button(tray_r, 8.0, tray_hovered, false, self.tray_open)?;
         }
         let tray_fg = palette
             .text_primary
             .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
+        let chevron_sym = if self.tray_open {
+            SfSymbol::ChevronDown
+        } else {
+            SfSymbol::ChevronUp
+        };
         if self.system_tray_count > 0 {
-            let icon_r = Rect::new(tray_rect.x + 6.0, tray_rect.y + 10.0, 14.0, 14.0);
-            surface.draw_sf_symbol(icon_r, SfSymbol::TrayGrid, tray_fg, 1.4)?;
+            let icon_r = Rect::new(tray_r.x + 6.0, tray_r.y + 10.0, 14.0, 14.0);
+            surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.5)?;
             let count_r = Rect::new(
-                tray_rect.x + 20.0,
-                tray_rect.y,
-                (tray_rect.width - 23.0).max(16.0),
-                tray_rect.height,
+                tray_r.x + 20.0,
+                tray_r.y,
+                (tray_r.width - 23.0).max(16.0),
+                tray_r.height,
             );
             surface.draw_text(
                 &format!("+{}", self.system_tray_count),
@@ -1870,12 +2433,12 @@ impl DockBar {
             )?;
         } else {
             let icon_r = Rect::new(
-                tray_rect.x + 9.0,
-                tray_rect.y + 9.0,
-                tray_rect.width - 18.0,
-                tray_rect.height - 18.0,
+                tray_r.x + 9.0,
+                tray_r.y + 9.0,
+                tray_r.width - 18.0,
+                tray_r.height - 18.0,
             );
-            surface.draw_sf_symbol(icon_r, SfSymbol::TrayGrid, tray_fg, 1.5)?;
+            surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.55)?;
         }
 
         Ok(())
@@ -1928,7 +2491,7 @@ mod tests {
             );
             assert_eq!(
                 dock.hit_test_context_action(cx, cy, surface_rect),
-                Some(DockAction::TogglePin(idx))
+                Some(DockAction::OpenAppContextMenu(idx))
             );
         }
         assert_eq!(
@@ -1939,11 +2502,10 @@ mod tests {
 
         let dock_rect = dock.dock_rect(surface_rect);
         assert_eq!(dock_rect.height, 54.0);
-        let (pinned_div_x, utils_div_x, ai_rect, spaces_rect, tray_rect) =
-            dock.utility_rects(dock_rect);
-        assert!(pinned_div_x.is_some());
-        assert!(utils_div_x.is_some());
-        let ai_rect = ai_rect.expect("ai button enabled by default");
+        let util = dock.utility_rects(dock_rect);
+        assert!(util.pinned_div_x.is_some());
+        assert!(util.utils_div_x.is_some());
+        let ai_rect = util.ai_rect.expect("ai button enabled by default");
         assert_eq!(
             dock.hit_test_action(
                 ai_rect.x + ai_rect.width * 0.5,
@@ -1954,16 +2516,24 @@ mod tests {
         );
         assert_eq!(
             dock.hit_test_action(
-                spaces_rect.x + spaces_rect.width * 0.5,
-                spaces_rect.y + spaces_rect.height * 0.5,
+                util.spaces_rect.x + util.spaces_rect.width * 0.5,
+                util.spaces_rect.y + util.spaces_rect.height * 0.5,
                 surface_rect
             ),
             Some(DockAction::ToggleSpaces)
         );
         assert_eq!(
             dock.hit_test_action(
-                tray_rect.x + tray_rect.width * 0.5,
-                tray_rect.y + tray_rect.height * 0.5,
+                util.notif_rect.x + util.notif_rect.width * 0.5,
+                util.notif_rect.y + util.notif_rect.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::OpenNotifications)
+        );
+        assert_eq!(
+            dock.hit_test_action(
+                util.tray_rect.x + util.tray_rect.width * 0.5,
+                util.tray_rect.y + util.tray_rect.height * 0.5,
                 surface_rect
             ),
             Some(DockAction::ToggleTray)
@@ -1975,26 +2545,34 @@ mod tests {
         let mut dock = sample_dock();
         let surface_rect = Rect::new(0.0, 0.0, 1080.0, 136.0);
         let dock_rect = dock.dock_rect(surface_rect);
-        let (_, _, ai_rect, spaces_rect, tray_rect) = dock.utility_rects(dock_rect);
-        assert!(ai_rect.is_some());
+        let util = dock.utility_rects(dock_rect);
+        assert!(util.ai_rect.is_some());
 
-        // When AI is disabled, only Spaces and Tray remain in the utility cluster.
+        // When AI is disabled, Spaces, Notifications, and Show Hidden Icons remain.
         dock.set_ai_enabled(false);
         let dock_no_ai = dock.dock_rect(surface_rect);
-        let (_, _, no_ai, spaces_no_ai, tray_no_ai) = dock.utility_rects(dock_no_ai);
-        assert!(no_ai.is_none());
+        let util_no_ai = dock.utility_rects(dock_no_ai);
+        assert!(util_no_ai.ai_rect.is_none());
         assert_eq!(
             dock.hit_test_action(
-                spaces_no_ai.x + spaces_no_ai.width * 0.5,
-                spaces_no_ai.y + spaces_no_ai.height * 0.5,
+                util_no_ai.spaces_rect.x + util_no_ai.spaces_rect.width * 0.5,
+                util_no_ai.spaces_rect.y + util_no_ai.spaces_rect.height * 0.5,
                 surface_rect
             ),
             Some(DockAction::ToggleSpaces)
         );
         assert_eq!(
             dock.hit_test_action(
-                tray_no_ai.x + tray_no_ai.width * 0.5,
-                tray_no_ai.y + tray_no_ai.height * 0.5,
+                util_no_ai.notif_rect.x + util_no_ai.notif_rect.width * 0.5,
+                util_no_ai.notif_rect.y + util_no_ai.notif_rect.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::OpenNotifications)
+        );
+        assert_eq!(
+            dock.hit_test_action(
+                util_no_ai.tray_rect.x + util_no_ai.tray_rect.width * 0.5,
+                util_no_ai.tray_rect.y + util_no_ai.tray_rect.height * 0.5,
                 surface_rect
             ),
             Some(DockAction::ToggleTray)
@@ -2003,8 +2581,8 @@ mod tests {
         // Hovering Spaces button sets "Spaces" tooltip.
         dock.set_ai_enabled(true);
         dock.set_hovered_at(
-            spaces_rect.x + spaces_rect.width * 0.5,
-            spaces_rect.y + spaces_rect.height * 0.5,
+            util.spaces_rect.x + util.spaces_rect.width * 0.5,
+            util.spaces_rect.y + util.spaces_rect.height * 0.5,
             surface_rect,
         );
         let dock_rect = dock.dock_rect(surface_rect);
@@ -2014,8 +2592,8 @@ mod tests {
         assert_eq!(tip, "Spaces");
         assert_ne!(
             dock.hit_test_action(
-                tray_rect.x + tray_rect.width * 0.5,
-                tray_rect.y + tray_rect.height * 0.5,
+                util.tray_rect.x + util.tray_rect.width * 0.5,
+                util.tray_rect.y + util.tray_rect.height * 0.5,
                 surface_rect
             ),
             Some(DockAction::ToggleSpaces)
@@ -2111,12 +2689,12 @@ mod tests {
         dock.set_tray_items(vec![TrayEntry::new("discord", "Discord", "", 0)]);
 
         let dock_rect = dock.dock_rect(surface_rect);
-        let (_, _, _, spaces_rect, tray_rect) = dock.utility_rects(dock_rect);
+        let util = dock.utility_rects(dock_rect);
 
         // Hovering Spaces when closed shows "Spaces" tooltip.
         dock.set_hovered_at(
-            spaces_rect.x + spaces_rect.width * 0.5,
-            spaces_rect.y + spaces_rect.height * 0.5,
+            util.spaces_rect.x + util.spaces_rect.width * 0.5,
+            util.spaces_rect.y + util.spaces_rect.height * 0.5,
             surface_rect,
         );
         assert_eq!(
@@ -2153,8 +2731,8 @@ mod tests {
             dock.tick(1.0 / 60.0);
         }
         dock.set_hovered_at(
-            tray_rect.x + tray_rect.width * 0.5,
-            tray_rect.y + tray_rect.height * 0.5,
+            util.tray_rect.x + util.tray_rect.width * 0.5,
+            util.tray_rect.y + util.tray_rect.height * 0.5,
             surface_rect,
         );
         assert_eq!(dock.active_tooltip(surface_rect, dock_rect), None);
@@ -2569,5 +3147,122 @@ mod tests {
         surface
             .end_draw_and_present()
             .expect("DockBar LightGlass present");
+    }
+
+    #[test]
+    fn right_click_context_menu_notifications_and_hidden_icons_grid() {
+        let surface = match NativeSurface::new("HimeDockWinFeaturesTest", -2000, -2000, 1080, 304) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut dock = DockBar::new();
+        let surface_rect = Rect::new(0.0, 0.0, 1080.0, 304.0);
+
+        let mut brave = DockItem::new("brave.exe", "Brave", "brave.exe", true);
+        brave.exe_path = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe".into();
+        brave.running = true;
+        brave.hwnds = vec![4242];
+        dock.add_item(brave);
+
+        // 7 hidden tray items wrap cleanly into a 5-column x 2-row Windows 11 overflow grid.
+        dock.set_tray_items(
+            ["Antigravity", "Bluetooth", "Drive", "Gemini", "Logi", "Steam", "OBS"]
+                .iter()
+                .map(|n| TrayEntry::new(n.to_lowercase(), *n, "", 100))
+                .collect(),
+        );
+        assert!(dock.toggle_tray());
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+        let dock_rect = dock.dock_rect(surface_rect);
+        let tray_flyout = dock
+            .tray_flyout_rect(surface_rect, dock_rect)
+            .expect("tray grid flyout");
+        let tray_rects = dock.tray_item_rects(surface_rect, dock_rect);
+        assert_eq!(tray_rects.len(), 7);
+        assert!(tray_rects[5].y > tray_rects[0].y, "item 6 wraps to row 2");
+        assert!(tray_flyout.height >= TRAY_ITEM_SIZE * 2.0);
+        assert_eq!(
+            dock.hit_test_context_action(
+                tray_rects[2].x + 5.0,
+                tray_rects[2].y + 5.0,
+                surface_rect
+            ),
+            Some(DockAction::OpenTrayContextMenu(2))
+        );
+
+        // Notifications Bell button triggers OpenNotifications & exposes "Notifications" tooltip
+        // once the tray flyout above it has finished closing.
+        assert!(!dock.toggle_tray());
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+        let util = dock.utility_rects(dock_rect);
+        assert_eq!(
+            dock.hit_test_action(
+                util.notif_rect.x + util.notif_rect.width * 0.5,
+                util.notif_rect.y + util.notif_rect.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::OpenNotifications)
+        );
+        dock.set_hovered_at(
+            util.notif_rect.x + util.notif_rect.width * 0.5,
+            util.notif_rect.y + util.notif_rect.height * 0.5,
+            surface_rect,
+        );
+        assert_eq!(
+            dock.active_tooltip(surface_rect, dock_rect).map(|(_, t)| t),
+            Some("Notifications".to_string())
+        );
+
+        // Right-clicking Brave opens the Windows-style Jump List / options menu above the icon.
+        let item_rects = dock.item_rects(surface_rect);
+        assert_eq!(
+            dock.hit_test_context_action(
+                item_rects[0].x + item_rects[0].width * 0.5,
+                item_rects[0].y + item_rects[0].height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::OpenAppContextMenu(0))
+        );
+        assert!(dock.open_app_context_menu(0, surface_rect));
+        assert!(!dock.tray_open, "opening app menu closes hidden icons grid");
+        for _ in 0..30 {
+            dock.tick(1.0 / 60.0);
+        }
+
+        let menu = dock.context_menu.as_ref().expect("context menu present");
+        let labels: Vec<&str> = menu.items.iter().map(|it| it.label.as_str()).collect();
+        assert!(labels.contains(&"New window"));
+        assert!(labels.contains(&"New private window"));
+        assert!(labels.contains(&"Open file location"));
+        assert!(labels.contains(&"Brave"));
+        assert!(labels.contains(&"Unpin from taskbar"));
+        assert!(labels.contains(&"End task"));
+        assert!(labels.contains(&"Close window"));
+
+        let menu_rect = dock
+            .context_menu_rect(surface_rect, dock_rect)
+            .expect("context menu rect");
+        let rows = dock.context_menu_item_rects(menu_rect);
+        assert_eq!(rows.len(), menu.items.len());
+        let (_, row0_rect, _) = rows[0];
+        assert_eq!(
+            dock.hit_test_action(
+                row0_rect.x + 12.0,
+                row0_rect.y + row0_rect.height * 0.5,
+                surface_rect
+            ),
+            Some(DockAction::ExecuteContextMenuItem(0))
+        );
+
+        surface.begin_draw();
+        dock.render(&surface)
+            .expect("DockBar right-click options menu render");
+        surface
+            .end_draw_and_present()
+            .expect("DockBar right-click options menu present");
     }
 }

@@ -8,7 +8,7 @@
 //! - Win32 `WM_DROPFILES` (`DragAcceptFiles` + `HDROP`) extraction into [`FileShelf`].
 
 use std::collections::HashMap;
-use std::ffi::{c_void, OsString};
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -18,8 +18,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows::core::{BOOL, PCSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::core::{w, BOOL, PCSTR, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
@@ -30,9 +30,12 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     SRCCOPY,
 };
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+};
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ABM_GETSTATE, ABM_GETTASKBARPOS,
-    ABM_SETSTATE, APPBARDATA, HDROP,
+    DragAcceptFiles, DragFinish, DragQueryFileW, SHAppBarMessage, ShellExecuteW, ABM_GETSTATE,
+    ABM_GETTASKBARPOS, ABM_SETSTATE, APPBARDATA, HDROP,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -40,11 +43,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, FindWindowA, GetClassNameA, GetCursorPos, GetSystemMetrics,
-    GetWindowLongA, GetWindowLongW, GetWindowRect, IsIconic, IsWindowVisible, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowLongA, SetWindowLongW, SetWindowPos, ShowWindow,
-    GWL_EXSTYLE, HWND_TOPMOST, LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_HIDEWINDOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    GetWindowLongA, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowLongA, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST,
+    LWA_ALPHA, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
@@ -1178,6 +1182,99 @@ pub fn switch_virtual_desktop(target_index: usize) -> bool {
 pub fn create_virtual_desktop() -> bool {
     const VK_D: VIRTUAL_KEY = VIRTUAL_KEY(0x44);
     send_win_ctrl_combo(VK_D, false, 1)
+}
+
+/// Opens the native Windows 11 Notification & Calendar Center using `Win + N`.
+pub fn open_notification_center() -> bool {
+    const VK_N: VIRTUAL_KEY = VIRTUAL_KEY(0x4E);
+    let inputs = [
+        make_key_input(VK_LWIN, true, false),
+        make_key_input(VK_N, false, false),
+        make_key_input(VK_N, false, true),
+        make_key_input(VK_LWIN, true, true),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    sent == inputs.len() as u32
+}
+
+/// Launches an executable or shell target with optional command-line arguments.
+pub fn launch_executable_with_args(target: &str, args: &str) {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let wide_target: Vec<u16> = OsStr::new(trimmed).encode_wide().chain(Some(0)).collect();
+    let trimmed_args = args.trim();
+    let wide_args: Option<Vec<u16>> = if trimmed_args.is_empty() {
+        None
+    } else {
+        Some(OsStr::new(trimmed_args).encode_wide().chain(Some(0)).collect())
+    };
+    unsafe {
+        let params_ptr = wide_args
+            .as_ref()
+            .map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr()));
+        let _ = ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide_target.as_ptr()),
+            params_ptr,
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Opens Windows Explorer highlighting `path` on disk.
+pub fn open_file_location(path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let args = format!("/select,\"{}\"", trimmed);
+    launch_executable_with_args("explorer.exe", &args);
+}
+
+/// Requests graceful close (`WM_CLOSE`) for every valid HWND in `hwnds`.
+pub fn close_windows_by_hwnd(hwnds: &[isize]) {
+    for &raw in hwnds {
+        if raw == 0 {
+            continue;
+        }
+        let hwnd = HWND(raw as *mut c_void);
+        unsafe {
+            if IsWindow(Some(hwnd)).as_bool() {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+/// Terminates unique non-self processes owning `hwnds` (matching Windows 11 "End task").
+pub fn terminate_processes_by_hwnd(hwnds: &[isize]) {
+    let own_pid = unsafe { GetCurrentProcessId() };
+    let mut terminated_pids = Vec::new();
+    for &raw in hwnds {
+        if raw == 0 {
+            continue;
+        }
+        let hwnd = HWND(raw as *mut c_void);
+        let mut pid = 0u32;
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                continue;
+            }
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 || pid == own_pid || terminated_pids.contains(&pid) {
+                continue;
+            }
+            if let Ok(proc_h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                let _ = TerminateProcess(proc_h, 1);
+                let _ = CloseHandle(proc_h);
+                terminated_pids.push(pid);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

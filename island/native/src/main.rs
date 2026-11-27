@@ -62,7 +62,9 @@ use hime_island_native::ai_drawer::{
 use hime_island_native::d2d::{
     self, HimeExpression, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind, WM_SURFACE_EVENT,
 };
-use hime_island_native::dock::{DockAction, DockBar, DockItem, DockMode, SpaceEntry, TrayEntry};
+use hime_island_native::dock::{
+    ContextMenuOp, DockAction, DockBar, DockItem, DockMode, SpaceEntry, TrayEntry,
+};
 use hime_island_native::hotkey::{self, HotkeyAction, HotkeyManager};
 use hime_island_native::ipc_client::{
     AiProfileUpsertParams, ApprovalResolution, ChatTurnParams, ChatTurnResult,
@@ -108,7 +110,7 @@ const ANIM_INTERVAL_IDLE_MS: u32 = 250;
 const OVERLAY_DIP_WIDTH: f32 = 80.0;
 const OVERLAY_DIP_HEIGHT: f32 = 240.0;
 const DOCK_DIP_WIDTH: f32 = 1080.0;
-const DOCK_DIP_HEIGHT: f32 = 136.0;
+const DOCK_DIP_HEIGHT: f32 = 304.0;
 
 const MENU_TOGGLE_NOTCH: usize = 1001;
 const MENU_TOGGLE_DOCK: usize = 1002;
@@ -608,6 +610,9 @@ enum OsCommand {
     RefreshVirtualDesktops,
     SwitchVirtualDesktop(usize),
     CreateVirtualDesktop,
+    OpenNotificationCenter,
+    CloseWindows(Vec<isize>),
+    EndTaskWindows(Vec<isize>),
 }
 
 struct OsWorker {
@@ -755,6 +760,15 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                     std::thread::sleep(Duration::from_millis(150));
                     let spaces = os_shell::list_virtual_desktops();
                     let _ = result_tx.send(IpcBgResult::VirtualDesktops(spaces));
+                }
+                OsCommand::OpenNotificationCenter => {
+                    let _ = os_shell::open_notification_center();
+                }
+                OsCommand::CloseWindows(hwnds) => {
+                    os_shell::close_windows_by_hwnd(&hwnds);
+                }
+                OsCommand::EndTaskWindows(hwnds) => {
+                    os_shell::terminate_processes_by_hwnd(&hwnds);
                 }
                 OsCommand::SetVolume { .. } | OsCommand::SetBrightness(_) => {}
             }
@@ -2198,7 +2212,11 @@ impl AppShell {
                         .dock
                         .spaces_flyout_rect(surf_rect, dock_rect)
                         .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
-                    let over_flyout = over_tray_flyout || over_spaces_flyout;
+                    let over_context_menu = self
+                        .dock
+                        .context_menu_rect(surf_rect, dock_rect)
+                        .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                    let over_flyout = over_tray_flyout || over_spaces_flyout || over_context_menu;
                     let over_any = over_dock || over_flyout;
                     let keep_awake =
                         over_any || (self.dock.mode != DockMode::Fixed && over_wake);
@@ -2279,7 +2297,11 @@ impl AppShell {
                             .dock
                             .spaces_flyout_rect(surf_rect, dock_rect)
                             .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
-                        let over_flyout = over_tray_flyout || over_spaces_flyout;
+                        let over_context_menu = self
+                            .dock
+                            .context_menu_rect(surf_rect, dock_rect)
+                            .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                        let over_flyout = over_tray_flyout || over_spaces_flyout || over_context_menu;
 
                         if !over_dock && !over_flyout && !over_wake {
                             if self.dock.tray_open {
@@ -2288,6 +2310,10 @@ impl AppShell {
                             }
                             if self.dock.spaces_open {
                                 self.dock.set_spaces_open(false);
+                                self.dirty_dock = true;
+                            }
+                            if self.dock.context_menu.is_some() {
+                                self.dock.close_context_menu();
                                 self.dirty_dock = true;
                             }
                             if self.dock.mode != DockMode::Fixed && !self.dock.is_hidden {
@@ -2996,6 +3022,9 @@ impl AppShell {
                 if let Some(act) = self.dock.hit_test_action(x / scale, y / scale, rect) {
                     self.execute_dock_action(act, ctrl_hwnd);
                     render_now = true;
+                } else if self.dock.context_menu.is_some() {
+                    self.dock.close_context_menu();
+                    render_now = true;
                 }
             }
             SurfaceEventKind::LeftButtonUp { .. } | SurfaceEventKind::DropFiles { .. } => {}
@@ -3083,24 +3112,86 @@ impl AppShell {
                 self.os_worker.send(OsCommand::CreateVirtualDesktop);
                 self.dirty_dock = true;
             }
+            DockAction::OpenNotifications => {
+                self.dock.set_tray_open(false);
+                self.dock.set_spaces_open(false);
+                self.dock.close_context_menu();
+                self.os_worker.send(OsCommand::OpenNotificationCenter);
+                self.dirty_dock = true;
+            }
             DockAction::ToggleTray => {
-                if self.dock.tray_items().is_empty() {
-                    unsafe {
-                        show_tray_menu(ctrl_hwnd);
-                    }
-                } else {
-                    self.dock.toggle_tray();
+                let opened = self.dock.toggle_tray();
+                if opened {
+                    self.os_worker.send(OsCommand::ScanTrayEntries);
                 }
+                self.dirty_dock = true;
             }
             DockAction::ActivateTrayItem(idx) => {
                 if let Some(entry) = self.dock.tray_items().get(idx).cloned() {
                     self.dock.set_tray_open(false);
-                    if entry.hwnd != 0 {
-                        focus_hwnd(entry.hwnd);
-                    } else if !entry.exe_path.trim().is_empty() {
+                    if (entry.hwnd == 0 || !focus_hwnd(entry.hwnd))
+                        && !entry.exe_path.trim().is_empty()
+                    {
                         launch_executable(&entry.exe_path);
                     }
+                    self.dirty_dock = true;
                 }
+            }
+            DockAction::OpenAppContextMenu(idx) => {
+                let (dw, dh) = self.dock_surface.dip_size();
+                self.dock
+                    .open_app_context_menu(idx, Rect::new(0.0, 0.0, dw, dh));
+                self.dirty_dock = true;
+            }
+            DockAction::OpenTrayContextMenu(idx) => {
+                let (dw, dh) = self.dock_surface.dip_size();
+                self.dock
+                    .open_tray_context_menu(idx, Rect::new(0.0, 0.0, dw, dh));
+                self.dirty_dock = true;
+            }
+            DockAction::ExecuteContextMenuItem(row_idx) => {
+                let op = self
+                    .dock
+                    .context_menu
+                    .as_ref()
+                    .and_then(|menu| menu.items.get(row_idx).map(|it| it.op.clone()));
+                self.dock.close_context_menu();
+                self.dirty_dock = true;
+                if let Some(op) = op {
+                    match op {
+                        ContextMenuOp::Launch { exe_path, args } => {
+                            os_shell::launch_executable_with_args(&exe_path, &args);
+                        }
+                        ContextMenuOp::FocusOrLaunchApp(idx) => {
+                            if let Some(item) = self.dock.items().get(idx).cloned() {
+                                self.dock.trigger_bounce(idx);
+                                focus_or_launch_dock_item(&item);
+                            }
+                        }
+                        ContextMenuOp::TogglePin(idx) => {
+                            self.execute_dock_action(DockAction::TogglePin(idx), ctrl_hwnd);
+                        }
+                        ContextMenuOp::OpenFileLocation(path) => {
+                            os_shell::open_file_location(&path);
+                        }
+                        ContextMenuOp::CloseWindows(hwnds) => {
+                            self.os_worker.send(OsCommand::CloseWindows(hwnds));
+                        }
+                        ContextMenuOp::EndTask(hwnds) => {
+                            self.os_worker.send(OsCommand::EndTaskWindows(hwnds));
+                        }
+                        ContextMenuOp::FocusOrLaunchTray(idx) => {
+                            self.execute_dock_action(DockAction::ActivateTrayItem(idx), ctrl_hwnd);
+                        }
+                        ContextMenuOp::OpenTaskbarSettings => {
+                            open_shell_uri("ms-settings:taskbar");
+                        }
+                    }
+                }
+            }
+            DockAction::CloseContextMenu => {
+                self.dock.close_context_menu();
+                self.dirty_dock = true;
             }
             DockAction::WakeHiddenDock => {
                 self.dock.set_edge_hovered(true);
@@ -4429,6 +4520,7 @@ impl AppShell {
             || (self.dock.visible && self.dock.mode != DockMode::Fixed && !self.dock.is_hidden)
             || self.dock.tray_open
             || self.dock.spaces_open
+            || self.dock.context_menu.is_some()
             || self.overlays.volume.is_expanded()
             || self.overlays.brightness.is_expanded();
 
@@ -4815,7 +4907,25 @@ fn collect_live_tray_entries() -> Vec<TrayEntry> {
                 continue;
             };
             let lower = path.to_lowercase();
-            if lower.ends_with("\\explorer.exe") || own_exe.as_deref() == Some(lower.as_str()) {
+            let exe_name = Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("App");
+            let exe_lower = exe_name.to_ascii_lowercase();
+            if own_exe.as_deref() == Some(lower.as_str())
+                || matches!(
+                    exe_lower.as_str(),
+                    "explorer.exe"
+                        | "svchost.exe"
+                        | "conhost.exe"
+                        | "sihost.exe"
+                        | "runtimebroker.exe"
+                        | "shellexperiencehost.exe"
+                        | "startmenuexperiencehost.exe"
+                        | "searchhost.exe"
+                        | "textinputhost.exe"
+                )
+            {
                 continue;
             }
             if seen.contains(&lower) {
@@ -4831,14 +4941,11 @@ fn collect_live_tray_entries() -> Vec<TrayEntry> {
                     GUID::try_from(guid_str.trim_start_matches('{').trim_end_matches('}'))
                 {
                     nid.guidItem = guid;
-                    if Shell_NotifyIconGetRect(&nid).is_ok() {
-                        windows_list
-                            .iter()
-                            .find(|(_, p)| p.eq_ignore_ascii_case(&path))
-                            .map(|(h, _)| *h)
-                    } else {
-                        None
-                    }
+                    let _ = Shell_NotifyIconGetRect(&nid);
+                    windows_list
+                        .iter()
+                        .find(|(_, p)| p.eq_ignore_ascii_case(&path))
+                        .map(|(h, _)| *h)
                 } else {
                     None
                 }
@@ -4851,25 +4958,26 @@ fn collect_live_tray_entries() -> Vec<TrayEntry> {
                             return false;
                         }
                         nid.hWnd = HWND(*hwnd as *mut _);
-                        Shell_NotifyIconGetRect(&nid).is_ok()
+                        let _ = Shell_NotifyIconGetRect(&nid);
+                        true
                     })
                     .map(|(h, _)| *h)
             } else {
-                None
+                windows_list
+                    .iter()
+                    .find(|(_, p)| p.eq_ignore_ascii_case(&path))
+                    .map(|(h, _)| *h)
             };
 
             if let Some(hwnd) = matched_hwnd {
                 seen.insert(lower.clone());
-                let exe_name = Path::new(&path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("App");
                 let label = telemetry::friendly_app_name(exe_name);
                 entries.push(TrayEntry::new(lower, label, path, hwnd));
             }
         }
 
         let _ = RegCloseKey(root);
+        entries.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
         entries
     }
 }
@@ -5876,7 +5984,7 @@ mod tests {
 
         let (_, dy, dw, dh) = dock_surface_bounds(screen, 1.0);
         assert_eq!(dw, 1080);
-        assert_eq!(dh, 136);
+        assert_eq!(dh, 304);
         assert_eq!(dy + dh as i32, 1080);
     }
 
