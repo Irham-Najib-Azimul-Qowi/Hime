@@ -1169,6 +1169,10 @@ struct AppShell {
     os_worker: OsWorker,
     notch_surface: NativeSurface,
     dock_surface: NativeSurface,
+    dock_glass_surface: Option<NativeSurface>,
+    last_dock_glass: Option<(i32, i32, u32, u32, i32)>,
+    dock_flyout_glass_surface: Option<NativeSurface>,
+    last_dock_flyout_glass: Option<(i32, i32, u32, u32, i32)>,
     dock_tooltip_surface: Option<NativeSurface>,
     last_dock_tooltip: Option<(i32, i32, u32, u32, String, u8)>,
     overlay_left_surface: Option<NativeSurface>,
@@ -1237,7 +1241,7 @@ impl AppShell {
         os_shell::enable_file_drop(notch_surface.hwnd(), true);
 
         let (dx, dy, dock_w, dock_h) = dock_surface_bounds(screen, 1.0);
-        let mut dock_surface = NativeSurface::new_gpu_acrylic("HimeDock", dx, dy, dock_w, dock_h)?;
+        let mut dock_surface = NativeSurface::new_gpu_transparent("HimeDock", dx, dy, dock_w, dock_h)?;
         dock_surface.set_system_light_theme(os_shell::system_uses_light_theme());
         let dock_scale = (dock_surface.dpi() / 96.0).max(0.5);
         if (dock_scale - 1.0).abs() > 0.01 {
@@ -1279,7 +1283,7 @@ impl AppShell {
         let overlays = DualEdgeOverlays::new();
         let now = Instant::now();
 
-        let need_sw_backdrop = !dock_surface.is_gpu_acrylic();
+        let need_sw_backdrop = !dock_surface.is_gpu_composited();
         let mut shell = Self {
             notch,
             dock,
@@ -1297,6 +1301,10 @@ impl AppShell {
             os_worker,
             notch_surface,
             dock_surface,
+            dock_glass_surface: None,
+            last_dock_glass: None,
+            dock_flyout_glass_surface: None,
+            last_dock_flyout_glass: None,
             dock_tooltip_surface: None,
             last_dock_tooltip: None,
             overlay_left_surface: None,
@@ -1378,6 +1386,12 @@ impl AppShell {
     fn apply_color_theme_to_surfaces(&self) {
         let mode = ColorThemeMode::from_str_lossy(&self.native_settings.color_theme);
         self.dock_surface.set_color_theme_mode(mode);
+        if let Some(ref surf) = self.dock_glass_surface {
+            surf.set_color_theme_mode(mode);
+        }
+        if let Some(ref surf) = self.dock_flyout_glass_surface {
+            surf.set_color_theme_mode(mode);
+        }
         if let Some(ref surf) = self.settings_surface {
             surf.set_color_theme_mode(mode);
         }
@@ -1391,6 +1405,12 @@ impl AppShell {
             self.notch_surface.hwnd().0 as isize,
             self.dock_surface.hwnd().0 as isize,
         ];
+        if let Some(ref s) = self.dock_glass_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
+        if let Some(ref s) = self.dock_flyout_glass_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
         if let Some(ref s) = self.overlay_left_surface {
             hwnds.push(s.hwnd().0 as isize);
         }
@@ -1410,7 +1430,7 @@ impl AppShell {
     }
 
     fn refresh_all_backdrops_startup(&mut self) {
-        if self.dock_surface.is_gpu_acrylic() {
+        if self.dock_surface.is_gpu_composited() {
             return;
         }
         let exclude = self.own_hwnds();
@@ -1432,7 +1452,7 @@ impl AppShell {
     }
 
     fn capture_dock_backdrop(&mut self, force: bool, is_hidden: bool) {
-        if self.dock_surface.is_gpu_acrylic() {
+        if self.dock_surface.is_gpu_composited() {
             return;
         }
         let exclude = self.own_hwnds();
@@ -1462,7 +1482,7 @@ impl AppShell {
     /// using `StretchBlt` only while completely invisible (`show_progress <= 0.02`) and keeping the
     /// cached wake capture during mid-recede re-hovers so no semi-transparent dock pixels bleed in.
     fn ensure_dock_wake_backdrop(&mut self) {
-        if self.dock_surface.is_gpu_acrylic() {
+        if self.dock_surface.is_gpu_composited() {
             return;
         }
         if self.dock.show_progress.value <= 0.02 {
@@ -1555,7 +1575,7 @@ impl AppShell {
             return;
         };
         let screen = os_shell::primary_screen_bounds();
-        let dock_bounds = if !self.dock_surface.is_gpu_acrylic()
+        let dock_bounds = if !self.dock_surface.is_gpu_composited()
             && self.dock.visible
             && !self.dock.is_hidden
             && self.dock.show_progress.value > 0.02
@@ -2658,6 +2678,14 @@ impl AppShell {
         let raw = hwnd.0 as isize;
         raw == self.notch_surface.hwnd().0 as isize
             || raw == self.dock_surface.hwnd().0 as isize
+            || self
+                .dock_glass_surface
+                .as_ref()
+                .is_some_and(|s| raw == s.hwnd().0 as isize)
+            || self
+                .dock_flyout_glass_surface
+                .as_ref()
+                .is_some_and(|s| raw == s.hwnd().0 as isize)
             || self
                 .overlay_left_surface
                 .as_ref()
@@ -4657,6 +4685,12 @@ impl AppShell {
         if self.tick_count % 16 == 0 {
             let sys_light = os_shell::system_uses_light_theme();
             self.dock_surface.set_system_light_theme(sys_light);
+            if let Some(ref surf) = self.dock_glass_surface {
+                surf.set_system_light_theme(sys_light);
+            }
+            if let Some(ref surf) = self.dock_flyout_glass_surface {
+                surf.set_system_light_theme(sys_light);
+            }
             if let Some(ref surf) = self.settings_surface {
                 surf.set_system_light_theme(sys_light);
             }
@@ -4894,8 +4928,16 @@ impl AppShell {
         if (self.dock.visible || self.dock.is_animating()) && self.dirty_dock {
             self.render_surface("HimeDock", &self.dock_surface, |s| self.dock.render(s));
             self.dirty_dock = false;
+            self.sync_dock_glass_surfaces();
             self.sync_dock_tooltip_surface();
-        } else if !self.dock.visible || self.dock.is_hidden {
+        } else if !self.dock.visible || (self.dock.is_hidden && self.dock.show_progress.value <= 0.08)
+        {
+            if self.last_dock_glass.take().is_some() {
+                self.dock_glass_surface.take();
+            }
+            if self.last_dock_flyout_glass.take().is_some() {
+                self.dock_flyout_glass_surface.take();
+            }
             if self.last_dock_tooltip.take().is_some() {
                 self.dock_tooltip_surface.take();
             }
@@ -4932,8 +4974,50 @@ impl AppShell {
         }
     }
 
+    fn sync_dock_glass_surfaces(&mut self) {
+        if !self.dock_surface.is_gpu_composited() || !self.dock.visible {
+            if self.last_dock_glass.take().is_some() {
+                self.dock_glass_surface.take();
+            }
+            if self.last_dock_flyout_glass.take().is_some() {
+                self.dock_flyout_glass_surface.take();
+            }
+            return;
+        }
+        let (dw, dh) = self.dock_surface.dip_size();
+        let (dock_cap, flyout_cap) = self.dock.backdrop_capsules(Rect::new(0.0, 0.0, dw, dh));
+        let screen = os_shell::primary_screen_bounds();
+        let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+        let (dx, dy, _, _) = dock_surface_bounds(screen, scale);
+        let sys_light = os_shell::system_uses_light_theme();
+        let theme_mode = ColorThemeMode::from_str_lossy(&self.native_settings.color_theme);
+
+        sync_single_dock_glass_capsule(
+            &mut self.dock_glass_surface,
+            &mut self.last_dock_glass,
+            "HimeDockGlass",
+            &self.dock_surface,
+            (dx, dy),
+            scale,
+            sys_light,
+            theme_mode,
+            dock_cap,
+        );
+        sync_single_dock_glass_capsule(
+            &mut self.dock_flyout_glass_surface,
+            &mut self.last_dock_flyout_glass,
+            "HimeDockFlyoutGlass",
+            &self.dock_surface,
+            (dx, dy),
+            scale,
+            sys_light,
+            theme_mode,
+            flyout_cap,
+        );
+    }
+
     fn sync_dock_tooltip_surface(&mut self) {
-        if !self.dock_surface.is_gpu_acrylic() {
+        if !self.dock_surface.is_gpu_composited() {
             return;
         }
         let (dw, dh) = self.dock_surface.dip_size();
@@ -5010,6 +5094,12 @@ impl AppShell {
         if let Some(surf) = self.dock_tooltip_surface.take() {
             drop(surf);
         }
+        if let Some(surf) = self.dock_flyout_glass_surface.take() {
+            drop(surf);
+        }
+        if let Some(surf) = self.dock_glass_surface.take() {
+            drop(surf);
+        }
         if let Some(surf) = self.overlay_left_surface.take() {
             remove_tracked_hwnd(surf.hwnd());
             drop(surf);
@@ -5030,6 +5120,71 @@ impl AppShell {
             }
         }
     }
+}
+
+fn sync_single_dock_glass_capsule(
+    slot: &mut Option<NativeSurface>,
+    last_key: &mut Option<(i32, i32, u32, u32, i32)>,
+    title: &str,
+    dock_surface: &NativeSurface,
+    dock_screen_origin: (i32, i32),
+    scale: f32,
+    sys_light: bool,
+    theme_mode: ColorThemeMode,
+    capsule: Option<(Rect, f32)>,
+) {
+    let Some((rect_dip, radius_dip)) = capsule else {
+        if last_key.take().is_some() {
+            slot.take();
+        }
+        return;
+    };
+    let gx = dock_screen_origin.0 + (rect_dip.x * scale).round() as i32;
+    let gy = dock_screen_origin.1 + (rect_dip.y * scale).round() as i32;
+    let gw = ((rect_dip.width * scale).round() as u32).max(16);
+    let gh = ((rect_dip.height * scale).round() as u32).max(12);
+    let rad_q = (radius_dip * 10.0).round() as i32;
+    let key = (gx, gy, gw, gh, rad_q);
+
+    if last_key.as_ref() == Some(&key) && slot.is_some() {
+        return;
+    }
+
+    let created_now = if slot.is_none() {
+        if let Ok(surf) = NativeSurface::new_gpu_acrylic(title, gx, gy, gw, gh) {
+            if !surf.is_gpu_acrylic() {
+                drop(surf);
+                return;
+            }
+            surf.set_click_through(true);
+            surf.set_system_light_theme(sys_light);
+            surf.set_color_theme_mode(theme_mode);
+            *slot = Some(surf);
+            true
+        } else {
+            return;
+        }
+    } else {
+        false
+    };
+
+    let Some(ref mut glass) = slot else {
+        return;
+    };
+    glass.set_system_light_theme(sys_light);
+    glass.set_color_theme_mode(theme_mode);
+
+    let (cw, ch) = glass.size();
+    let resized = created_now || cw != gw || ch != gh;
+    let _ = glass.set_bounds_below(dock_surface.hwnd(), gx, gy, gw, gh);
+    let (dip_w, dip_h) = glass.dip_size();
+    glass.set_rounded_region(Rect::new(0.0, 0.0, dip_w, dip_h), radius_dip);
+    if resized {
+        glass.begin_draw();
+        let _ = glass.end_draw_and_present();
+    }
+    glass.show_below(dock_surface.hwnd());
+    *last_key = Some(key);
 }
 
 fn collect_live_tray_entries() -> Vec<TrayEntry> {
