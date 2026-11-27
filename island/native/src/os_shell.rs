@@ -1072,6 +1072,20 @@ pub fn system_uses_light_theme() -> bool {
     false
 }
 
+/// Returns `true` when Windows Personalization `EnableTransparency` is enabled (`!= 0`).
+/// When `false`, Windows DWM turns `ACCENT_ENABLE_ACRYLICBLURBEHIND` solid black, so Hime falls
+/// back cleanly to pure-Rust `LiquidGlass` backdrop compositing.
+pub fn dwm_transparency_enabled() -> bool {
+    const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    const REG_DWORD: u32 = 4;
+    if let Some((kind, bytes)) = read_hkcu_value(PERSONALIZE_KEY, "EnableTransparency") {
+        if kind == REG_DWORD && bytes.len() >= 4 {
+            return u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) != 0;
+        }
+    }
+    false
+}
+
 fn read_hkcu_binary(subkey: &str, value_name: &str) -> Option<Vec<u8>> {
     const REG_BINARY: u32 = 3;
     let (ty, data) = read_hkcu_value(subkey, value_name)?;

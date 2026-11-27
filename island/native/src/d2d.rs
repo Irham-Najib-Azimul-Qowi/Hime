@@ -1454,10 +1454,7 @@ enum SurfaceBackend {
         dc_rt: ID2D1DCRenderTarget,
         dib: RefCell<BackingDib>,
     },
-    GpuDirect {
-        state: RefCell<GpuAcrylicState>,
-        acrylic_blur: bool,
-    },
+    GpuAcrylic(RefCell<GpuAcrylicState>),
 }
 
 /// Borderless topmost surface window supporting either `UpdateLayeredWindow` software D2D
@@ -1489,24 +1486,15 @@ pub struct NativeSurface {
 impl NativeSurface {
     /// Creates a new borderless topmost layered Direct2D surface window with true per-pixel alpha.
     pub fn new(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
-        Self::create_surface(title, x, y, width, height, None)
+        Self::create_surface(title, x, y, width, height, false)
     }
 
     /// Creates a hardware-accelerated DirectComposition + DXGI SwapChain surface backed by
     /// Windows 11 native GPU DWM Acrylic (`ACCENT_ENABLE_ACRYLICBLURBEHIND`, zero screen capture).
     pub fn new_gpu_acrylic(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
-        match Self::create_surface(title, x, y, width, height, Some(true)) {
+        match Self::create_surface(title, x, y, width, height, true) {
             Ok(surf) => Ok(surf),
-            Err(_) => Self::create_surface(title, x, y, width, height, None),
-        }
-    }
-
-    /// Creates a pure alpha-transparent hardware DirectComposition + DXGI SwapChain surface
-    /// without DWM accent blur or `SetWindowRgn` (prevents Win11 DWM full-HWND black boxes).
-    pub fn new_gpu_transparent(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
-        match Self::create_surface(title, x, y, width, height, Some(false)) {
-            Ok(surf) => Ok(surf),
-            Err(_) => Self::create_surface(title, x, y, width, height, None),
+            Err(_) => Self::create_surface(title, x, y, width, height, false),
         }
     }
 
@@ -1516,11 +1504,10 @@ impl NativeSurface {
         y: i32,
         width: u32,
         height: u32,
-        gpu_mode: Option<bool>,
+        gpu_acrylic: bool,
     ) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
-        let gpu_composited = gpu_mode.is_some();
 
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -1531,7 +1518,7 @@ impl NativeSurface {
             let ex_style = WS_EX_TOPMOST
                 | WS_EX_TOOLWINDOW
                 | WS_EX_NOACTIVATE
-                | if gpu_composited {
+                | if gpu_acrylic {
                     WS_EX_NOREDIRECTIONBITMAP
                 } else {
                     WS_EX_LAYERED
@@ -1555,15 +1542,11 @@ impl NativeSurface {
             let d2d_factory = shared_d2d_factory()?;
             let dwrite_factory = shared_dwrite_factory()?;
 
-            let (d2d_target, backend) = if let Some(acrylic_blur) = gpu_mode {
+            let (d2d_target, backend) = if gpu_acrylic {
                 match GpuAcrylicState::new(hwnd, &d2d_factory, width, height, dpi) {
-                    Ok((target, state)) => (
-                        target,
-                        SurfaceBackend::GpuDirect {
-                            state: RefCell::new(state),
-                            acrylic_blur,
-                        },
-                    ),
+                    Ok((target, state)) => {
+                        (target, SurfaceBackend::GpuAcrylic(RefCell::new(state)))
+                    }
                     Err(err) => {
                         let _ = DestroyWindow(hwnd);
                         return Err(err);
@@ -1622,20 +1605,9 @@ impl NativeSurface {
         }
     }
 
-    /// Returns `true` when this surface renders through GPU DirectComposition + DXGI SwapChain.
-    pub fn is_gpu_composited(&self) -> bool {
-        matches!(self.backend, SurfaceBackend::GpuDirect { .. })
-    }
-
     /// Returns `true` when this surface renders through GPU DirectComposition + Windows DWM Acrylic.
     pub fn is_gpu_acrylic(&self) -> bool {
-        matches!(
-            self.backend,
-            SurfaceBackend::GpuDirect {
-                acrylic_blur: true,
-                ..
-            }
-        )
+        matches!(self.backend, SurfaceBackend::GpuAcrylic(_))
     }
 
     /// Feeds Windows system light/dark theme polarity for GPU Acrylic `Auto` adaptation
@@ -1668,7 +1640,7 @@ impl NativeSurface {
             SurfaceBackend::LayeredSoftware { dib, .. } => unsafe {
                 dib.borrow().pixel_bgra(x, y)
             },
-            SurfaceBackend::GpuDirect { .. } => None,
+            SurfaceBackend::GpuAcrylic(_) => None,
         }
     }
 
@@ -1715,7 +1687,7 @@ impl NativeSurface {
         if let Some(lum) = self.backdrop.borrow().as_ref().map(|b| b.raw.avg_luminance) {
             return Some(lum);
         }
-        if self.is_gpu_composited() {
+        if self.is_gpu_acrylic() {
             return self
                 .system_light_theme
                 .get()
@@ -1781,22 +1753,6 @@ impl NativeSurface {
         }
     }
 
-    /// Shows the surface without stealing keyboard focus, placed directly behind `insert_after`.
-    pub fn show_below(&self, insert_after: HWND) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(insert_after),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-        }
-    }
-
     /// Hides the surface window and drops transient layer/glass caches.
     pub fn hide(&self) {
         self.cached_layer.borrow_mut().take();
@@ -1835,34 +1791,6 @@ impl NativeSurface {
                 width as i32,
                 height as i32,
                 SWP_NOACTIVATE,
-            );
-        }
-        if width != self.width || height != self.height {
-            self.resize_swap_chain(width, height)?;
-        }
-        Ok(())
-    }
-
-    /// Moves and resizes the surface directly beneath `insert_after` in Z-order.
-    pub fn set_bounds_below(
-        &mut self,
-        insert_after: HWND,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        let width = width.max(1);
-        let height = height.max(1);
-        unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(insert_after),
-                x,
-                y,
-                width as i32,
-                height as i32,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
         }
         if width != self.width || height != self.height {
@@ -2020,9 +1948,7 @@ impl NativeSurface {
                     self.d2d_target.BeginDraw();
                     self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
                 }
-                SurfaceBackend::GpuDirect {
-                    state: state_cell, ..
-                } => {
+                SurfaceBackend::GpuAcrylic(state_cell) => {
                     self.sync_acrylic_accent();
                     let mut state = state_cell.borrow_mut();
                     state.d2d_ctx.SetTarget(None);
@@ -2087,9 +2013,7 @@ impl NativeSurface {
                     )?;
                     Ok(())
                 }
-                SurfaceBackend::GpuDirect {
-                    state: state_cell, ..
-                } => {
+                SurfaceBackend::GpuAcrylic(state_cell) => {
                     let mut state = state_cell.borrow_mut();
                     state.d2d_ctx.SetTarget(None);
                     state.active_target = None;
@@ -2649,14 +2573,14 @@ impl NativeSurface {
                 )?;
             }
 
-            if !self.is_gpu_composited() && self.try_draw_refracted_glass(rect, style, None)? {
+            if !self.is_gpu_acrylic() && self.try_draw_refracted_glass(rect, style, None)? {
                 return Ok(());
             }
 
-            // GpuDirect (live DWM Acrylic behind/on-surface) or no-backdrop fallback:
+            // GpuAcrylic (real-time DWM blur beneath) or no-backdrop fallback:
             let palette = self.palette();
             let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
-            if self.is_gpu_composited() {
+            if self.is_gpu_acrylic() {
                 // Keep surface fill light so live GPU DWM Acrylic shines through cleanly.
                 let gpu_alpha = match style.variant {
                     LiquidGlassVariant::Clear => 0.05,
@@ -4246,9 +4170,7 @@ impl NativeSurface {
                     let new_dib = BackingDib::new(width, height)?;
                     *dib.borrow_mut() = new_dib;
                 }
-                SurfaceBackend::GpuDirect {
-                    state: state_cell, ..
-                } => {
+                SurfaceBackend::GpuAcrylic(state_cell) => {
                     let mut state = state_cell.borrow_mut();
                     state.d2d_ctx.SetTarget(None);
                     state.active_target = None;
@@ -5519,12 +5441,6 @@ mod tests {
             };
         if !surface.is_gpu_acrylic() {
             return;
-        }
-        assert!(surface.is_gpu_composited());
-        assert!(surface.is_gpu_acrylic());
-        if let Ok(trans) = NativeSurface::new_gpu_transparent("HimeGpuTransTest", -2000, -2000, 120, 48) {
-            assert!(trans.is_gpu_composited());
-            assert!(!trans.is_gpu_acrylic());
         }
         surface.set_system_light_theme(false);
         assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);

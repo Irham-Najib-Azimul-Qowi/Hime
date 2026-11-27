@@ -1990,46 +1990,12 @@ impl DockBar {
         Some((tip_rect, label, alpha * tip_t))
     }
 
-    /// Returns tightly-fitted `(dock_capsule, flyout_or_menu_capsule)` rectangles in surface DIPs
-    /// for companion DWM Acrylic backdrop windows behind a transparent DirectComposition Dock.
-    pub fn backdrop_capsules(&self, surface_rect: Rect) -> (Option<(Rect, f32)>, Option<(Rect, f32)>) {
-        let alpha = self.visibility.value.clamp(0.0, 1.0);
-        let show_t = self.show_progress.value.clamp(0.0, 1.0);
-        if alpha <= 0.01 || (self.is_hidden && show_t <= 0.08) {
-            return (None, None);
-        }
-
-        let dock = self.dock_rect(surface_rect);
-        let max_bottom = surface_rect.y + surface_rect.height;
-        let vis_top = dock.y.max(surface_rect.y);
-        let vis_bottom = (dock.y + dock.height).min(max_bottom);
-        let dock_cap = if vis_bottom - vis_top >= 12.0 {
-            Some((
-                Rect::new(dock.x, vis_top, dock.width, vis_bottom - vis_top),
-                CORNER_RADIUS,
-            ))
-        } else {
-            None
-        };
-
-        let flyout_cap = self
-            .context_menu_rect(surface_rect, dock)
-            .or_else(|| self.tray_flyout_rect(surface_rect, dock))
-            .or_else(|| self.spaces_flyout_rect(surface_rect, dock))
-            .map(|r| (r, 12.0));
-
-        (dock_cap, flyout_cap)
-    }
-
     /// Renders either the 100% invisible minimized state (when auto-hidden) or the Apple Liquid Glass Dock capsule.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let alpha = self.visibility.value.clamp(0.0, 1.0);
         let show_t = self.show_progress.value.clamp(0.0, 1.0);
-        let use_window_rgn = surface.is_gpu_acrylic() || !surface.is_gpu_composited();
         if alpha <= 0.01 || (self.is_hidden && show_t <= 0.08) {
-            if use_window_rgn {
-                surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
-            }
+            surface.set_rounded_region(Rect::new(0.0, 0.0, 0.0, 0.0), 0.0);
             return Ok(());
         }
 
@@ -2063,9 +2029,7 @@ impl DockBar {
         if let Some(mr) = menu_rect {
             regions.push((mr, 12.0));
         }
-        if use_window_rgn {
-            set_dock_regions(surface, &regions);
-        }
+        set_dock_regions(surface, &regions);
 
         // Real blurred/refracted Liquid Glass Dock capsule (auto-adapts LightGlass <-> DarkGlass)
         surface.draw_liquid_glass_panel(
@@ -3336,9 +3300,6 @@ mod tests {
         let menu_rect = dock
             .context_menu_rect(surface_rect, dock_rect)
             .expect("context menu rect");
-        let (dock_cap, flyout_cap) = dock.backdrop_capsules(surface_rect);
-        assert!(dock_cap.is_some());
-        assert_eq!(flyout_cap.map(|(r, _)| r), Some(menu_rect));
         let rows = dock.context_menu_item_rects(menu_rect);
         assert_eq!(rows.len(), menu.items.len());
         let (_, row0_rect, _) = rows[0];
@@ -3373,12 +3334,5 @@ mod tests {
             .expect("tooltip spec present");
         assert_eq!(tip_label, "Notifications");
         assert!(tip_alpha > 0.5);
-
-        dock.set_mode(DockMode::AutoHide);
-        dock.force_hide_now();
-        for _ in 0..90 {
-            dock.tick(1.0 / 60.0);
-        }
-        assert_eq!(dock.backdrop_capsules(surface_rect), (None, None));
     }
 }
