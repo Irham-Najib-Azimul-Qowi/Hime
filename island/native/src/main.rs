@@ -1169,6 +1169,8 @@ struct AppShell {
     os_worker: OsWorker,
     notch_surface: NativeSurface,
     dock_surface: NativeSurface,
+    dock_tooltip_surface: Option<NativeSurface>,
+    last_dock_tooltip: Option<(i32, i32, u32, u32, String, u8)>,
     overlay_left_surface: NativeSurface,
     overlay_right_surface: NativeSurface,
     settings_surface: Option<NativeSurface>,
@@ -1311,6 +1313,8 @@ impl AppShell {
             os_worker,
             notch_surface,
             dock_surface,
+            dock_tooltip_surface: None,
+            last_dock_tooltip: None,
             overlay_left_surface,
             overlay_right_surface,
             settings_surface: None,
@@ -1408,6 +1412,9 @@ impl AppShell {
             hwnds.push(s.hwnd().0 as isize);
         }
         if let Some(ref s) = self.drawer_surface {
+            hwnds.push(s.hwnd().0 as isize);
+        }
+        if let Some(ref s) = self.dock_tooltip_surface {
             hwnds.push(s.hwnd().0 as isize);
         }
         hwnds
@@ -4719,6 +4726,7 @@ impl AppShell {
         if (self.dock.visible || self.dock.is_animating()) && self.dirty_dock {
             self.render_surface("HimeDock", &self.dock_surface, |s| self.dock.render(s));
             self.dirty_dock = false;
+            self.sync_dock_tooltip_surface();
         }
 
         if (self.overlays.volume.enabled || self.overlays.volume.is_visible())
@@ -4754,6 +4762,67 @@ impl AppShell {
         }
     }
 
+    fn sync_dock_tooltip_surface(&mut self) {
+        if !self.dock_surface.is_gpu_acrylic() {
+            return;
+        }
+        let (dw, dh) = self.dock_surface.dip_size();
+        let spec = self.dock.active_tooltip_spec(Rect::new(0.0, 0.0, dw, dh));
+        let Some((tip_rect, label, tip_alpha)) = spec else {
+            if self.last_dock_tooltip.take().is_some() {
+                if let Some(ref surf) = self.dock_tooltip_surface {
+                    surf.hide();
+                }
+            }
+            return;
+        };
+
+        let screen = os_shell::primary_screen_bounds();
+        let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
+        let (dx, dy, _, _) = dock_surface_bounds(screen, scale);
+        let pad_dip = 4.0_f32;
+        let tx = dx + ((tip_rect.x - pad_dip) * scale).round() as i32;
+        let ty = dy + ((tip_rect.y - pad_dip) * scale).round() as i32;
+        let tw = (((tip_rect.width + pad_dip * 2.0) * scale).ceil() as u32).max(24);
+        let th = (((tip_rect.height + pad_dip * 2.0) * scale).ceil() as u32).max(16);
+        let alpha_u8 = (tip_alpha * 255.0).round() as u8;
+        let next_key = (tx, ty, tw, th, label.clone(), alpha_u8);
+        if self.last_dock_tooltip.as_ref() == Some(&next_key) {
+            return;
+        }
+
+        if self.dock_tooltip_surface.is_none() {
+            if let Ok(surf) = NativeSurface::new("HimeDockTooltip", tx, ty, tw, th) {
+                surf.set_click_through(true);
+                self.dock_tooltip_surface = Some(surf);
+            }
+        }
+        let Some(ref mut surf) = self.dock_tooltip_surface else {
+            return;
+        };
+        let (cw, ch) = surf.size();
+        if cw != tw || ch != th {
+            let _ = surf.set_bounds(tx, ty, tw, th);
+        } else {
+            surf.set_position(tx, ty);
+        }
+        surf.show();
+        let (lw, lh) = surf.dip_size();
+        surf.begin_draw();
+        if let Err(err) = hime_island_native::dock::draw_cardless_tooltip_text(
+            surf,
+            Rect::new(0.0, 0.0, lw, lh),
+            &label,
+            tip_alpha,
+        ) {
+            log_render_error("HimeDockTooltip", "render", &err);
+        }
+        if let Err(err) = surf.end_draw_and_present() {
+            log_render_error("HimeDockTooltip", "present", &err);
+        }
+        self.last_dock_tooltip = Some(next_key);
+    }
+
     fn shutdown(&mut self) {
         self.backdrop_worker.shutdown();
         self.ipc_worker = None;
@@ -4764,6 +4833,9 @@ impl AppShell {
         }
         if let Some(surf) = self.drawer_surface.take() {
             remove_tracked_hwnd(surf.hwnd());
+            drop(surf);
+        }
+        if let Some(surf) = self.dock_tooltip_surface.take() {
             drop(surf);
         }
         self.restore_suppressed_notifications();

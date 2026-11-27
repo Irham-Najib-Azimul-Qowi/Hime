@@ -22,7 +22,7 @@ use crate::d2d::{
     SfSymbol, TextAlign,
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
-use crate::theme::{AdaptivePalette, CORNER_RADIUS};
+use crate::theme::{AdaptivePalette, Color, CORNER_RADIUS};
 
 const DOCK_HEIGHT: f32 = 54.0;
 const ICON_BASE_SIZE: f32 = 36.0;
@@ -1951,6 +1951,24 @@ impl DockBar {
         Some((tip_rect, label))
     }
 
+    /// Returns `(tip_rect_in_dock_dips, label, effective_alpha)` for the active hover hint
+    /// when visible above the Dock.
+    pub fn active_tooltip_spec(&self, surface_rect: Rect) -> Option<(Rect, String, f32)> {
+        let alpha = self.visibility.value.clamp(0.0, 1.0);
+        let show_t = self.show_progress.value.clamp(0.0, 1.0);
+        if alpha <= 0.01 || (self.is_hidden && show_t <= 0.08) {
+            return None;
+        }
+        let tip_t = self.tooltip_progress.value.clamp(0.0, 1.0);
+        if tip_t <= 0.02 {
+            return None;
+        }
+        let dock = self.dock_rect(surface_rect);
+        let (mut tip_rect, label) = self.active_tooltip(surface_rect, dock)?;
+        tip_rect.y += (1.0 - tip_t) * 4.0;
+        Some((tip_rect, label, alpha * tip_t))
+    }
+
     /// Renders either the 100% invisible minimized state (when auto-hidden) or the Apple Liquid Glass Dock capsule.
     pub fn render(&self, surface: &NativeSurface) -> Result<()> {
         let alpha = self.visibility.value.clamp(0.0, 1.0);
@@ -1971,7 +1989,7 @@ impl DockBar {
         let menu_rect = self.context_menu_rect(surface_rect, dock);
         let tooltip = self.active_tooltip(surface_rect, dock);
 
-        let mut regions = Vec::with_capacity(5 + rects.len());
+        let mut regions = Vec::with_capacity(4 + rects.len());
         regions.push((dock, CORNER_RADIUS));
         for r in &rects {
             if r.y < dock.y {
@@ -1989,9 +2007,6 @@ impl DockBar {
         }
         if let Some(mr) = menu_rect {
             regions.push((mr, 12.0));
-        }
-        if let Some((tip_rect, _)) = &tooltip {
-            regions.push((*tip_rect, 7.0));
         }
         set_dock_regions(surface, &regions);
 
@@ -2335,23 +2350,14 @@ impl DockBar {
             }
         }
 
-        // Liquid Glass hover tooltip pill above the hovered item
-        if let Some((mut tip_rect, label)) = tooltip {
-            let tip_t = self.tooltip_progress.value.clamp(0.0, 1.0);
-            if tip_t > 0.02 {
-                tip_rect.y += (1.0 - tip_t) * 4.0;
-                surface.draw_liquid_glass_panel(
-                    tip_rect,
-                    LiquidGlassStyle::regular(7.0)
-                        .with_shadow(6.0, 2.0, palette.shadow_color.a * alpha * tip_t),
-                )?;
-                surface.draw_text(
-                    &label,
-                    tip_rect,
-                    11.5,
-                    palette.text_primary.with_alpha_mul(alpha * tip_t),
-                    TextAlign::Center,
-                )?;
+        // Cardless text-only hover hint (no background box/card; GPU surface renders via companion ULW_ALPHA overlay)
+        if !surface.is_gpu_acrylic() {
+            if let Some((mut tip_rect, label)) = tooltip {
+                let tip_t = self.tooltip_progress.value.clamp(0.0, 1.0);
+                if tip_t > 0.02 {
+                    tip_rect.y += (1.0 - tip_t) * 4.0;
+                    draw_cardless_tooltip_text(surface, tip_rect, &label, alpha * tip_t)?;
+                }
             }
         }
 
@@ -2437,6 +2443,33 @@ impl DockBar {
 
         Ok(())
     }
+}
+
+/// Draws a clean cardless hover hint label with soft contrast shadow and zero background shape.
+pub fn draw_cardless_tooltip_text(
+    surface: &NativeSurface,
+    rect: Rect,
+    label: &str,
+    alpha: f32,
+) -> Result<()> {
+    let a = alpha.clamp(0.0, 1.0);
+    if a <= 0.01 || label.trim().is_empty() {
+        return Ok(());
+    }
+    surface.draw_text_bold(
+        label,
+        Rect::new(rect.x, rect.y + 1.0, rect.width, rect.height),
+        11.5,
+        Color::rgba(0.0, 0.0, 0.0, 0.72 * a),
+        TextAlign::Center,
+    )?;
+    surface.draw_text_bold(
+        label,
+        rect,
+        11.5,
+        Color::rgba(1.0, 1.0, 1.0, 0.96 * a),
+        TextAlign::Center,
+    )
 }
 
 fn point_in_rect(x: f32, y: f32, r: Rect) -> bool {
@@ -3258,5 +3291,21 @@ mod tests {
         surface
             .end_draw_and_present()
             .expect("DockBar right-click options menu present");
+
+        // Cardless hint renders cleanly when hovered without enclosing card panel.
+        dock.close_context_menu();
+        dock.set_hovered_at(
+            util.notif_rect.x + util.notif_rect.width * 0.5,
+            util.notif_rect.y + util.notif_rect.height * 0.5,
+            surface_rect,
+        );
+        for _ in 0..20 {
+            dock.tick(1.0 / 60.0);
+        }
+        let (_, tip_label, tip_alpha) = dock
+            .active_tooltip_spec(surface_rect)
+            .expect("tooltip spec present");
+        assert_eq!(tip_label, "Notifications");
+        assert!(tip_alpha > 0.5);
     }
 }
