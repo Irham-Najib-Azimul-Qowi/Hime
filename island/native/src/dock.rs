@@ -33,7 +33,6 @@ const DIVIDER_WIDTH: f32 = 1.0;
 const DIVIDER_GAP: f32 = 8.0;
 const UTIL_BTN_SIZE: f32 = 34.0;
 const TRAY_BTN_BASE_WIDTH: f32 = 34.0;
-const TRAY_BTN_BADGE_WIDTH: f32 = 46.0;
 const HANDLE_STRIP_WIDTH: f32 = 80.0;
 const HANDLE_STRIP_HEIGHT: f32 = 4.0;
 const MIN_MAGNIFY_SCALE: f32 = 1.0;
@@ -1422,11 +1421,7 @@ impl DockBar {
     }
 
     fn tray_btn_width(&self) -> f32 {
-        if self.system_tray_count > 0 {
-            TRAY_BTN_BADGE_WIDTH
-        } else {
-            TRAY_BTN_BASE_WIDTH
-        }
+        TRAY_BTN_BASE_WIDTH
     }
 
     fn layout_items_internal(&self, dock_x: f32, dock_y: f32) -> (Vec<Rect>, Option<f32>, f32) {
@@ -1915,12 +1910,7 @@ impl DockBar {
                     return None;
                 }
                 let util = self.utility_rects(dock);
-                let label = if self.system_tray_count > 0 {
-                    format!("Show hidden icons ({})", self.system_tray_count)
-                } else {
-                    "Show hidden icons".to_string()
-                };
-                (util.tray_rect, label)
+                (util.tray_rect, "Show hidden icons".to_string())
             }
             DockHoverTarget::TrayItem(idx) => {
                 let item = self.tray_items.get(idx)?;
@@ -2418,19 +2408,9 @@ impl DockBar {
             1.45,
         )?;
 
-        // 4. Windows "Show hidden icons" overflow toggle (`ChevronUp`/`ChevronDown` + optional `+N`)
+        // 4. Windows "Show hidden icons" overflow toggle (`ChevronUp`/`ChevronDown`, no count badge)
         let tray_r = util.tray_rect;
-        if self.system_tray_count > 0 {
-            surface.draw_liquid_glass_button(
-                tray_r,
-                8.0,
-                None,
-                tray_hovered,
-                self.tray_open,
-            )?;
-        } else {
-            surface.draw_icon_button(tray_r, 8.0, tray_hovered, false, self.tray_open)?;
-        }
+        surface.draw_icon_button(tray_r, 8.0, tray_hovered, false, self.tray_open)?;
         let tray_fg = palette
             .text_primary
             .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
@@ -2439,31 +2419,13 @@ impl DockBar {
         } else {
             SfSymbol::ChevronUp
         };
-        if self.system_tray_count > 0 {
-            let icon_r = Rect::new(tray_r.x + 6.0, tray_r.y + 10.0, 14.0, 14.0);
-            surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.5)?;
-            let count_r = Rect::new(
-                tray_r.x + 20.0,
-                tray_r.y,
-                (tray_r.width - 23.0).max(16.0),
-                tray_r.height,
-            );
-            surface.draw_text(
-                &format!("+{}", self.system_tray_count),
-                count_r,
-                10.5,
-                tray_fg,
-                TextAlign::Center,
-            )?;
-        } else {
-            let icon_r = Rect::new(
-                tray_r.x + 9.0,
-                tray_r.y + 9.0,
-                tray_r.width - 18.0,
-                tray_r.height - 18.0,
-            );
-            surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.55)?;
-        }
+        let icon_r = Rect::new(
+            tray_r.x + 9.0,
+            tray_r.y + 9.0,
+            tray_r.width - 18.0,
+            tray_r.height - 18.0,
+        );
+        surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.55)?;
 
         Ok(())
     }
