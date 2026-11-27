@@ -4438,37 +4438,43 @@ fn compute_avg_luminance(width: u32, height: u32, bgra_premul: &[u8]) -> f32 {
     }
 }
 
-/// Downsamples `src` 2x and runs a 3-pass O(W*H) separable box blur (converging to Gaussian
-/// `sigma ~ 12px` at full resolution) for smooth Liquid Glass `frost`.
+/// Applies a crisp 2-pass O(W*H) separable frosted blur (`sigma ~ 4-6px` on already half-res
+/// `BackdropCapturer` buffers, downsampling 2x only for large `>512px` sources) so details behind
+/// the center remain recognizably blurred rather than turning into flat ambient color.
 fn blur_bgra_half_res(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
-    let bw = (width / 2).max(1);
-    let bh = (height / 2).max(1);
-    let mut buf = vec![0u8; (bw as usize) * (bh as usize) * 4];
-    for y in 0..bh {
-        let sy0 = (y * 2).min(height - 1) as usize;
-        let sy1 = (y * 2 + 1).min(height - 1) as usize;
-        for x in 0..bw {
-            let sx0 = (x * 2).min(width - 1) as usize;
-            let sx1 = (x * 2 + 1).min(width - 1) as usize;
-            let i00 = (sy0 * width as usize + sx0) * 4;
-            let i10 = (sy0 * width as usize + sx1) * 4;
-            let i01 = (sy1 * width as usize + sx0) * 4;
-            let i11 = (sy1 * width as usize + sx1) * 4;
-            let dst = (y as usize * bw as usize + x as usize) * 4;
-            for c in 0..4 {
-                let avg = (src[i00 + c] as u32
-                    + src[i10 + c] as u32
-                    + src[i01 + c] as u32
-                    + src[i11 + c] as u32)
-                    >> 2;
-                buf[dst + c] = avg as u8;
+    let (bw, bh, mut buf) = if width > 512 || height > 512 {
+        let bw = (width / 2).max(1);
+        let bh = (height / 2).max(1);
+        let mut buf = vec![0u8; (bw as usize) * (bh as usize) * 4];
+        for y in 0..bh {
+            let sy0 = (y * 2).min(height - 1) as usize;
+            let sy1 = (y * 2 + 1).min(height - 1) as usize;
+            for x in 0..bw {
+                let sx0 = (x * 2).min(width - 1) as usize;
+                let sx1 = (x * 2 + 1).min(width - 1) as usize;
+                let i00 = (sy0 * width as usize + sx0) * 4;
+                let i10 = (sy0 * width as usize + sx1) * 4;
+                let i01 = (sy1 * width as usize + sx0) * 4;
+                let i11 = (sy1 * width as usize + sx1) * 4;
+                let dst = (y as usize * bw as usize + x as usize) * 4;
+                for c in 0..4 {
+                    let avg = (src[i00 + c] as u32
+                        + src[i10 + c] as u32
+                        + src[i01 + c] as u32
+                        + src[i11 + c] as u32)
+                        >> 2;
+                    buf[dst + c] = avg as u8;
+                }
             }
         }
-    }
+        (bw, bh, buf)
+    } else {
+        (width.max(1), height.max(1), src.to_vec())
+    };
 
     let mut tmp = vec![0u8; buf.len()];
-    let radius = (bw.min(bh) as i32 / 2).clamp(3, 8);
-    for _ in 0..3 {
+    let radius = (bw.min(bh) as i32 / 12).clamp(2, 3);
+    for _ in 0..2 {
         box_blur_h(&buf, &mut tmp, bw as usize, bh as usize, radius);
         box_blur_v(&tmp, &mut buf, bw as usize, bh as usize, radius);
     }
@@ -4865,10 +4871,10 @@ fn rasterize_liquid_glass(
     let can_skip_center_sdf = edge_params.is_none() && flat_hw > 0.0 && flat_hh > 0.0;
 
     let (refract_reach, tone_mix) = match style.variant {
-        LiquidGlassVariant::Regular => (depth * 0.55, 0.30_f32),
-        LiquidGlassVariant::Clear => (depth * 0.72, 0.09_f32),
-        LiquidGlassVariant::Elevated => (depth * 0.42, 0.38_f32),
-        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.30_f32),
+        LiquidGlassVariant::Regular => (depth * 0.55, 0.18_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.06_f32),
+        LiquidGlassVariant::Elevated => (depth * 0.42, 0.24_f32),
+        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.22_f32),
     };
     let tone_target = match polarity {
         ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
