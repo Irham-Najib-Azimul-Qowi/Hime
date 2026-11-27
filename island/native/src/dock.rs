@@ -1678,7 +1678,7 @@ impl DockBar {
         let raw: Vec<f32> = self
             .spaces
             .iter()
-            .map(|s| (s.name.chars().count() as f32 * 6.5 + 24.0).clamp(62.0, 120.0))
+            .map(|s| (s.name.chars().count() as f32 * 6.5 + 18.0).clamp(56.0, 120.0))
             .collect();
         let n = raw.len();
         let fixed_chrome = SPACES_FLYOUT_PAD * 2.0
@@ -2138,22 +2138,30 @@ impl DockBar {
                     let hovered = self.hovered_target == Some(DockHoverTarget::SpaceItem(idx));
                     surface.draw_liquid_glass_button(*r, 7.0, None, hovered, entry.active)?;
 
-                    let dot_r = Rect::new(r.x + 8.0, r.y + (r.height - 5.0) * 0.5, 5.0, 5.0);
-                    let dot_color = if entry.active {
-                        palette.accent.with_alpha_mul(fly_alpha)
-                    } else {
-                        palette.text_tertiary.with_alpha_mul(0.55 * fly_alpha)
-                    };
-                    surface.fill_rounded_rect(dot_r, 2.5, dot_color)?;
-
                     let label_rect =
-                        Rect::new(r.x + 15.0, r.y, (r.width - 20.0).max(12.0), r.height);
+                        Rect::new(r.x + 8.0, r.y, (r.width - 16.0).max(12.0), r.height);
                     let text_color = if entry.active || hovered {
                         palette.text_primary.with_alpha_mul(fly_alpha)
                     } else {
                         palette.text_secondary.with_alpha_mul(fly_alpha)
                     };
-                    surface.draw_text(&entry.name, label_rect, 11.0, text_color, TextAlign::Leading)?;
+                    if entry.active {
+                        surface.draw_text_bold(
+                            &entry.name,
+                            label_rect,
+                            11.0,
+                            text_color,
+                            TextAlign::Center,
+                        )?;
+                    } else {
+                        surface.draw_text(
+                            &entry.name,
+                            label_rect,
+                            11.0,
+                            text_color,
+                            TextAlign::Center,
+                        )?;
+                    }
                 }
 
                 if let Some(new_r) = self.new_space_rect(surface_rect, dock) {

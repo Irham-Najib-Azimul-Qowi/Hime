@@ -2340,17 +2340,9 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(mus.album_badge.x + 13.0, mus.album_badge.y + 13.0, 20.0, 20.0),
             SfSymbol::MusicNote,
-            p.text_primary,
+            if is_playing { p.text_primary } else { p.text_secondary },
             1.5,
         )?;
-        if is_playing {
-            surface.fill_circle(
-                mus.album_badge.x + mus.album_badge.width - 7.0,
-                mus.album_badge.y + 7.0,
-                3.0,
-                p.status_green,
-            )?;
-        }
 
         // Title + Artist + optional album
         surface.draw_text_bold(
