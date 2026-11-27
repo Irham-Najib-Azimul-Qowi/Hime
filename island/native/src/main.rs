@@ -1175,8 +1175,8 @@ struct AppShell {
     overlay_right_surface: NativeSurface,
     settings_surface: Option<NativeSurface>,
     drawer_surface: Option<NativeSurface>,
-    backdrop_capturer: os_shell::BackdropCapturer,
-    backdrop_worker: BackdropWorker,
+    backdrop_capturer: Option<os_shell::BackdropCapturer>,
+    backdrop_worker: Option<BackdropWorker>,
     backdrop_dock: BackdropSlot,
     backdrop_settings: BackdropSlot,
     backdrop_drawer: BackdropSlot,
@@ -1296,6 +1296,7 @@ impl AppShell {
         let overlays = DualEdgeOverlays::new();
         let now = Instant::now();
 
+        let need_sw_backdrop = !dock_surface.is_gpu_acrylic();
         let mut shell = Self {
             notch,
             dock,
@@ -1319,8 +1320,8 @@ impl AppShell {
             overlay_right_surface,
             settings_surface: None,
             drawer_surface: None,
-            backdrop_capturer: os_shell::BackdropCapturer::new(),
-            backdrop_worker: BackdropWorker::spawn(ctrl_hwnd),
+            backdrop_capturer: need_sw_backdrop.then(os_shell::BackdropCapturer::new),
+            backdrop_worker: need_sw_backdrop.then(|| BackdropWorker::spawn(ctrl_hwnd)),
             backdrop_dock: BackdropSlot::default(),
             backdrop_settings: BackdropSlot::default(),
             backdrop_drawer: BackdropSlot::default(),
@@ -1424,12 +1425,15 @@ impl AppShell {
         if self.dock_surface.is_gpu_acrylic() {
             return;
         }
-        let screen = os_shell::primary_screen_bounds();
         let exclude = self.own_hwnds();
+        let Some(ref mut capturer) = self.backdrop_capturer else {
+            return;
+        };
+        let screen = os_shell::primary_screen_bounds();
         let d_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
         let d_bounds = dock_surface_bounds(screen, d_scale);
         let _ = update_surface_backdrop(
-            &mut self.backdrop_capturer,
+            capturer,
             &self.dock_surface,
             &mut self.backdrop_dock,
             d_bounds,
@@ -1443,12 +1447,15 @@ impl AppShell {
         if self.dock_surface.is_gpu_acrylic() {
             return;
         }
+        let exclude = self.own_hwnds();
+        let Some(ref mut capturer) = self.backdrop_capturer else {
+            return;
+        };
         let screen = os_shell::primary_screen_bounds();
         let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
         let bounds = dock_surface_bounds(screen, scale);
-        let exclude = self.own_hwnds();
         if update_surface_backdrop(
-            &mut self.backdrop_capturer,
+            capturer,
             &self.dock_surface,
             &mut self.backdrop_dock,
             bounds,
@@ -1456,8 +1463,8 @@ impl AppShell {
             is_hidden,
             force,
         ) {
-            if let Some(h) = self.backdrop_dock.last_hash {
-                self.backdrop_worker.seed_hash(BACKDROP_TARGET_DOCK, h);
+            if let (Some(h), Some(ref worker)) = (self.backdrop_dock.last_hash, &self.backdrop_worker) {
+                worker.seed_hash(BACKDROP_TARGET_DOCK, h);
             }
             self.dirty_dock = true;
         }
@@ -1467,6 +1474,9 @@ impl AppShell {
     /// using `StretchBlt` only while completely invisible (`show_progress <= 0.02`) and keeping the
     /// cached wake capture during mid-recede re-hovers so no semi-transparent dock pixels bleed in.
     fn ensure_dock_wake_backdrop(&mut self) {
+        if self.dock_surface.is_gpu_acrylic() {
+            return;
+        }
         if self.dock.show_progress.value <= 0.02 {
             self.capture_dock_backdrop(true, true);
         } else if self.backdrop_dock.last_hash.is_none() {
@@ -1482,6 +1492,9 @@ impl AppShell {
         if surf.is_gpu_acrylic() {
             return;
         }
+        let Some(ref mut capturer) = self.backdrop_capturer else {
+            return;
+        };
         let mut r = RECT::default();
         if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
             return;
@@ -1493,7 +1506,7 @@ impl AppShell {
             (r.bottom - r.top).max(1) as u32,
         );
         if update_surface_backdrop(
-            &mut self.backdrop_capturer,
+            capturer,
             surf,
             &mut self.backdrop_settings,
             bounds,
@@ -1501,8 +1514,10 @@ impl AppShell {
             is_hidden,
             force,
         ) {
-            if let Some(h) = self.backdrop_settings.last_hash {
-                self.backdrop_worker.seed_hash(BACKDROP_TARGET_SETTINGS, h);
+            if let (Some(h), Some(ref worker)) =
+                (self.backdrop_settings.last_hash, &self.backdrop_worker)
+            {
+                worker.seed_hash(BACKDROP_TARGET_SETTINGS, h);
             }
             self.dirty_settings = true;
         }
@@ -1516,6 +1531,9 @@ impl AppShell {
         if surf.is_gpu_acrylic() {
             return;
         }
+        let Some(ref mut capturer) = self.backdrop_capturer else {
+            return;
+        };
         let mut r = RECT::default();
         if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
             return;
@@ -1527,7 +1545,7 @@ impl AppShell {
             (r.bottom - r.top).max(1) as u32,
         );
         if update_surface_backdrop(
-            &mut self.backdrop_capturer,
+            capturer,
             surf,
             &mut self.backdrop_drawer,
             bounds,
@@ -1535,14 +1553,19 @@ impl AppShell {
             is_hidden,
             force,
         ) {
-            if let Some(h) = self.backdrop_drawer.last_hash {
-                self.backdrop_worker.seed_hash(BACKDROP_TARGET_DRAWER, h);
+            if let (Some(h), Some(ref worker)) =
+                (self.backdrop_drawer.last_hash, &self.backdrop_worker)
+            {
+                worker.seed_hash(BACKDROP_TARGET_DRAWER, h);
             }
             self.dirty_drawer = true;
         }
     }
 
     fn sync_backdrop_worker_targets(&self) {
+        let Some(ref worker) = self.backdrop_worker else {
+            return;
+        };
         let screen = os_shell::primary_screen_bounds();
         let dock_bounds = if !self.dock_surface.is_gpu_acrylic()
             && self.dock.visible
@@ -1590,12 +1613,14 @@ impl AppShell {
         } else {
             None
         };
-        self.backdrop_worker
-            .sync_targets([dock_bounds, settings_bounds, drawer_bounds], self.own_hwnds());
+        worker.sync_targets([dock_bounds, settings_bounds, drawer_bounds], self.own_hwnds());
     }
 
     fn drain_dynamic_backdrops(&mut self) {
-        let frames = self.backdrop_worker.take_pending();
+        let Some(ref worker) = self.backdrop_worker else {
+            return;
+        };
+        let frames = worker.take_pending();
         let now = Instant::now();
         if let Some((hash, cap)) = frames[BACKDROP_TARGET_DOCK].as_ref() {
             if self.dock.visible && !self.dock.is_hidden {
@@ -4602,6 +4627,8 @@ impl AppShell {
         if !self.startup_trim_done && now.duration_since(self.startup_at) >= Duration::from_secs(2) {
             self.startup_trim_done = true;
             d2d::trim_working_set();
+        } else if !animating && self.tick_count > 0 && self.tick_count % 120 == 0 {
+            d2d::trim_working_set();
         }
 
         self.tick_count = self.tick_count.saturating_add(1);
@@ -4770,8 +4797,8 @@ impl AppShell {
         let spec = self.dock.active_tooltip_spec(Rect::new(0.0, 0.0, dw, dh));
         let Some((tip_rect, label, tip_alpha)) = spec else {
             if self.last_dock_tooltip.take().is_some() {
-                if let Some(ref surf) = self.dock_tooltip_surface {
-                    surf.hide();
+                if let Some(surf) = self.dock_tooltip_surface.take() {
+                    drop(surf);
                 }
             }
             return;
@@ -4824,7 +4851,9 @@ impl AppShell {
     }
 
     fn shutdown(&mut self) {
-        self.backdrop_worker.shutdown();
+        if let Some(ref mut worker) = self.backdrop_worker {
+            worker.shutdown();
+        }
         self.ipc_worker = None;
         self.ipc = None;
         if let Some(surf) = self.settings_surface.take() {

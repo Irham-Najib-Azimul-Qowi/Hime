@@ -849,7 +849,7 @@ impl Default for HimeExpression {
     }
 }
 
-const MAX_BITMAP_CACHE_ENTRIES: usize = 64;
+const MAX_BITMAP_CACHE_ENTRIES: usize = 32;
 const MAX_BRUSH_CACHE_ENTRIES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

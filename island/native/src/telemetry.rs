@@ -1723,7 +1723,7 @@ fn enumerate_running_process_exes() -> Vec<(u32, String)> {
         fn K32EnumProcesses(lpid_process: *mut u32, cb: u32, lpcb_needed: *mut u32) -> i32;
     }
 
-    let mut pids = vec![0u32; 2048];
+    let mut pids = vec![0u32; 512];
     let mut needed = 0u32;
     unsafe {
         if K32EnumProcesses(
@@ -1767,6 +1767,10 @@ fn enumerate_running_process_exes() -> Vec<(u32, String)> {
 /// matched against running OS processes (`K32EnumProcesses` + Known Folder resolution) and active
 /// Windows system tray items (such as Bluetooth Devices), preserving PNG `IconSnapshot` artwork.
 pub fn collect_live_tray_records() -> Vec<LiveTrayRecord> {
+    collect_live_tray_records_inner(true)
+}
+
+fn collect_live_tray_records_inner(include_icons: bool) -> Vec<LiveTrayRecord> {
     const BLUETOOTH_ICON_GUID: &str = "7820AE78-23E3-4229-82C1-E41CB67D5B9C";
 
     unsafe extern "system" fn collect_hwnd_exe(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -1851,7 +1855,11 @@ pub fn collect_live_tray_records() -> Vec<LiveTrayRecord> {
             let uid = reg_dword(item_key, "UID");
             let is_promoted = reg_dword(item_key, "IsPromoted");
             let initial_tooltip = reg_string(item_key, "InitialTooltip");
-            let icon_png = reg_bytes(item_key, "IconSnapshot");
+            let icon_png = if include_icons {
+                reg_bytes(item_key, "IconSnapshot")
+            } else {
+                None
+            };
             let _ = RegCloseKey(item_key);
 
             if is_promoted == Some(1) {
@@ -1987,9 +1995,9 @@ pub fn collect_live_tray_records() -> Vec<LiveTrayRecord> {
     }
 }
 
-/// Counts live background/hidden system tray icons matching `collect_live_tray_records()`.
+/// Counts live background/hidden system tray icons without allocating `IconSnapshot` PNG bytes.
 pub fn read_tray_count() -> u32 {
-    collect_live_tray_records().len() as u32
+    collect_live_tray_records_inner(false).len() as u32
 }
 
 fn read_smtc_music(

@@ -812,6 +812,7 @@ impl DockBar {
                     entry.icon = crate::d2d::decode_image_bytes_bgra_premul(png, 36, 36);
                 }
             }
+            entry.icon_png = None;
             if entry.icon.is_none() && (entry.hwnd != 0 || !entry.exe_path.trim().is_empty()) {
                 entry.icon = self.resolve_icon(entry.hwnd, &entry.exe_path);
             }
