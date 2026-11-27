@@ -130,14 +130,36 @@ impl OverlayHud {
         }
     }
 
-    /// Shows or updates the HUD in Volume mode and expands it with an auto-hide timer.
-    pub fn show_volume(&mut self, percent: u8, muted: bool, device_name: Option<String>) {
+    fn set_volume_fields(&mut self, percent: u8, muted: bool, device_name: Option<String>) -> f32 {
         let clamped = percent.min(100);
         self.kind = HudKind::Volume;
         self.percent = clamped;
         self.muted = muted;
         self.device_name = sanitize_device_name(device_name.as_deref());
-        let fill = if muted { 0.0 } else { clamped as f32 / 100.0 };
+        if muted {
+            0.0
+        } else {
+            clamped as f32 / 100.0
+        }
+    }
+
+    /// Synchronizes Volume metrics without popping open an idle/hidden HUD.
+    ///
+    /// Used for external OS volume updates (trackpad gestures, keyboard keys, Windows mixer)
+    /// so the left Volume Edge HUD only emerges on screen-edge hover while an already-visible
+    /// HUD animates smoothly to the latest level.
+    pub fn sync_volume_quiet(&mut self, percent: u8, muted: bool, device_name: Option<String>) {
+        let fill = self.set_volume_fields(percent, muted, device_name);
+        if self.is_visible() {
+            self.bar_fill.animate_to(fill, Spring::KNOB_SETTLE);
+        } else {
+            self.bar_fill.snap_to(fill);
+        }
+    }
+
+    /// Shows or updates the HUD in Volume mode and expands it with an auto-hide timer.
+    pub fn show_volume(&mut self, percent: u8, muted: bool, device_name: Option<String>) {
+        let fill = self.set_volume_fields(percent, muted, device_name);
         self.bar_fill.animate_to(fill, Spring::KNOB_SETTLE);
         if self.enabled {
             self.launch_open();
@@ -632,6 +654,11 @@ impl DualEdgeOverlays {
         }
     }
 
+    /// Synchronizes Left Volume state quietly without popping open an idle/hidden HUD.
+    pub fn sync_volume_quiet(&mut self, percent: u8, muted: bool, device_name: Option<String>) {
+        self.volume.sync_volume_quiet(percent, muted, device_name);
+    }
+
     /// Updates Left Volume state and expands it if enabled.
     pub fn show_volume(&mut self, percent: u8, muted: bool, device_name: Option<String>) {
         self.volume.show_volume(percent, muted, device_name);
@@ -887,5 +914,35 @@ mod tests {
         surface
             .end_draw_and_present()
             .expect("bright-bg brightness present");
+    }
+
+    #[test]
+    fn sync_volume_quiet_updates_metrics_without_popping_hidden_hud() {
+        let mut hud = OverlayHud::volume_left();
+        assert!(!hud.is_visible());
+        assert!(!hud.is_expanded());
+
+        hud.sync_volume_quiet(68, false, Some("Speakers".into()));
+        assert!(!hud.is_visible());
+        assert!(!hud.is_expanded());
+        assert_eq!(hud.percent, 68);
+        assert!(!hud.muted);
+        assert_eq!(hud.device_name.as_deref(), Some("Speakers"));
+        assert!((hud.bar_fill.value - 0.68).abs() < 1e-4);
+
+        // Once hovered onto the left screen edge, it emerges showing the synced level
+        hud.set_hovered(true);
+        for _ in 0..20 {
+            hud.tick(1.0 / 60.0);
+        }
+        assert!(hud.is_visible());
+        assert!(hud.is_expanded());
+
+        // Subsequent external sync while visible updates target smoothly without breaking visibility
+        hud.sync_volume_quiet(25, true, Some("Headphones".into()));
+        assert!(hud.is_visible());
+        assert_eq!(hud.percent, 25);
+        assert!(hud.muted);
+        assert_eq!(hud.bar_fill.target, 0.0);
     }
 }

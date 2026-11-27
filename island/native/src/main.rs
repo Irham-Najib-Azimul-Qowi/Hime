@@ -2160,26 +2160,16 @@ impl AppShell {
             .last_volume_write_at
             .is_some_and(|t| t.elapsed() < Duration::from_millis(1300));
         if !self.overlays.volume.is_dragging && !recent_vol_write {
-            if !notify_hud || self.last_snap_volume.is_none() {
-                // Quietly seed initial volume without expanding idle pill
-                self.overlays.volume.percent = snap.volume.percent.min(100);
-                self.overlays.volume.muted = snap.volume.muted;
-                self.overlays.volume.device_name = self.last_audio_device.clone();
-                self.overlays.volume.bar_fill.snap_to(if snap.volume.muted {
-                    0.0
-                } else {
-                    snap.volume.percent.min(100) as f32 / 100.0
-                });
-                self.notch
-                    .set_volume(snap.volume.percent as f32 / 100.0, snap.volume.muted);
-                self.dirty_notch = true;
-                self.dirty_overlay_left = true;
-            } else if self.last_snap_volume != Some(vol_pair) {
-                self.last_external_osd_at = Some(Instant::now());
-                if self.dock.visible {
-                    os_shell::ensure_primary_taskbar_hidden();
+            let sync_initial = !notify_hud || self.last_snap_volume.is_none();
+            let external_changed = !sync_initial && self.last_snap_volume != Some(vol_pair);
+            if sync_initial || external_changed {
+                if external_changed {
+                    self.last_external_osd_at = Some(Instant::now());
+                    if self.dock.visible {
+                        os_shell::ensure_primary_taskbar_hidden();
+                    }
                 }
-                self.overlays.show_volume(
+                self.overlays.sync_volume_quiet(
                     snap.volume.percent,
                     snap.volume.muted,
                     snap.volume.device_name.clone(),
@@ -2187,7 +2177,9 @@ impl AppShell {
                 self.notch
                     .set_volume(snap.volume.percent as f32 / 100.0, snap.volume.muted);
                 self.dirty_notch = true;
-                self.dirty_overlay_left = true;
+                if sync_initial || self.overlays.volume.is_visible() {
+                    self.dirty_overlay_left = true;
+                }
             }
         }
         self.last_snap_volume = Some(vol_pair);
