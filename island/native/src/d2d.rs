@@ -4277,7 +4277,7 @@ fn rasterize_liquid_glass(
 
     let (refract_reach, tone_mix) = match style.variant {
         LiquidGlassVariant::Regular => (depth * 0.55, 0.30_f32),
-        LiquidGlassVariant::Clear => (depth * 0.72, 0.20_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.09_f32),
         LiquidGlassVariant::Elevated => (depth * 0.42, 0.38_f32),
         LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.30_f32),
     };
