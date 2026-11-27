@@ -1976,7 +1976,7 @@ impl DockBar {
         for r in &rects {
             if r.y < dock.y {
                 regions.push((
-                    Rect::new(r.x - 2.0, r.y - 2.0, r.width + 4.0, r.height + 4.0),
+                    Rect::new(r.x, r.y, r.width, (dock.y - r.y + 12.0).min(r.height)),
                     ICON_CORNER_RADIUS,
                 ));
             }

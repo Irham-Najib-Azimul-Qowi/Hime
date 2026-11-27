@@ -13,19 +13,30 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use windows::core::{s, w, GUID, HRESULT, Interface, PCWSTR, Result};
 use windows_numerics::Vector2 as D2D_POINT_2F;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
     D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory1, ID2D1Layer,
-    ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1DCRenderTarget, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1Layer, ID2D1PathGeometry,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
     D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES1,
+};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+};
+use windows::Win32::Graphics::DirectComposition::{
+    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -33,11 +44,18 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateRectRgn, DeleteDC, DeleteObject, SelectObject,
-    SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
+    CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn, CreateRoundRectRgn, DeleteDC,
+    DeleteObject, SelectObject, SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HRGN, RGN_OR,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
@@ -53,8 +71,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
     WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
@@ -1204,8 +1222,151 @@ impl GlassBitmapCache {
     }
 }
 
-/// Borderless topmost `WS_EX_LAYERED` window backed by Direct2D `ID2D1DCRenderTarget`,
-/// a cached 32-bit premultiplied BGRA DIB section, and `UpdateLayeredWindow(ULW_ALPHA)`.
+#[repr(C)]
+struct WindowAccentPolicy {
+    accent_state: i32,
+    accent_flags: u32,
+    gradient_color: u32,
+    animation_id: u32,
+}
+
+#[repr(C)]
+struct WindowCompositionAttribData {
+    attribute: i32,
+    data: *mut std::ffi::c_void,
+    size_of_data: usize,
+}
+
+fn apply_dwm_acrylic_blur(hwnd: HWND, gradient_aabbggrr: u32) -> bool {
+    const WCA_ACCENT_POLICY: i32 = 19;
+    const ACCENT_ENABLE_ACRYLICBLURBEHIND: i32 = 4;
+    const ACCENT_FLAG_ALLOW_GRADIENT: u32 = 2;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetWindowCompositionAttribute(
+            hwnd: HWND,
+            data: *mut WindowCompositionAttribData,
+        ) -> i32;
+    }
+
+    let mut policy = WindowAccentPolicy {
+        accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
+        accent_flags: ACCENT_FLAG_ALLOW_GRADIENT,
+        gradient_color: gradient_aabbggrr,
+        animation_id: 0,
+    };
+    let mut data = WindowCompositionAttribData {
+        attribute: WCA_ACCENT_POLICY,
+        data: (&mut policy as *mut WindowAccentPolicy).cast(),
+        size_of_data: std::mem::size_of::<WindowAccentPolicy>(),
+    };
+    unsafe { SetWindowCompositionAttribute(hwnd, &mut data) != 0 }
+}
+
+struct GpuAcrylicState {
+    _d3d_device: ID3D11Device,
+    _d2d_device: ID2D1Device,
+    d2d_ctx: ID2D1DeviceContext,
+    swap_chain: IDXGISwapChain1,
+    _dcomp_device: IDCompositionDevice,
+    _dcomp_target: IDCompositionTarget,
+    _dcomp_visual: IDCompositionVisual,
+    active_target: Option<ID2D1Bitmap1>,
+}
+
+impl GpuAcrylicState {
+    fn new(
+        hwnd: HWND,
+        d2d_factory: &ID2D1Factory1,
+        width: u32,
+        height: u32,
+        dpi: f32,
+    ) -> Result<(ID2D1RenderTarget, Self)> {
+        unsafe {
+            let create_d3d = |driver_type| {
+                let mut dev: Option<ID3D11Device> = None;
+                D3D11CreateDevice(
+                    None,
+                    driver_type,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    None,
+                )
+                .map(|()| dev)
+            };
+            let d3d_device = match create_d3d(D3D_DRIVER_TYPE_HARDWARE) {
+                Ok(Some(dev)) => dev,
+                _ => create_d3d(D3D_DRIVER_TYPE_WARP)?
+                    .ok_or_else(|| windows::core::Error::from_win32())?,
+            };
+
+            let dxgi_device: IDXGIDevice = d3d_device.cast()?;
+            let d2d_device: ID2D1Device = d2d_factory.CreateDevice(&dxgi_device)?;
+            let d2d_ctx: ID2D1DeviceContext =
+                d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            d2d_ctx.SetDpi(dpi, dpi);
+
+            let dxgi_adapter = dxgi_device.GetAdapter()?;
+            let dxgi_factory: IDXGIFactory2 = dxgi_adapter.GetParent()?;
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: width.max(1),
+                Height: height.max(1),
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                Stereo: false.into(),
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+                Flags: 0,
+            };
+            let swap_chain: IDXGISwapChain1 =
+                dxgi_factory.CreateSwapChainForComposition(&d3d_device, &desc, None)?;
+
+            let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
+            let dcomp_target = dcomp_device.CreateTargetForHwnd(hwnd, true)?;
+            let dcomp_visual = dcomp_device.CreateVisual()?;
+            dcomp_visual.SetContent(&swap_chain)?;
+            dcomp_target.SetRoot(&dcomp_visual)?;
+            dcomp_device.Commit()?;
+
+            let d2d_target: ID2D1RenderTarget = d2d_ctx.cast()?;
+            Ok((
+                d2d_target,
+                Self {
+                    _d3d_device: d3d_device,
+                    _d2d_device: d2d_device,
+                    d2d_ctx,
+                    swap_chain,
+                    _dcomp_device: dcomp_device,
+                    _dcomp_target: dcomp_target,
+                    _dcomp_visual: dcomp_visual,
+                    active_target: None,
+                },
+            ))
+        }
+    }
+}
+
+enum SurfaceBackend {
+    LayeredSoftware {
+        dc_rt: ID2D1DCRenderTarget,
+        dib: RefCell<BackingDib>,
+    },
+    GpuAcrylic(RefCell<GpuAcrylicState>),
+}
+
+/// Borderless topmost surface window supporting either `UpdateLayeredWindow` software D2D
+/// (`ID2D1DCRenderTarget`) or DirectComposition GPU D2D (`ID2D1DeviceContext`) + Windows 11 DWM Acrylic.
 pub struct NativeSurface {
     hwnd: HWND,
     width: u32,
@@ -1213,8 +1374,8 @@ pub struct NativeSurface {
     dpi: f32,
     d2d_factory: ID2D1Factory1,
     dwrite_factory: IDWriteFactory,
-    d2d_target: ID2D1DCRenderTarget,
-    dib: RefCell<BackingDib>,
+    d2d_target: ID2D1RenderTarget,
+    backend: SurfaceBackend,
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
     text_format_cache: RefCell<HashMap<(u32, u8, bool), IDWriteTextFormat>>,
     bitmap_cache: RefCell<BitmapCache>,
@@ -1222,6 +1383,8 @@ pub struct NativeSurface {
     backdrop: RefCell<Option<BackdropState>>,
     backdrop_gen: Cell<u64>,
     color_theme_mode: Cell<ColorThemeMode>,
+    system_light_theme: Cell<Option<bool>>,
+    last_acrylic_tint: Cell<Option<u32>>,
     cached_layer: RefCell<Option<ID2D1Layer>>,
     round_cap_stroke: RefCell<Option<ID2D1StrokeStyle>>,
     last_region_key: RefCell<Option<RegionKey>>,
@@ -1231,6 +1394,26 @@ pub struct NativeSurface {
 impl NativeSurface {
     /// Creates a new borderless topmost layered Direct2D surface window with true per-pixel alpha.
     pub fn new(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
+        Self::create_surface(title, x, y, width, height, false)
+    }
+
+    /// Creates a hardware-accelerated DirectComposition + DXGI SwapChain surface backed by
+    /// Windows 11 native GPU DWM Acrylic (`ACCENT_ENABLE_ACRYLICBLURBEHIND`, zero screen capture).
+    pub fn new_gpu_acrylic(title: &str, x: i32, y: i32, width: u32, height: u32) -> Result<Self> {
+        match Self::create_surface(title, x, y, width, height, true) {
+            Ok(surf) => Ok(surf),
+            Err(_) => Self::create_surface(title, x, y, width, height, false),
+        }
+    }
+
+    fn create_surface(
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        gpu_acrylic: bool,
+    ) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
 
@@ -1240,7 +1423,14 @@ impl NativeSurface {
             register_window_class(hinstance);
 
             let wide_title = to_wide_null(title);
-            let ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED;
+            let ex_style = WS_EX_TOPMOST
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | if gpu_acrylic {
+                    WS_EX_NOREDIRECTIONBITMAP
+                } else {
+                    WS_EX_LAYERED
+                };
             let hwnd = CreateWindowExW(
                 ex_style,
                 WINDOW_CLASS_NAME,
@@ -1257,24 +1447,43 @@ impl NativeSurface {
             )?;
 
             let dpi = get_window_dpi(hwnd);
-
             let d2d_factory = shared_d2d_factory()?;
             let dwrite_factory = shared_dwrite_factory()?;
 
-            let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: dpi,
-                dpiY: dpi,
-                ..Default::default()
+            let (d2d_target, backend) = if gpu_acrylic {
+                match GpuAcrylicState::new(hwnd, &d2d_factory, width, height, dpi) {
+                    Ok((target, state)) => {
+                        (target, SurfaceBackend::GpuAcrylic(RefCell::new(state)))
+                    }
+                    Err(err) => {
+                        let _ = DestroyWindow(hwnd);
+                        return Err(err);
+                    }
+                }
+            } else {
+                let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
+                    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: dpi,
+                    dpiY: dpi,
+                    ..Default::default()
+                };
+                let dc_rt = d2d_factory.CreateDCRenderTarget(&rt_props)?;
+                let dib = BackingDib::new(width, height)?;
+                let target: ID2D1RenderTarget = dc_rt.cast()?;
+                (
+                    target,
+                    SurfaceBackend::LayeredSoftware {
+                        dc_rt,
+                        dib: RefCell::new(dib),
+                    },
+                )
             };
-            let d2d_target = d2d_factory.CreateDCRenderTarget(&rt_props)?;
-            let dib = BackingDib::new(width, height)?;
 
-            Ok(Self {
+            let surf = Self {
                 hwnd,
                 width,
                 height,
@@ -1282,7 +1491,7 @@ impl NativeSurface {
                 d2d_factory,
                 dwrite_factory,
                 d2d_target,
-                dib: RefCell::new(dib),
+                backend,
                 brush_cache: RefCell::new(HashMap::new()),
                 text_format_cache: RefCell::new(HashMap::new()),
                 bitmap_cache: RefCell::new(BitmapCache::default()),
@@ -1290,11 +1499,56 @@ impl NativeSurface {
                 backdrop: RefCell::new(None),
                 backdrop_gen: Cell::new(0),
                 color_theme_mode: Cell::new(ColorThemeMode::Auto),
+                system_light_theme: Cell::new(None),
+                last_acrylic_tint: Cell::new(None),
                 cached_layer: RefCell::new(None),
                 round_cap_stroke: RefCell::new(None),
                 last_region_key: RefCell::new(None),
                 region_is_empty: RefCell::new(false),
-            })
+            };
+            if surf.is_gpu_acrylic() {
+                surf.sync_acrylic_accent();
+            }
+            Ok(surf)
+        }
+    }
+
+    /// Returns `true` when this surface renders through GPU DirectComposition + Windows DWM Acrylic.
+    pub fn is_gpu_acrylic(&self) -> bool {
+        matches!(self.backend, SurfaceBackend::GpuAcrylic(_))
+    }
+
+    /// Feeds Windows system light/dark theme polarity for GPU Acrylic `Auto` adaptation
+    /// without running screenshot capture.
+    pub fn set_system_light_theme(&self, is_light: bool) {
+        if self.system_light_theme.get() != Some(is_light) {
+            self.system_light_theme.set(Some(is_light));
+            if self.is_gpu_acrylic() {
+                self.sync_acrylic_accent();
+            }
+        }
+    }
+
+    fn sync_acrylic_accent(&self) {
+        if !self.is_gpu_acrylic() {
+            return;
+        }
+        let tint = match self.palette().polarity {
+            ThemePolarity::DarkGlass => 0x38_14_12_10,
+            ThemePolarity::LightGlass => 0x32_FA_F8_F6,
+        };
+        if self.last_acrylic_tint.get() != Some(tint) && apply_dwm_acrylic_blur(self.hwnd, tint) {
+            self.last_acrylic_tint.set(Some(tint));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pixel_bgra(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        match &self.backend {
+            SurfaceBackend::LayeredSoftware { dib, .. } => unsafe {
+                dib.borrow().pixel_bgra(x, y)
+            },
+            SurfaceBackend::GpuAcrylic(_) => None,
         }
     }
 
@@ -1303,6 +1557,9 @@ impl NativeSurface {
         if self.color_theme_mode.get() != mode {
             self.color_theme_mode.set(mode);
             self.glass_bitmap_cache.borrow_mut().clear();
+            if self.is_gpu_acrylic() {
+                self.sync_acrylic_accent();
+            }
         }
     }
 
@@ -1335,7 +1592,16 @@ impl NativeSurface {
 
     /// Returns the average perceptual luminance (`0.0..=1.0`) of the current backdrop, if set.
     pub fn backdrop_luminance(&self) -> Option<f32> {
-        self.backdrop.borrow().as_ref().map(|b| b.raw.avg_luminance)
+        if let Some(lum) = self.backdrop.borrow().as_ref().map(|b| b.raw.avg_luminance) {
+            return Some(lum);
+        }
+        if self.is_gpu_acrylic() {
+            return self
+                .system_light_theme
+                .get()
+                .map(|is_light| if is_light { 0.85 } else { 0.12 });
+        }
+        None
     }
 
     /// Resolves the effective [`ThemePolarity`] (`LightGlass` vs `DarkGlass`) from
@@ -1375,7 +1641,7 @@ impl NativeSurface {
         &self.dwrite_factory
     }
 
-    pub fn render_target(&self) -> &ID2D1DCRenderTarget {
+    pub fn render_target(&self) -> &ID2D1RenderTarget {
         &self.d2d_target
     }
 
@@ -1454,8 +1720,8 @@ impl NativeSurface {
         }
     }
 
-    /// Updates hit-test/empty-hide state cleanly while letting `ULW_ALPHA` handle
-    /// anti-aliased edges and soft outer drop shadows with zero black border artifacts.
+    /// Updates the window clip region. In `LayeredSoftware` mode, `ULW_ALPHA` handles smooth edges
+    /// and soft drop shadows; in `GpuAcrylic` mode, `SetWindowRgn` strictly bounds DWM Acrylic blur.
     pub fn set_rounded_region(&self, rect: Rect, radius: f32) {
         let scale = (self.dpi / 96.0).max(0.5);
         let is_empty = rect.width <= 0.0 || rect.height <= 0.0;
@@ -1480,11 +1746,14 @@ impl NativeSurface {
         if *self.last_region_key.borrow() == Some(key) {
             return;
         }
-        self.apply_layered_region_state(is_empty, key);
+        if self.is_gpu_acrylic() {
+            self.apply_gpu_acrylic_regions(&[(rect, radius)], is_empty, key);
+        } else {
+            self.apply_layered_region_state(is_empty, key);
+        }
     }
 
-    /// Preserves region-cache API compatibility for multi-rect surfaces while avoiding GDI
-    /// `SetWindowRgn` clipping so `ULW_ALPHA` renders clean soft shadows and magnified icons.
+    /// Updates multi-capsule window clip regions (dock pill, flyouts, context menu, tooltip).
     pub fn set_rounded_regions(&self, rects: &[(Rect, f32)]) {
         if rects.is_empty() {
             return;
@@ -1516,53 +1785,148 @@ impl NativeSurface {
         if *self.last_region_key.borrow() == Some(key) {
             return;
         }
-        self.apply_layered_region_state(all_empty, key);
-    }
-
-    /// Binds the cached 32-bit DIB section, begins a Direct2D frame, and clears to transparent alpha.
-    pub fn begin_draw(&self) {
-        unsafe {
-            let hdc = self.dib.borrow().hdc;
-            let rect = RECT {
-                left: 0,
-                top: 0,
-                right: self.width as i32,
-                bottom: self.height as i32,
-            };
-            let _ = self.d2d_target.BindDC(hdc, &rect);
-            self.d2d_target.BeginDraw();
-            self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
+        if self.is_gpu_acrylic() {
+            self.apply_gpu_acrylic_regions(rects, all_empty, key);
+        } else {
+            self.apply_layered_region_state(all_empty, key);
         }
     }
 
-    /// Ends the Direct2D frame and composites the premultiplied 32-bit DIB via `UpdateLayeredWindow`.
+    fn apply_gpu_acrylic_regions(&self, rects: &[(Rect, f32)], is_empty: bool, key: RegionKey) {
+        let scale = (self.dpi / 96.0).max(0.5);
+        unsafe {
+            let final_rgn: Option<HRGN> = if is_empty {
+                let r = CreateRectRgn(0, 0, 0, 0);
+                (!r.is_invalid()).then_some(r)
+            } else {
+                let mut combined: Option<HRGN> = None;
+                for &(r, rad) in rects {
+                    if r.width <= 0.0 || r.height <= 0.0 {
+                        continue;
+                    }
+                    let left = (r.x * scale).round() as i32;
+                    let top = (r.y * scale).round() as i32;
+                    let right = ((r.x + r.width) * scale).round() as i32 + 1;
+                    let bottom = ((r.y + r.height) * scale).round() as i32 + 1;
+                    let diam = ((rad * 2.0) * scale).round().max(0.0) as i32;
+                    let part = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
+                    if part.is_invalid() {
+                        continue;
+                    }
+                    match combined {
+                        None => combined = Some(part),
+                        Some(acc) => {
+                            let _ = CombineRgn(Some(acc), Some(acc), Some(part), RGN_OR);
+                            let _ = DeleteObject(part.into());
+                        }
+                    }
+                }
+                combined.or_else(|| {
+                    let r = CreateRectRgn(0, 0, 0, 0);
+                    (!r.is_invalid()).then_some(r)
+                })
+            };
+
+            if let Some(rgn) = final_rgn {
+                if SetWindowRgn(self.hwnd, Some(rgn), false) != 0 {
+                    *self.region_is_empty.borrow_mut() = is_empty;
+                } else {
+                    let _ = DeleteObject(rgn.into());
+                }
+            }
+        }
+        *self.last_region_key.borrow_mut() = Some(key);
+    }
+
+    /// Binds the active frame target (DIB DC or GPU DXGI SwapChain backbuffer) and clears alpha.
+    pub fn begin_draw(&self) {
+        unsafe {
+            match &self.backend {
+                SurfaceBackend::LayeredSoftware { dc_rt, dib } => {
+                    let hdc = dib.borrow().hdc;
+                    let rect = RECT {
+                        left: 0,
+                        top: 0,
+                        right: self.width as i32,
+                        bottom: self.height as i32,
+                    };
+                    let _ = dc_rt.BindDC(hdc, &rect);
+                    self.d2d_target.BeginDraw();
+                    self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
+                }
+                SurfaceBackend::GpuAcrylic(state_cell) => {
+                    self.sync_acrylic_accent();
+                    let mut state = state_cell.borrow_mut();
+                    state.d2d_ctx.SetTarget(None);
+                    state.active_target = None;
+                    if let Ok(dxgi_surface) = state.swap_chain.GetBuffer::<IDXGISurface>(0) {
+                        let bmp_props = D2D1_BITMAP_PROPERTIES1 {
+                            pixelFormat: D2D1_PIXEL_FORMAT {
+                                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                            },
+                            dpiX: self.dpi,
+                            dpiY: self.dpi,
+                            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET
+                                | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                            colorContext: std::mem::ManuallyDrop::new(None),
+                        };
+                        if let Ok(target_bmp) = state
+                            .d2d_ctx
+                            .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bmp_props))
+                        {
+                            if let Ok(img) = target_bmp.cast::<ID2D1Image>() {
+                                state.d2d_ctx.SetTarget(&img);
+                                state.active_target = Some(target_bmp);
+                            }
+                        }
+                    }
+                    self.d2d_target.BeginDraw();
+                    self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
+                }
+            }
+        }
+    }
+
+    /// Ends the Direct2D frame and presents either via `UpdateLayeredWindow` or DXGI `Present`.
     pub fn end_draw_and_present(&self) -> Result<()> {
         unsafe {
             self.d2d_target.EndDraw(None, None)?;
-            let hdc = self.dib.borrow().hdc;
-            let size = SIZE {
-                cx: self.width as i32,
-                cy: self.height as i32,
-            };
-            let pt_src = POINT { x: 0, y: 0 };
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
-            UpdateLayeredWindow(
-                self.hwnd,
-                None,
-                None,
-                Some(&size),
-                Some(hdc),
-                Some(&pt_src),
-                COLORREF(0),
-                Some(&blend),
-                ULW_ALPHA,
-            )?;
-            Ok(())
+            match &self.backend {
+                SurfaceBackend::LayeredSoftware { dib, .. } => {
+                    let hdc = dib.borrow().hdc;
+                    let size = SIZE {
+                        cx: self.width as i32,
+                        cy: self.height as i32,
+                    };
+                    let pt_src = POINT { x: 0, y: 0 };
+                    let blend = BLENDFUNCTION {
+                        BlendOp: AC_SRC_OVER as u8,
+                        BlendFlags: 0,
+                        SourceConstantAlpha: 255,
+                        AlphaFormat: AC_SRC_ALPHA as u8,
+                    };
+                    UpdateLayeredWindow(
+                        self.hwnd,
+                        None,
+                        None,
+                        Some(&size),
+                        Some(hdc),
+                        Some(&pt_src),
+                        COLORREF(0),
+                        Some(&blend),
+                        ULW_ALPHA,
+                    )?;
+                    Ok(())
+                }
+                SurfaceBackend::GpuAcrylic(state_cell) => {
+                    let mut state = state_cell.borrow_mut();
+                    state.d2d_ctx.SetTarget(None);
+                    state.active_target = None;
+                    state.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -2105,7 +2469,7 @@ impl NativeSurface {
             .min(rect.height * 0.5);
 
         unsafe {
-            if style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
+            if !self.is_gpu_acrylic() && style.shadow_opacity > 0.0 && style.shadow_blur > 0.0 {
                 self.draw_soft_shadow(
                     rect,
                     radius,
@@ -2115,13 +2479,23 @@ impl NativeSurface {
                 )?;
             }
 
-            if self.try_draw_refracted_glass(rect, style, None)? {
+            if !self.is_gpu_acrylic() && self.try_draw_refracted_glass(rect, style, None)? {
                 return Ok(());
             }
 
-            // Headless / no-backdrop fallback: clean flat adaptive translucency + 1px optical rim.
+            // GpuAcrylic (real-time DWM blur beneath) or no-backdrop fallback:
             let palette = self.palette();
-            let (base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            if self.is_gpu_acrylic() {
+                // Keep surface fill light so live GPU DWM Acrylic shines through cleanly.
+                let gpu_alpha = match style.variant {
+                    LiquidGlassVariant::Clear => 0.05,
+                    LiquidGlassVariant::Regular => 0.10,
+                    LiquidGlassVariant::Elevated => 0.18,
+                    LiquidGlassVariant::Tinted(_) => 0.34,
+                };
+                base_fill = base_fill.with_alpha(gpu_alpha);
+            }
             let rr = D2D1_ROUNDED_RECT {
                 rect: rect.to_d2d(),
                 radiusX: radius,
@@ -3694,11 +4068,27 @@ impl NativeSurface {
             self.glass_bitmap_cache.borrow_mut().clear();
             self.cached_layer.borrow_mut().take();
             self.last_region_key.borrow_mut().take();
-            let new_dib = BackingDib::new(width, height)?;
-            *self.dib.borrow_mut() = new_dib;
             self.width = width;
             self.height = height;
             self.dpi = get_window_dpi(self.hwnd);
+            match &self.backend {
+                SurfaceBackend::LayeredSoftware { dib, .. } => {
+                    let new_dib = BackingDib::new(width, height)?;
+                    *dib.borrow_mut() = new_dib;
+                }
+                SurfaceBackend::GpuAcrylic(state_cell) => {
+                    let mut state = state_cell.borrow_mut();
+                    state.d2d_ctx.SetTarget(None);
+                    state.active_target = None;
+                    state.swap_chain.ResizeBuffers(
+                        0,
+                        width,
+                        height,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_SWAP_CHAIN_FLAG(0),
+                    )?;
+                }
+            }
             self.d2d_target.SetDpi(self.dpi, self.dpi);
             Ok(())
         }
@@ -4699,12 +5089,9 @@ mod tests {
             .end_draw_and_present()
             .expect("layered UpdateLayeredWindow should succeed");
 
-        unsafe {
-            let dib = surface.dib.borrow();
-            assert_eq!(dib.pixel_bgra(1, 1), Some([0, 0, 0, 0]));
-            let center_px = dib.pixel_bgra(120, 80).unwrap();
-            assert!(center_px[3] > 0, "expected non-zero glass alpha, got {:?}", center_px);
-        }
+        assert_eq!(surface.test_pixel_bgra(1, 1), Some([0, 0, 0, 0]));
+        let center_px = surface.test_pixel_bgra(120, 80).unwrap();
+        assert!(center_px[3] > 0, "expected non-zero glass alpha, got {:?}", center_px);
 
         let notch = crate::notch::NotchView::default();
         surface.begin_draw();
@@ -4952,6 +5339,52 @@ mod tests {
     }
 
     #[test]
+    fn gpu_acrylic_directcomposition_surface_renders_and_updates_regions() {
+        let mut surface =
+            match NativeSurface::new_gpu_acrylic("HimeGpuAcrylicTest", -2000, -2000, 320, 120) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+        if !surface.is_gpu_acrylic() {
+            return;
+        }
+        surface.set_system_light_theme(false);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+        surface.set_rounded_regions(&[
+            (Rect::new(20.0, 60.0, 280.0, 52.0), 18.0),
+            (Rect::new(100.0, 10.0, 120.0, 40.0), 12.0),
+        ]);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(Rect::new(20.0, 60.0, 280.0, 52.0), LiquidGlassStyle::regular(18.0))
+            .expect("gpu acrylic glass panel draw");
+        surface
+            .draw_sf_symbol(
+                Rect::new(40.0, 74.0, 20.0, 20.0),
+                SfSymbol::Bell,
+                Color::rgba(1.0, 1.0, 1.0, 0.9),
+                1.4,
+            )
+            .expect("gpu acrylic symbol draw");
+        surface
+            .end_draw_and_present()
+            .expect("gpu acrylic SwapChain Present");
+
+        surface.set_system_light_theme(true);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        surface
+            .set_bounds(-2000, -2000, 360, 140)
+            .expect("gpu acrylic swapchain resize");
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(Rect::new(10.0, 10.0, 200.0, 48.0), LiquidGlassStyle::clear(14.0))
+            .expect("gpu acrylic post-resize draw");
+        surface
+            .end_draw_and_present()
+            .expect("gpu acrylic post-resize present");
+    }
+
+    #[test]
     fn backdrop_blur_refraction_and_adaptive_polarity() {
         let surface = match NativeSurface::new("HimeBackdropGlassTest", -2000, -2000, 240, 120) {
             Ok(s) => s,
@@ -4989,19 +5422,16 @@ mod tests {
             .unwrap();
         surface.end_draw_and_present().unwrap();
 
-        unsafe {
-            let dib = surface.dib.borrow();
-            assert_eq!(dib.pixel_bgra(2, 2), Some([0, 0, 0, 0]));
-            // Corner pixel inside bounding rect (20,20) but outside r=16 circular corner arc:
-            // distance from arc center (36,36) to (21,21) = sqrt(15^2 + 15^2) = 21.21 > 16 => alpha 0.
-            assert_eq!(dib.pixel_bgra(21, 21), Some([0, 0, 0, 0]));
-            let interior = dib.pixel_bgra(75, 50).unwrap();
-            assert!(
-                interior[0] < 90 && interior[1] < 90 && interior[2] < 90 && interior[3] > 220,
-                "expected translucent dark smoked glass on dark backdrop, got {:?}",
-                interior
-            );
-        }
+        assert_eq!(surface.test_pixel_bgra(2, 2), Some([0, 0, 0, 0]));
+        // Corner pixel inside bounding rect (20,20) but outside r=16 circular corner arc:
+        // distance from arc center (36,36) to (21,21) = sqrt(15^2 + 15^2) = 21.21 > 16 => alpha 0.
+        assert_eq!(surface.test_pixel_bgra(21, 21), Some([0, 0, 0, 0]));
+        let interior = surface.test_pixel_bgra(75, 50).unwrap();
+        assert!(
+            interior[0] < 90 && interior[1] < 90 && interior[2] < 90 && interior[3] > 220,
+            "expected translucent dark smoked glass on dark backdrop, got {:?}",
+            interior
+        );
 
         // 2. White/bright backdrop under Auto -> Light Frosted White Glass + near-black text (Apple HIG)
         let mut light_bg = vec![0u8; 240 * 120 * 4];
@@ -5024,15 +5454,12 @@ mod tests {
             .unwrap();
         surface.end_draw_and_present().unwrap();
 
-        unsafe {
-            let dib = surface.dib.borrow();
-            let interior = dib.pixel_bgra(75, 50).unwrap();
-            assert!(
-                interior[0] > 180 && interior[1] > 180 && interior[2] > 180 && interior[3] > 220,
-                "expected translucent light frosted white glass on bright backdrop, got {:?}",
-                interior
-            );
-        }
+        let interior = surface.test_pixel_bgra(75, 50).unwrap();
+        assert!(
+            interior[0] > 180 && interior[1] > 180 && interior[2] > 180 && interior[3] > 220,
+            "expected translucent light frosted white glass on bright backdrop, got {:?}",
+            interior
+        );
 
         // 3. Explicit Light/Dark mode overrides backdrop luminance
         surface.set_color_theme_mode(ColorThemeMode::Light);
@@ -5049,11 +5476,8 @@ mod tests {
             .draw_icon_button(Rect::new(50.0, 10.0, 28.0, 28.0), 8.0, true, false, false)
             .unwrap();
         surface.end_draw_and_present().unwrap();
-        unsafe {
-            let dib = surface.dib.borrow();
-            assert_eq!(dib.pixel_bgra(24, 24), Some([0, 0, 0, 0]));
-            assert!(dib.pixel_bgra(64, 24).unwrap()[3] > 0);
-        }
+        assert_eq!(surface.test_pixel_bgra(24, 24), Some([0, 0, 0, 0]));
+        assert!(surface.test_pixel_bgra(64, 24).unwrap()[3] > 0);
     }
 
     #[test]
@@ -5228,7 +5652,7 @@ mod tests {
         surface.end_draw_and_present().expect("end_draw_and_present");
 
         let alpha_at = |x: u32, y: u32| -> u8 {
-            unsafe { surface.dib.borrow().pixel_bgra(x, y).unwrap()[3] }
+            surface.test_pixel_bgra(x, y).unwrap()[3]
         };
 
         // Right screen-bezel edge stays flush: zero shadow/glass bleeding past rect.x + rect.width.

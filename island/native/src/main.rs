@@ -1234,7 +1234,8 @@ impl AppShell {
         os_shell::enable_file_drop(notch_surface.hwnd(), true);
 
         let (dx, dy, dock_w, dock_h) = dock_surface_bounds(screen, 1.0);
-        let mut dock_surface = NativeSurface::new("HimeDock", dx, dy, dock_w, dock_h)?;
+        let mut dock_surface = NativeSurface::new_gpu_acrylic("HimeDock", dx, dy, dock_w, dock_h)?;
+        dock_surface.set_system_light_theme(os_shell::system_uses_light_theme());
         let dock_scale = (dock_surface.dpi() / 96.0).max(0.5);
         if (dock_scale - 1.0).abs() > 0.01 {
             let (sx, sy, sw, sh) = dock_surface_bounds(screen, dock_scale);
@@ -1413,6 +1414,9 @@ impl AppShell {
     }
 
     fn refresh_all_backdrops_startup(&mut self) {
+        if self.dock_surface.is_gpu_acrylic() {
+            return;
+        }
         let screen = os_shell::primary_screen_bounds();
         let exclude = self.own_hwnds();
         let d_scale = (self.dock_surface.dpi() / 96.0).max(0.5);
@@ -1429,6 +1433,9 @@ impl AppShell {
     }
 
     fn capture_dock_backdrop(&mut self, force: bool, is_hidden: bool) {
+        if self.dock_surface.is_gpu_acrylic() {
+            return;
+        }
         let screen = os_shell::primary_screen_bounds();
         let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
         let bounds = dock_surface_bounds(screen, scale);
@@ -1465,6 +1472,9 @@ impl AppShell {
         let Some(ref surf) = self.settings_surface else {
             return;
         };
+        if surf.is_gpu_acrylic() {
+            return;
+        }
         let mut r = RECT::default();
         if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
             return;
@@ -1496,6 +1506,9 @@ impl AppShell {
         let Some(ref surf) = self.drawer_surface else {
             return;
         };
+        if surf.is_gpu_acrylic() {
+            return;
+        }
         let mut r = RECT::default();
         if unsafe { GetWindowRect(surf.hwnd(), &mut r).is_err() } {
             return;
@@ -1524,39 +1537,49 @@ impl AppShell {
 
     fn sync_backdrop_worker_targets(&self) {
         let screen = os_shell::primary_screen_bounds();
-        let dock_bounds = if self.dock.visible && !self.dock.is_hidden && self.dock.show_progress.value > 0.02 {
+        let dock_bounds = if !self.dock_surface.is_gpu_acrylic()
+            && self.dock.visible
+            && !self.dock.is_hidden
+            && self.dock.show_progress.value > 0.02
+        {
             let scale = (self.dock_surface.dpi() / 96.0).max(0.5);
             Some(dock_surface_bounds(screen, scale))
         } else {
             None
         };
         let settings_bounds = if self.settings.visible {
-            self.settings_surface.as_ref().and_then(|surf| {
-                let mut r = RECT::default();
-                unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
-                    (
-                        r.left,
-                        r.top,
-                        (r.right - r.left).max(1) as u32,
-                        (r.bottom - r.top).max(1) as u32,
-                    )
+            self.settings_surface
+                .as_ref()
+                .filter(|surf| !surf.is_gpu_acrylic())
+                .and_then(|surf| {
+                    let mut r = RECT::default();
+                    unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
+                        (
+                            r.left,
+                            r.top,
+                            (r.right - r.left).max(1) as u32,
+                            (r.bottom - r.top).max(1) as u32,
+                        )
+                    })
                 })
-            })
         } else {
             None
         };
         let drawer_bounds = if self.ai_drawer.visible {
-            self.drawer_surface.as_ref().and_then(|surf| {
-                let mut r = RECT::default();
-                unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
-                    (
-                        r.left,
-                        r.top,
-                        (r.right - r.left).max(1) as u32,
-                        (r.bottom - r.top).max(1) as u32,
-                    )
+            self.drawer_surface
+                .as_ref()
+                .filter(|surf| !surf.is_gpu_acrylic())
+                .and_then(|surf| {
+                    let mut r = RECT::default();
+                    unsafe { GetWindowRect(surf.hwnd(), &mut r).is_ok() }.then(|| {
+                        (
+                            r.left,
+                            r.top,
+                            (r.right - r.left).max(1) as u32,
+                            (r.bottom - r.top).max(1) as u32,
+                        )
+                    })
                 })
-            })
         } else {
             None
         };
@@ -1629,7 +1652,7 @@ impl AppShell {
             return Some(surf.hwnd());
         }
         let screen = os_shell::primary_screen_bounds();
-        let mut settings_surface = NativeSurface::new(
+        let mut settings_surface = NativeSurface::new_gpu_acrylic(
             "HimeSettings",
             screen.x + (screen.width - SETTINGS_WINDOW_WIDTH as i32) / 2,
             screen.y + (screen.height - SETTINGS_WINDOW_HEIGHT as i32) / 2,
@@ -1637,6 +1660,7 @@ impl AppShell {
             SETTINGS_WINDOW_HEIGHT,
         )
         .ok()?;
+        settings_surface.set_system_light_theme(os_shell::system_uses_light_theme());
         let set_scale = (settings_surface.dpi() / 96.0).max(0.5);
         if (set_scale - 1.0).abs() > 0.01 {
             let sw = (SETTINGS_WINDOW_WIDTH as f32 * set_scale).round() as u32;
@@ -1665,7 +1689,7 @@ impl AppShell {
             return Some(surf.hwnd());
         }
         let screen = os_shell::primary_screen_bounds();
-        let mut drawer_surface = NativeSurface::new(
+        let mut drawer_surface = NativeSurface::new_gpu_acrylic(
             "HimeAiDrawer",
             screen.x + (screen.width - 440) / 2,
             screen.y + 84,
@@ -1673,6 +1697,7 @@ impl AppShell {
             500,
         )
         .ok()?;
+        drawer_surface.set_system_light_theme(os_shell::system_uses_light_theme());
         let drw_scale = (drawer_surface.dpi() / 96.0).max(0.5);
         if (drw_scale - 1.0).abs() > 0.01 {
             let dw = (440.0 * drw_scale).round() as u32;
@@ -4460,6 +4485,16 @@ impl AppShell {
         }
         if self.tick_count > 0 && self.tick_count % 20 == 0 {
             self.os_worker.send(OsCommand::ScanTrayEntries);
+        }
+        if self.tick_count % 16 == 0 {
+            let sys_light = os_shell::system_uses_light_theme();
+            self.dock_surface.set_system_light_theme(sys_light);
+            if let Some(ref surf) = self.settings_surface {
+                surf.set_system_light_theme(sys_light);
+            }
+            if let Some(ref surf) = self.drawer_surface {
+                surf.set_system_light_theme(sys_light);
+            }
         }
         if self.dock.visible && self.tick_count > 0 && self.tick_count % 25 == 0 {
             self.os_worker.send(OsCommand::RefreshVirtualDesktops);
