@@ -29,7 +29,9 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HWND,
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+use windows::Win32::Media::Audio::{
+    eConsole, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+};
 use windows::Win32::NetworkManagement::IpHelper::{
     FreeMibTable, GetBestInterface, GetIfTable2, GetIpForwardTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
     MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
@@ -98,6 +100,16 @@ pub struct VolumeStatus {
     pub percent: u8,
     pub muted: bool,
     pub device_name: Option<String>,
+}
+
+/// Per-endpoint audio output device volume and mute state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDeviceVolume {
+    pub id: String,
+    pub name: String,
+    pub volume_percent: u8,
+    pub muted: bool,
+    pub is_default: bool,
 }
 
 /// Discovered nearby Wi-Fi network returned by [`scan_available_wifi_networks`].
@@ -715,6 +727,33 @@ pub fn sanitize_audio_device_name(raw: Option<&str>) -> String {
     }
 }
 
+const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+    pid: 14,
+};
+
+fn read_device_id(device: &IMMDevice) -> Option<String> {
+    let pwstr = unsafe { device.GetId() }.ok()?;
+    let id = unsafe { pwstr.to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(pwstr.0 as *const c_void)) };
+    id.filter(|s| !s.trim().is_empty())
+}
+
+fn read_device_friendly_name(device: &IMMDevice) -> Option<String> {
+    unsafe {
+        device.OpenPropertyStore(STGM_READ).ok().and_then(|store| {
+            let mut prop: PROPVARIANT = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME).ok()?;
+            let name = if prop.Anonymous.Anonymous.vt == VT_LPWSTR {
+                prop.Anonymous.Anonymous.Anonymous.pwszVal.to_string().ok()
+            } else {
+                None
+            };
+            let _ = PropVariantClear(&mut prop);
+            name
+        })
+    }
+}
+
 fn read_volume_status(enumerator: Option<&IMMDeviceEnumerator>) -> VolumeStatus {
     let Some(enum_ref) = enumerator else {
         return VolumeStatus::default();
@@ -727,23 +766,7 @@ fn read_volume_status(enumerator: Option<&IMMDeviceEnumerator>) -> VolumeStatus 
         return VolumeStatus::default();
     };
 
-    const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
-        fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
-        pid: 14,
-    };
-
-    let raw_friendly: Option<String> = unsafe {
-        device.OpenPropertyStore(STGM_READ).ok().and_then(|store| {
-            let mut prop: PROPVARIANT = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME).ok()?;
-            let name = if prop.Anonymous.Anonymous.vt == VT_LPWSTR {
-                prop.Anonymous.Anonymous.Anonymous.pwszVal.to_string().ok()
-            } else {
-                None
-            };
-            let _ = PropVariantClear(&mut prop);
-            name
-        })
-    };
+    let raw_friendly = read_device_friendly_name(&device);
     let device_name = Some(sanitize_audio_device_name(raw_friendly.as_deref()));
 
     let scalar = unsafe { endpoint.GetMasterVolumeLevelScalar() }.unwrap_or(0.0);
@@ -824,10 +847,7 @@ pub fn set_master_volume_percent(percent: u8) -> std::result::Result<(), String>
     set_master_volume(percent.min(100) as f32 / 100.0)
 }
 
-/// Toggles master output mute and returns the resulting mute state (`true` = muted).
-pub fn toggle_mute() -> std::result::Result<bool, String> {
-    let _com = ThreadComGuard::enter();
-    let endpoint = default_audio_endpoint()?;
+fn toggle_endpoint_mute(endpoint: &IAudioEndpointVolume) -> std::result::Result<bool, String> {
     unsafe {
         let currently_muted: bool = endpoint
             .GetMute()
@@ -839,6 +859,97 @@ pub fn toggle_mute() -> std::result::Result<bool, String> {
             .map_err(|e| format!("SetMute failed: {e}"))?;
         Ok(next_muted)
     }
+}
+
+fn audio_endpoint_by_id(device_id: &str) -> std::result::Result<IAudioEndpointVolume, String> {
+    let trimmed = device_id.trim();
+    if trimmed.is_empty() {
+        return Err("Audio device ID must not be empty".to_string());
+    }
+    let wide: Vec<u16> = trimmed.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("MMDeviceEnumerator failed: {e}"))?;
+        let device = enumerator
+            .GetDevice(PCWSTR::from_raw(wide.as_ptr()))
+            .map_err(|e| format!("GetDevice({trimmed}) failed: {e}"))?;
+        device
+            .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            .map_err(|e| format!("IAudioEndpointVolume({trimmed}) failed: {e}"))
+    }
+}
+
+/// Toggles master output mute and returns the resulting mute state (`true` = muted).
+pub fn toggle_mute() -> std::result::Result<bool, String> {
+    let _com = ThreadComGuard::enter();
+    let endpoint = default_audio_endpoint()?;
+    toggle_endpoint_mute(&endpoint)
+}
+
+/// Enumerates all active audio output (`eRender`) endpoints with their current volume and mute state.
+pub fn enumerate_audio_devices() -> Vec<AudioDeviceVolume> {
+    let _com = ThreadComGuard::enter();
+    let Ok(enumerator) = (unsafe { CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) }) else {
+        return Vec::new();
+    };
+    let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+        .ok()
+        .and_then(|dev| read_device_id(&dev));
+
+    let Ok(collection) = (unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }) else {
+        return Vec::new();
+    };
+    let count = unsafe { collection.GetCount() }.unwrap_or(0);
+    let mut devices = Vec::with_capacity(count as usize);
+
+    for idx in 0..count {
+        let Ok(device) = (unsafe { collection.Item(idx) }) else {
+            continue;
+        };
+        let Some(id) = read_device_id(&device) else {
+            continue;
+        };
+        let Ok(endpoint) = (unsafe { device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) }) else {
+            continue;
+        };
+        let raw_name = read_device_friendly_name(&device);
+        let name = sanitize_audio_device_name(raw_name.as_deref());
+        let scalar = unsafe { endpoint.GetMasterVolumeLevelScalar() }.unwrap_or(0.0);
+        let muted: bool = unsafe { endpoint.GetMute() }
+            .map(Into::into)
+            .unwrap_or(false);
+        let is_default = default_id.as_deref() == Some(id.as_str());
+        devices.push(AudioDeviceVolume {
+            id,
+            name,
+            volume_percent: (clamp_volume_scalar(scalar) * 100.0).round() as u8,
+            muted,
+            is_default,
+        });
+    }
+
+    devices.sort_by(|a, b| b.is_default.cmp(&a.is_default));
+    devices
+}
+
+/// Sets the volume (`0..=100` percent) of a specific audio output endpoint by its CoreAudio device ID.
+pub fn set_audio_device_volume(device_id: &str, percent: u8) -> std::result::Result<(), String> {
+    let _com = ThreadComGuard::enter();
+    let endpoint = audio_endpoint_by_id(device_id)?;
+    let scalar = clamp_volume_scalar(percent.min(100) as f32 / 100.0);
+    unsafe {
+        endpoint
+            .SetMasterVolumeLevelScalar(scalar, std::ptr::null())
+            .map_err(|e| format!("SetMasterVolumeLevelScalar failed: {e}"))
+    }
+}
+
+/// Toggles mute on a specific audio output endpoint by its CoreAudio device ID and returns the new mute state.
+pub fn toggle_audio_device_mute(device_id: &str) -> std::result::Result<bool, String> {
+    let _com = ThreadComGuard::enter();
+    let endpoint = audio_endpoint_by_id(device_id)?;
+    toggle_endpoint_mute(&endpoint)
 }
 
 // ---------------------------------------------------------------------------
@@ -2793,5 +2904,27 @@ mod tests {
         );
         assert_eq!(friendly_app_name("GoogleDriveFS.exe"), "Google Drive");
         assert_eq!(friendly_app_name("DCv2.exe"), "MSI Center Pro");
+    }
+
+    #[test]
+    fn audio_device_endpoints_enumerate_and_validate_ids() {
+        let devices = enumerate_audio_devices();
+        let default_count = devices.iter().filter(|d| d.is_default).count();
+        assert!(default_count <= 1);
+        for dev in &devices {
+            assert!(!dev.id.trim().is_empty());
+            assert!(!dev.name.trim().is_empty());
+            assert!(dev.volume_percent <= 100);
+        }
+        if let Some(first) = devices.first() {
+            if devices.iter().any(|d| d.is_default) {
+                assert!(first.is_default);
+            }
+        }
+
+        assert!(set_audio_device_volume("", 50).is_err());
+        assert!(toggle_audio_device_mute("   ").is_err());
+        assert!(set_audio_device_volume("{invalid-nonexistent-device-id}", 50).is_err());
+        assert!(toggle_audio_device_mute("{invalid-nonexistent-device-id}").is_err());
     }
 }

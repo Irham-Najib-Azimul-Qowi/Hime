@@ -1156,6 +1156,64 @@ impl NotchView {
         None
     }
 
+    /// Handles horizontal or vertical scroll wheel input at `(x, y)` inside `surface_rect`.
+    ///
+    /// When the notch is expanded and the pointer is over either `header_clock` or the
+    /// `tabs` navigation bar, non-zero scroll deltas cycle to the previous/next panel and
+    /// return `true` so callers can re-render and refresh panel state.
+    pub fn handle_header_scroll_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        surface_rect: Rect,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
+        if self.is_hidden || !self.is_expanded {
+            return false;
+        }
+        let local_outer = self.computed_rect(surface_rect.width, surface_rect.height);
+        let outer = Rect::new(
+            surface_rect.x + local_outer.x,
+            surface_rect.y + local_outer.y,
+            local_outer.width,
+            local_outer.height,
+        );
+        if !point_in_rect(x, y, outer) {
+            return false;
+        }
+
+        let layout = self.compute_expanded_layout(outer);
+        let over_clock = point_in_rect(x, y, layout.header_clock);
+        let over_tabs = match (layout.tabs.first(), layout.tabs.last()) {
+            (Some((_, first)), Some((_, last))) => {
+                let tabs_bar = Rect::new(
+                    first.x,
+                    first.y,
+                    (last.x + last.width - first.x).max(0.0),
+                    first.height,
+                );
+                point_in_rect(x, y, tabs_bar)
+            }
+            _ => false,
+        };
+        if !over_clock && !over_tabs {
+            return false;
+        }
+
+        let step = if delta_x.abs() >= delta_y.abs() && delta_x != 0.0 {
+            if delta_x > 0.0 { 1 } else { -1 }
+        } else if delta_y != 0.0 {
+            if delta_y < 0.0 { 1 } else { -1 }
+        } else {
+            return false;
+        };
+
+        let before = self.active_panel;
+        self.cycle_panel(step);
+        self.active_panel != before
+    }
+
     fn is_hovered(&self, rect: Rect) -> bool {
         self.pointer_pos
             .is_some_and(|(x, y)| point_in_rect(x, y, rect))
@@ -4096,5 +4154,43 @@ mod tests {
         surface.begin_draw();
         notch.render(&surface).expect("plain black render on bright bg should succeed");
         surface.end_draw_and_present().expect("plain black present should succeed");
+    }
+
+    #[test]
+    fn header_scroll_switches_menu_on_clock_and_tabs_bar() {
+        let mut notch = NotchView::new(NotchEdge::Top);
+        let surf = Rect::new(0.0, 0.0, 560.0, 320.0);
+
+        // Collapsed notch ignores header scroll.
+        settle(&mut notch);
+        let collapsed_outer = notch.computed_rect(surf.width, surf.height);
+        let (cx0, cy0) = rect_center(collapsed_outer);
+        assert!(!notch.handle_header_scroll_at(cx0, cy0, surf, 1.0, 0.0));
+
+        // Expand on CommandCenter and settle layout.
+        notch.set_panel(NotchPanel::CommandCenter);
+        settle(&mut notch);
+        let outer = notch.computed_rect(surf.width, surf.height);
+        let layout = notch.compute_expanded_layout(outer);
+
+        // Scroll right/left on header_clock.
+        let (clk_x, clk_y) = rect_center(layout.header_clock);
+        assert!(notch.handle_header_scroll_at(clk_x, clk_y, surf, 1.0, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Calendar);
+        assert!(notch.handle_header_scroll_at(clk_x, clk_y, surf, -1.0, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::CommandCenter);
+
+        // Vertical wheel on tabs bar (down -> next, up -> prev).
+        let (_, first_tab_rect) = layout.tabs[0];
+        let (tab_x, tab_y) = rect_center(first_tab_rect);
+        assert!(notch.handle_header_scroll_at(tab_x, tab_y, surf, 0.0, -1.0));
+        assert_eq!(notch.active_panel, NotchPanel::Calendar);
+        assert!(notch.handle_header_scroll_at(tab_x, tab_y, surf, 0.0, 1.0));
+        assert_eq!(notch.active_panel, NotchPanel::CommandCenter);
+
+        // Zero delta or outside header clock/tabs does not switch.
+        assert!(!notch.handle_header_scroll_at(clk_x, clk_y, surf, 0.0, 0.0));
+        let (body_x, body_y) = (outer.x + outer.width * 0.5, outer.y + outer.height - 40.0);
+        assert!(!notch.handle_header_scroll_at(body_x, body_y, surf, 1.0, 0.0));
     }
 }

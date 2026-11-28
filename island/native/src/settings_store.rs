@@ -34,6 +34,14 @@ pub struct NativeSettings {
     pub dock_mode: String,
     pub dock_pinned: Vec<String>,
     pub dock_win_number_enabled: bool,
+    pub dock_show_dividers: bool,
+    pub dock_show_hime_ai: bool,
+    pub dock_show_desktop: bool,
+    pub dock_show_tray: bool,
+    pub dock_show_notifications: bool,
+    /// `"small"` | `"medium"` | `"large"`
+    pub dock_size: String,
+    pub dock_group_windows: bool,
 
     pub volume_overlay_enabled: bool,
     pub brightness_overlay_enabled: bool,
@@ -58,6 +66,13 @@ impl Default for NativeSettings {
             dock_mode: "auto-hide".to_string(),
             dock_pinned: Vec::new(),
             dock_win_number_enabled: true,
+            dock_show_dividers: true,
+            dock_show_hime_ai: true,
+            dock_show_desktop: true,
+            dock_show_tray: true,
+            dock_show_notifications: true,
+            dock_size: "medium".to_string(),
+            dock_group_windows: true,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: true,
             color_theme: "auto".to_string(),
@@ -75,6 +90,7 @@ impl NativeSettings {
         out.notch_mode = normalize_notch_mode(&out.notch_mode).to_string();
         out.notch_edge = normalize_notch_edge(&out.notch_edge).to_string();
         out.dock_mode = normalize_dock_mode(&out.dock_mode).to_string();
+        out.dock_size = normalize_dock_size(&out.dock_size).to_string();
         out.color_theme = normalize_color_theme(&out.color_theme).to_string();
         if out.hime_router_url.trim().is_empty() {
             out.hime_router_url = DEFAULT_ROUTER_URL.to_string();
@@ -120,6 +136,17 @@ impl NativeSettings {
         }
         .to_string();
         &self.dock_mode
+    }
+
+    /// Cycles `dock_size`: `"small"` -> `"medium"` -> `"large"` -> `"small"`.
+    pub fn cycle_dock_size(&mut self) -> &str {
+        self.dock_size = match normalize_dock_size(&self.dock_size) {
+            "small" => "medium",
+            "medium" => "large",
+            _ => "small",
+        }
+        .to_string();
+        &self.dock_size
     }
 
     /// Cycles `color_theme`: `"auto"` -> `"dark"` -> `"light"` -> `"auto"`.
@@ -256,6 +283,39 @@ impl SettingsStore {
             &["bloom-dock-win-number-enabled", "dock_win_number_enabled"],
             def.dock_win_number_enabled,
         );
+        let dock_show_dividers = read_bool(
+            map,
+            &["bloom-dock-separator-enabled", "dock_show_dividers"],
+            def.dock_show_dividers,
+        );
+        let dock_show_hime_ai = read_bool(
+            map,
+            &["bloom-dock-show-hime-ai", "dock_show_hime_ai"],
+            def.dock_show_hime_ai,
+        );
+        let dock_show_desktop = read_bool(
+            map,
+            &["bloom-dock-task-view", "dock_show_desktop"],
+            def.dock_show_desktop,
+        );
+        let dock_show_tray = read_bool(
+            map,
+            &["bloom-dock-show-tray", "dock_show_tray"],
+            def.dock_show_tray,
+        );
+        let dock_show_notifications = read_bool(
+            map,
+            &["bloom-dock-show-notifications", "dock_show_notifications"],
+            def.dock_show_notifications,
+        );
+        let dock_size = read_str(map, &["bloom-dock-size", "dock_size"])
+            .map(|s| normalize_dock_size(&s).to_string())
+            .unwrap_or(def.dock_size);
+        let dock_group_windows = read_bool(
+            map,
+            &["bloom-dock-group-windows", "dock_group_windows"],
+            def.dock_group_windows,
+        );
 
         let volume_overlay_enabled = read_bool(
             map,
@@ -300,6 +360,13 @@ impl SettingsStore {
             dock_mode,
             dock_pinned,
             dock_win_number_enabled,
+            dock_show_dividers,
+            dock_show_hime_ai,
+            dock_show_desktop,
+            dock_show_tray,
+            dock_show_notifications,
+            dock_size,
+            dock_group_windows,
             volume_overlay_enabled,
             brightness_overlay_enabled,
             color_theme,
@@ -341,6 +408,31 @@ impl SettingsStore {
         map.insert(
             "bloom-dock-win-number-enabled".into(),
             bool_str_value(s.dock_win_number_enabled),
+        );
+        map.insert(
+            "bloom-dock-separator-enabled".into(),
+            bool_str_value(s.dock_show_dividers),
+        );
+        map.insert(
+            "bloom-dock-show-hime-ai".into(),
+            bool_str_value(s.dock_show_hime_ai),
+        );
+        map.insert(
+            "bloom-dock-task-view".into(),
+            bool_str_value(s.dock_show_desktop),
+        );
+        map.insert(
+            "bloom-dock-show-tray".into(),
+            bool_str_value(s.dock_show_tray),
+        );
+        map.insert(
+            "bloom-dock-show-notifications".into(),
+            bool_str_value(s.dock_show_notifications),
+        );
+        map.insert("bloom-dock-size".into(), Value::String(s.dock_size));
+        map.insert(
+            "bloom-dock-group-windows".into(),
+            bool_str_value(s.dock_group_windows),
         );
 
         map.insert(
@@ -395,6 +487,14 @@ fn normalize_dock_mode(raw: &str) -> &'static str {
         "auto-hide" | "autohide" => "auto-hide",
         "smart" => "smart",
         _ => "fixed",
+    }
+}
+
+pub fn normalize_dock_size(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "small" | "sm" => "small",
+        "large" | "lg" => "large",
+        _ => "medium",
     }
 }
 
@@ -515,6 +615,13 @@ mod tests {
             dock_mode: "auto-hide".to_string(),
             dock_pinned: vec!["wt.exe".to_string(), "msedge.exe".to_string()],
             dock_win_number_enabled: false,
+            dock_show_dividers: false,
+            dock_show_hime_ai: false,
+            dock_show_desktop: false,
+            dock_show_tray: false,
+            dock_show_notifications: false,
+            dock_size: "large".to_string(),
+            dock_group_windows: false,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: false,
             color_theme: "dark".to_string(),
@@ -599,5 +706,37 @@ mod tests {
         let path = temp_settings_path("nonexistent");
         let loaded = SettingsStore::load_from_path(&path).unwrap();
         assert_eq!(loaded, NativeSettings::default());
+    }
+
+    #[test]
+    fn dock_settings_legacy_keys_and_normalization() {
+        let legacy = SettingsStore::from_json_str(
+            r#"{
+                "bloom-dock-separator-enabled":"false",
+                "bloom-dock-show-hime-ai":"false",
+                "bloom-dock-task-view":"false",
+                "bloom-dock-show-tray":"false",
+                "bloom-dock-show-notifications":"false",
+                "bloom-dock-size":"LARGE",
+                "bloom-dock-group-windows":"false"
+            }"#,
+        )
+        .unwrap();
+        assert!(!legacy.dock_show_dividers);
+        assert!(!legacy.dock_show_hime_ai);
+        assert!(!legacy.dock_show_desktop);
+        assert!(!legacy.dock_show_tray);
+        assert!(!legacy.dock_show_notifications);
+        assert_eq!(legacy.dock_size, "large");
+        assert!(!legacy.dock_group_windows);
+
+        let mut ns = NativeSettings::default();
+        assert_eq!(ns.dock_size, "medium");
+        assert_eq!(ns.cycle_dock_size(), "large");
+        assert_eq!(ns.cycle_dock_size(), "small");
+        assert_eq!(ns.cycle_dock_size(), "medium");
+
+        let invalid = SettingsStore::from_json_str(r#"{"dock_size":"giant"}"#).unwrap();
+        assert_eq!(invalid.dock_size, "medium");
     }
 }

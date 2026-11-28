@@ -243,6 +243,14 @@ pub struct SettingsState {
     pub dock_mode: String,
     pub dock_pinned: Vec<String>,
     pub dock_win_number_enabled: bool,
+    pub dock_show_dividers: bool,
+    pub dock_show_hime_ai: bool,
+    pub dock_show_desktop: bool,
+    pub dock_show_tray: bool,
+    pub dock_show_notifications: bool,
+    /// `"small"` | `"medium"` | `"large"`
+    pub dock_size: String,
+    pub dock_group_windows: bool,
 
     pub volume_overlay_enabled: bool,
     pub brightness_overlay_enabled: bool,
@@ -277,6 +285,13 @@ impl Default for SettingsState {
             dock_mode: "auto-hide".to_string(),
             dock_pinned: Vec::new(),
             dock_win_number_enabled: true,
+            dock_show_dividers: true,
+            dock_show_hime_ai: true,
+            dock_show_desktop: true,
+            dock_show_tray: true,
+            dock_show_notifications: true,
+            dock_size: "medium".to_string(),
+            dock_group_windows: true,
             volume_overlay_enabled: true,
             brightness_overlay_enabled: true,
             color_theme: "auto".to_string(),
@@ -339,7 +354,14 @@ enum RowControlId {
     ToggleMusicMode,
     ToggleDockEnabled,
     CycleDockMode,
+    CycleDockSize,
+    ToggleDockGroupWindows,
     ToggleDockWinNumber,
+    ToggleDockShowDividers,
+    ToggleDockShowHimeAi,
+    ToggleDockShowDesktop,
+    ToggleDockShowTray,
+    ToggleDockShowNotifications,
     ClearPinnedApps,
     ToggleVolumeOverlay,
     ToggleBrightnessOverlay,
@@ -687,8 +709,41 @@ impl SettingsPanel {
                 .to_string();
                 SettingsAction::ToggleDockMode
             }
+            RowControlId::CycleDockSize => {
+                self.state.dock_size = match self.state.dock_size.as_str() {
+                    "small" => "medium",
+                    "medium" => "large",
+                    _ => "small",
+                }
+                .to_string();
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockGroupWindows => {
+                self.state.dock_group_windows = !self.state.dock_group_windows;
+                SettingsAction::UpdateSettings
+            }
             RowControlId::ToggleDockWinNumber => {
                 self.state.dock_win_number_enabled = !self.state.dock_win_number_enabled;
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockShowDividers => {
+                self.state.dock_show_dividers = !self.state.dock_show_dividers;
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockShowHimeAi => {
+                self.state.dock_show_hime_ai = !self.state.dock_show_hime_ai;
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockShowDesktop => {
+                self.state.dock_show_desktop = !self.state.dock_show_desktop;
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockShowTray => {
+                self.state.dock_show_tray = !self.state.dock_show_tray;
+                SettingsAction::UpdateSettings
+            }
+            RowControlId::ToggleDockShowNotifications => {
+                self.state.dock_show_notifications = !self.state.dock_show_notifications;
                 SettingsAction::UpdateSettings
             }
             RowControlId::ClearPinnedApps => {
@@ -888,8 +943,32 @@ impl SettingsPanel {
             (RowControlId::ToggleMusicMode, self.state.music_mode_enabled),
             (RowControlId::ToggleDockEnabled, self.state.dock_enabled),
             (
+                RowControlId::ToggleDockGroupWindows,
+                self.state.dock_group_windows,
+            ),
+            (
                 RowControlId::ToggleDockWinNumber,
                 self.state.dock_win_number_enabled,
+            ),
+            (
+                RowControlId::ToggleDockShowDividers,
+                self.state.dock_show_dividers,
+            ),
+            (
+                RowControlId::ToggleDockShowHimeAi,
+                self.state.dock_show_hime_ai,
+            ),
+            (
+                RowControlId::ToggleDockShowDesktop,
+                self.state.dock_show_desktop,
+            ),
+            (
+                RowControlId::ToggleDockShowTray,
+                self.state.dock_show_tray,
+            ),
+            (
+                RowControlId::ToggleDockShowNotifications,
+                self.state.dock_show_notifications,
             ),
             (
                 RowControlId::ToggleVolumeOverlay,
@@ -1017,10 +1096,52 @@ impl SettingsPanel {
                     kind: RowVisual::Picker(capitalize_mode(&self.state.dock_mode)),
                 },
                 RenderedRow {
+                    id: RowControlId::CycleDockSize,
+                    title: "Dock Size",
+                    desc: "Small, Medium, or Large".to_string(),
+                    kind: RowVisual::Picker(capitalize_mode(&self.state.dock_size)),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockGroupWindows,
+                    title: "Group Windows",
+                    desc: "Combine same-app windows".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_group_windows),
+                },
+                RenderedRow {
                     id: RowControlId::ToggleDockWinNumber,
-                    title: "Win+1..9 Shortcuts",
-                    desc: "Focus or launch Dock slots via Win+1 through Win+9".to_string(),
+                    title: "Win+1..9 Keys",
+                    desc: "Focus slots via Win+1..9".to_string(),
                     kind: RowVisual::Toggle(self.state.dock_win_number_enabled),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockShowDividers,
+                    title: "Dock Dividers",
+                    desc: "Show section separators".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_show_dividers),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockShowHimeAi,
+                    title: "Hime AI Button",
+                    desc: "Show AI launcher in Dock".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_show_hime_ai),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockShowDesktop,
+                    title: "Task View",
+                    desc: "Show virtual desktop switcher".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_show_desktop),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockShowTray,
+                    title: "System Tray",
+                    desc: "Show tray & status cluster".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_show_tray),
+                },
+                RenderedRow {
+                    id: RowControlId::ToggleDockShowNotifications,
+                    title: "Notifications",
+                    desc: "Show notification bell".to_string(),
+                    kind: RowVisual::Toggle(self.state.dock_show_notifications),
                 },
                 RenderedRow {
                     id: RowControlId::ClearPinnedApps,
@@ -1167,6 +1288,32 @@ impl SettingsPanel {
         let rows = self.rows_for_active_tab();
         let content_x = SIDEBAR_WIDTH + CONTENT_PAD_X;
         let row_w = self.width - content_x - CONTENT_PAD_X;
+        if self.active_tab == SettingsTab::Dock {
+            let mut out = Vec::with_capacity(rows.len());
+            let mut y = TITLEBAR_HEIGHT + 74.0;
+            // Keep first 2 rows full-width (preserves existing hit-test coordinates)
+            for row in rows.iter().take(2) {
+                out.push((row.id, Rect::new(content_x, y, row_w, ROW_HEIGHT)));
+                y += ROW_HEIGHT + ROW_GAP;
+            }
+            // Middle 8 controls in a 2-column grid so all 11 rows fit inside 740x520
+            let col_gap = 8.0;
+            let col_w = (row_w - col_gap) * 0.5;
+            let grid_rows: Vec<&RenderedRow> = rows.iter().skip(2).take(8).collect();
+            for pair in grid_rows.chunks(2) {
+                for (col, row) in pair.iter().enumerate() {
+                    let rx = content_x + col as f32 * (col_w + col_gap);
+                    out.push((row.id, Rect::new(rx, y, col_w, ROW_HEIGHT)));
+                }
+                y += ROW_HEIGHT + ROW_GAP;
+            }
+            // Final row (ClearPinnedApps) full-width
+            for row in rows.iter().skip(10) {
+                out.push((row.id, Rect::new(content_x, y, row_w, ROW_HEIGHT)));
+                y += ROW_HEIGHT + ROW_GAP;
+            }
+            return out;
+        }
         if self.active_tab == SettingsTab::HimeAi {
             let stacked_count = rows
                 .iter()
@@ -1415,16 +1562,12 @@ impl SettingsPanel {
             if rect.y + rect.height > draw_h - 14.0 {
                 continue;
             }
-            let base_r = if matches!(row.kind, RowVisual::SummaryCard { .. }) {
-                Rect::new(
-                    content_x + (rect.x - content_x) * width_scale,
-                    rect.y,
-                    rect.width * width_scale,
-                    rect.height,
-                )
-            } else {
-                Rect::new(rect.x, rect.y, content_w, rect.height)
-            };
+            let base_r = Rect::new(
+                content_x + (rect.x - content_x) * width_scale,
+                rect.y,
+                rect.width * width_scale,
+                rect.height,
+            );
             let r = scale_rect_centered(base_r, self.target_scale(HitTarget::Row(row.id)));
             let hovered = self.hovered_target == Some(HitTarget::Row(row.id));
             let selected = self.selected_index == Some(idx);
@@ -1769,6 +1912,9 @@ fn capitalize_mode(mode: &str) -> String {
         "top" => "Top".to_string(),
         "left" => "Left".to_string(),
         "right" => "Right".to_string(),
+        "small" => "Small".to_string(),
+        "medium" => "Medium".to_string(),
+        "large" => "Large".to_string(),
         other => other.to_string(),
     }
 }
@@ -2213,5 +2359,64 @@ mod tests {
         assert_eq!(parsed.memory_count, 0);
         assert_eq!(parsed.skills_count, 0);
         assert_eq!(parsed.mcp_count, 0);
+        assert_eq!(parsed.dock_size, "medium");
+        assert!(parsed.dock_group_windows);
+        assert!(parsed.dock_show_dividers);
+        assert!(parsed.dock_show_hime_ai);
+        assert!(parsed.dock_show_desktop);
+        assert!(parsed.dock_show_tray);
+        assert!(parsed.dock_show_notifications);
+    }
+
+    #[test]
+    fn dock_new_controls_hit_test_and_mutate_state() {
+        let mut panel = SettingsPanel::new();
+        panel.open();
+        panel.select_tab(SettingsTab::Dock);
+
+        let rects = panel.row_rects();
+        let find_center = |target: RowControlId| -> (f32, f32) {
+            let r = rects
+                .iter()
+                .find(|(id, _)| *id == target)
+                .map(|(_, r)| *r)
+                .expect("expected Dock control rect");
+            (r.x + r.width * 0.5, r.y + r.height * 0.5)
+        };
+
+        // Dock Size cycles medium -> large -> small -> medium
+        let (sx, sy) = find_center(RowControlId::CycleDockSize);
+        assert_eq!(panel.state.dock_size, "medium");
+        assert_eq!(panel.handle_click(sx, sy), Some(SettingsAction::UpdateSettings));
+        assert_eq!(panel.state.dock_size, "large");
+        assert_eq!(panel.handle_click(sx, sy), Some(SettingsAction::UpdateSettings));
+        assert_eq!(panel.state.dock_size, "small");
+        assert_eq!(panel.handle_click(sx, sy), Some(SettingsAction::UpdateSettings));
+        assert_eq!(panel.state.dock_size, "medium");
+
+        // Group Windows toggle
+        let (gx, gy) = find_center(RowControlId::ToggleDockGroupWindows);
+        assert!(panel.state.dock_group_windows);
+        assert_eq!(panel.handle_click(gx, gy), Some(SettingsAction::UpdateSettings));
+        assert!(!panel.state.dock_group_windows);
+
+        // Dividers, Hime AI, Desktop, Tray, Notifications toggles
+        for (id, getter) in [
+            (
+                RowControlId::ToggleDockShowDividers,
+                (|s: &SettingsState| s.dock_show_dividers) as fn(&SettingsState) -> bool,
+            ),
+            (RowControlId::ToggleDockShowHimeAi, |s| s.dock_show_hime_ai),
+            (RowControlId::ToggleDockShowDesktop, |s| s.dock_show_desktop),
+            (RowControlId::ToggleDockShowTray, |s| s.dock_show_tray),
+            (RowControlId::ToggleDockShowNotifications, |s| {
+                s.dock_show_notifications
+            }),
+        ] {
+            let (cx, cy) = find_center(id);
+            assert!(getter(&panel.state));
+            assert_eq!(panel.handle_click(cx, cy), Some(SettingsAction::UpdateSettings));
+            assert!(!getter(&panel.state));
+        }
     }
 }

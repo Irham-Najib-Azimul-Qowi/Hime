@@ -32,7 +32,6 @@ const DOCK_PAD_X: f32 = 12.0;
 const DIVIDER_WIDTH: f32 = 1.0;
 const DIVIDER_GAP: f32 = 8.0;
 const UTIL_BTN_SIZE: f32 = 34.0;
-const TRAY_BTN_BASE_WIDTH: f32 = 34.0;
 const HANDLE_STRIP_WIDTH: f32 = 80.0;
 const HANDLE_STRIP_HEIGHT: f32 = 4.0;
 const MIN_MAGNIFY_SCALE: f32 = 1.0;
@@ -55,6 +54,54 @@ const CONTEXT_MENU_HEADER_H: f32 = 22.0;
 const CONTEXT_MENU_DIVIDER_H: f32 = 9.0;
 const CONTEXT_MENU_PAD_X: f32 = 8.0;
 const CONTEXT_MENU_PAD_Y: f32 = 8.0;
+const PREVIEW_CARD_WIDTH: f32 = 168.0;
+const PREVIEW_CARD_HEIGHT: f32 = 124.0;
+const PREVIEW_CARD_GAP: f32 = 8.0;
+const PREVIEW_STRIP_PAD: f32 = 8.0;
+
+/// Dock size preset scaling Dock height, icon size, and utility button size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DockSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl DockSize {
+    pub fn dock_height(self) -> f32 {
+        match self {
+            DockSize::Small => 44.0,
+            DockSize::Medium => DOCK_HEIGHT,
+            DockSize::Large => 64.0,
+        }
+    }
+
+    pub fn icon_base_size(self) -> f32 {
+        match self {
+            DockSize::Small => 28.0,
+            DockSize::Medium => ICON_BASE_SIZE,
+            DockSize::Large => 44.0,
+        }
+    }
+
+    pub fn util_btn_size(self) -> f32 {
+        match self {
+            DockSize::Small => 28.0,
+            DockSize::Medium => UTIL_BTN_SIZE,
+            DockSize::Large => 40.0,
+        }
+    }
+}
+
+/// Live window preview entry (title + optional BGRA thumbnail) for Dock hover cards.
+#[derive(Debug, Clone)]
+pub struct WindowPreviewEntry {
+    pub hwnd: isize,
+    pub title: String,
+    pub thumbnail: Option<IconRgba>,
+}
 
 /// Dock visibility behavior mode matching `Dock.tsx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -223,6 +270,7 @@ pub struct UtilityLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DockHoverTarget {
     App(usize),
+    WindowPreview(usize, isize),
     AiDrawer,
     Spaces,
     SpaceItem(usize),
@@ -296,6 +344,8 @@ pub struct DockBar {
     items: Vec<DockItem>,
     icon_cache: HashMap<String, Option<IconRgba>>,
     icon_cache_order: VecDeque<String>,
+    window_previews: HashMap<isize, WindowPreviewEntry>,
+    window_titles: HashMap<isize, String>,
     tray_items: Vec<TrayEntry>,
     spaces: Vec<SpaceEntry>,
     pub mode: DockMode,
@@ -303,6 +353,13 @@ pub struct DockBar {
     pub is_overlapped: bool,
     pub is_edge_hovered: bool,
     pub ai_enabled: bool,
+    pub show_dividers: bool,
+    pub show_hime_ai: bool,
+    pub show_desktop: bool,
+    pub show_tray: bool,
+    pub show_notifications: bool,
+    pub dock_size: DockSize,
+    pub group_windows: bool,
     pub tray_open: bool,
     pub spaces_open: bool,
     pub context_menu: Option<DockContextMenu>,
@@ -333,6 +390,8 @@ impl DockBar {
             items: Vec::new(),
             icon_cache: HashMap::new(),
             icon_cache_order: VecDeque::new(),
+            window_previews: HashMap::new(),
+            window_titles: HashMap::new(),
             tray_items: Vec::new(),
             spaces: vec![SpaceEntry::new("desktop-0", "Desktop 1", 0, true)],
             mode: DockMode::Fixed,
@@ -340,6 +399,13 @@ impl DockBar {
             is_overlapped: false,
             is_edge_hovered: false,
             ai_enabled: true,
+            show_dividers: true,
+            show_hime_ai: true,
+            show_desktop: true,
+            show_tray: true,
+            show_notifications: true,
+            dock_size: DockSize::Medium,
+            group_windows: true,
             tray_open: false,
             spaces_open: false,
             context_menu: None,
@@ -419,7 +485,16 @@ impl DockBar {
         match target {
             None
             | Some(DockHoverTarget::HandleStrip)
-            | Some(DockHoverTarget::ContextMenuItem(_)) => false,
+            | Some(DockHoverTarget::ContextMenuItem(_))
+            | Some(DockHoverTarget::WindowPreview(_, _)) => false,
+            Some(DockHoverTarget::App(idx)) => {
+                // Show window preview cards instead of plain text tooltip when app has active windows
+                !self
+                    .items
+                    .get(idx)
+                    .map(|it| it.running && !it.hwnds.is_empty())
+                    .unwrap_or(false)
+            }
             Some(DockHoverTarget::Spaces) => !self.spaces_open,
             Some(DockHoverTarget::Tray) => !self.tray_open,
             Some(_) => true,
@@ -508,8 +583,80 @@ impl DockBar {
     /// Shows or hides the Hime AI button in the right-side utility cluster.
     pub fn set_ai_enabled(&mut self, enabled: bool) {
         self.ai_enabled = enabled;
+        self.show_hime_ai = enabled;
         if !enabled && self.hovered_target == Some(DockHoverTarget::AiDrawer) {
             self.set_hover_target(None);
+        }
+    }
+
+    /// Shows or hides hairline dividers between pinned/running apps and the utility cluster.
+    pub fn set_show_dividers(&mut self, show: bool) {
+        self.show_dividers = show;
+    }
+
+    /// Shows or hides the Hime AI utility button.
+    pub fn set_show_hime_ai(&mut self, show: bool) {
+        self.set_ai_enabled(show);
+    }
+
+    /// Shows or hides the Virtual Desktops ("Spaces") utility button.
+    pub fn set_show_desktop(&mut self, show: bool) {
+        self.show_desktop = show;
+        if !show {
+            if self.spaces_open {
+                self.set_spaces_open(false);
+            }
+            if matches!(
+                self.hovered_target,
+                Some(DockHoverTarget::Spaces | DockHoverTarget::SpaceItem(_) | DockHoverTarget::NewSpace)
+            ) {
+                self.set_hover_target(None);
+            }
+        }
+    }
+
+    /// Shows or hides the System Tray ("Show hidden icons") utility button.
+    pub fn set_show_tray(&mut self, show: bool) {
+        self.show_tray = show;
+        if !show {
+            if self.tray_open {
+                self.set_tray_open(false);
+            }
+            if matches!(
+                self.hovered_target,
+                Some(DockHoverTarget::Tray | DockHoverTarget::TrayItem(_))
+            ) {
+                self.set_hover_target(None);
+            }
+        }
+    }
+
+    /// Shows or hides the Windows Notification Center utility button.
+    pub fn set_show_notifications(&mut self, show: bool) {
+        self.show_notifications = show;
+        if !show && self.hovered_target == Some(DockHoverTarget::Notifications) {
+            self.set_hover_target(None);
+        }
+    }
+
+    /// Sets the Dock size preset (`Small` / `Medium` / `Large`), scaling height and icon sizes.
+    pub fn set_dock_size(&mut self, size: DockSize) {
+        self.dock_size = size;
+    }
+
+    /// Sets whether running windows for the same app are grouped into one Dock icon.
+    pub fn set_group_windows(&mut self, group: bool) {
+        self.group_windows = group;
+    }
+
+    /// Updates cached window previews (title + thumbnail) keyed by `hwnd`.
+    pub fn set_window_previews(&mut self, previews: Vec<WindowPreviewEntry>) {
+        self.window_previews.clear();
+        for entry in previews {
+            if !entry.title.trim().is_empty() {
+                self.window_titles.insert(entry.hwnd, entry.title.clone());
+            }
+            self.window_previews.insert(entry.hwnd, entry);
         }
     }
 
@@ -987,9 +1134,141 @@ impl DockBar {
         self.items = pinned;
     }
 
+    /// Synchronizes live [`RunningWindow`]s into `DockBar` respecting `self.group_windows`.
+    ///
+    /// When `group_windows` is `true`, windows are grouped by `executable.to_lowercase()`.
+    /// When `group_windows` is `false`, each open window gets its own individual [`DockItem`].
+    pub fn sync_running_windows_configured(&mut self, windows: &[RunningWindow]) {
+        self.window_titles.clear();
+        for win in windows {
+            let title = if !win.title.trim().is_empty() {
+                win.title.clone()
+            } else {
+                win.app_name.clone()
+            };
+            self.window_titles.insert(win.hwnd, title);
+        }
+
+        if self.group_windows {
+            self.sync_running_windows(windows);
+            return;
+        }
+
+        let mut consumed = vec![false; windows.len()];
+        let mut pinned_updates: Vec<(usize, bool, u32, Vec<isize>, String)> = Vec::new();
+        for (item_idx, item) in self.items.iter().enumerate() {
+            if !item.pinned {
+                continue;
+            }
+            let matched = windows.iter().enumerate().find(|(w_idx, w)| {
+                !consumed[*w_idx]
+                    && ((!item.executable.is_empty()
+                        && item.executable.eq_ignore_ascii_case(&w.executable))
+                        || item.id.eq_ignore_ascii_case(&w.executable))
+            });
+            if let Some((w_idx, w)) = matched {
+                consumed[w_idx] = true;
+                pinned_updates.push((item_idx, true, 0, vec![w.hwnd], w.exe_path.clone()));
+            } else {
+                pinned_updates.push((item_idx, false, 0, Vec::new(), String::new()));
+            }
+        }
+
+        for (item_idx, running, badge_count, hwnds, exe_path) in pinned_updates {
+            let need_icon = self.items[item_idx].icon.is_none();
+            let primary_hwnd = hwnds.first().copied().unwrap_or(0);
+            let resolved_path = if !exe_path.is_empty() {
+                exe_path.clone()
+            } else {
+                self.items[item_idx].exe_path.clone()
+            };
+            let extracted = if need_icon && (primary_hwnd != 0 || !resolved_path.is_empty()) {
+                self.resolve_icon(primary_hwnd, &resolved_path)
+            } else {
+                None
+            };
+            let item = &mut self.items[item_idx];
+            item.running = running;
+            item.badge_count = badge_count;
+            item.hwnds = hwnds;
+            if !exe_path.is_empty() {
+                item.exe_path = exe_path;
+            }
+            if item.icon.is_none() {
+                item.icon = extracted;
+            }
+        }
+
+        let remaining: Vec<DockItem> = windows
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, w)| {
+                if !consumed[idx] {
+                    Some(w.to_dock_item())
+                } else {
+                    None
+                }
+            })
+            .take(MAX_RUNNING_GROUPS)
+            .collect();
+
+        self.items
+            .retain(|it| it.pinned || remaining.iter().any(|g| g.id == it.id));
+
+        for group in remaining {
+            let primary_hwnd = group.hwnds.first().copied().unwrap_or(0);
+            if let Some(existing_idx) = self.items.iter().position(|it| it.id == group.id) {
+                let need_icon = self.items[existing_idx].icon.is_none();
+                let icon = if need_icon {
+                    self.resolve_icon(primary_hwnd, &group.exe_path)
+                } else {
+                    None
+                };
+                let existing = &mut self.items[existing_idx];
+                existing.label = group.label;
+                existing.executable = group.executable;
+                if !group.exe_path.is_empty() {
+                    existing.exe_path = group.exe_path;
+                }
+                existing.running = true;
+                existing.badge_count = 0;
+                existing.hwnds = group.hwnds;
+                if existing.icon.is_none() {
+                    existing.icon = icon;
+                }
+            } else {
+                let mut new_item = group;
+                new_item.icon = self.resolve_icon(primary_hwnd, &new_item.exe_path);
+                self.items.push(new_item);
+            }
+        }
+
+        self.partition_pinned_first();
+
+        if let Some(idx) = self.hovered_index {
+            if idx >= self.items.len() {
+                self.hovered_index = None;
+                if matches!(
+                    self.hovered_target,
+                    Some(DockHoverTarget::App(_) | DockHoverTarget::WindowPreview(_, _))
+                ) {
+                    self.set_hover_target(None);
+                }
+            }
+        }
+    }
+
     /// Synchronizes live [`RunningWindow`]s into `DockBar`, grouping by `executable.to_lowercase()`,
     /// preserving pinned items and spring hover state, and caching extracted icons once per `exe_path`.
     pub fn sync_running_windows(&mut self, windows: &[RunningWindow]) {
+        for win in windows {
+            let title = if !win.title.trim().is_empty() {
+                win.title.clone()
+            } else {
+                win.app_name.clone()
+            };
+            self.window_titles.insert(win.hwnd, title);
+        }
         let groups = group_running_windows(windows);
         let mut consumed = vec![false; groups.len()];
 
@@ -1355,6 +1634,25 @@ impl DockBar {
                 | DockAction::CloseContextMenu,
             )
             | None => {
+                if let Some(app_idx) = self.active_preview_app_index() {
+                    let dock = self.dock_rect(surface_rect);
+                    if let Some(strip) = self.preview_strip_rect(surface_rect, dock) {
+                        if let Some(hwnd) = self.hit_test_preview_window(x, y, surface_rect) {
+                            self.hovered_index = Some(app_idx);
+                            self.set_hover_target(Some(DockHoverTarget::WindowPreview(app_idx, hwnd)));
+                            self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                            self.recompute_hidden();
+                            return None;
+                        }
+                        if point_in_rect(x, y, strip) {
+                            self.hovered_index = Some(app_idx);
+                            self.set_hover_target(Some(DockHoverTarget::App(app_idx)));
+                            self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+                            self.recompute_hidden();
+                            return None;
+                        }
+                    }
+                }
                 let dock = self.dock_rect(surface_rect);
                 let rects = self.item_rects(surface_rect);
                 let in_items_band = !rects.is_empty() && {
@@ -1432,6 +1730,9 @@ impl DockBar {
     }
 
     fn has_pinned_running_divider(&self) -> bool {
+        if !self.show_dividers {
+            return false;
+        }
         let has_pinned = self.items.iter().any(|it| it.pinned);
         let has_unpinned = self.items.iter().any(|it| !it.pinned);
         has_pinned && has_unpinned
@@ -1442,7 +1743,7 @@ impl DockBar {
     }
 
     fn tray_btn_width(&self) -> f32 {
-        TRAY_BTN_BASE_WIDTH
+        self.dock_size.util_btn_size()
     }
 
     fn layout_items_internal(&self, dock_x: f32, dock_y: f32) -> (Vec<Rect>, Option<f32>, f32) {
@@ -1451,7 +1752,9 @@ impl DockBar {
         }
         let has_group_div = self.has_pinned_running_divider();
         let pinned_len = self.pinned_count();
-        let bottom_y = dock_y + DOCK_HEIGHT - 10.5;
+        let dock_h = self.dock_size.dock_height();
+        let base_icon = self.dock_size.icon_base_size();
+        let bottom_y = dock_y + dock_h - (dock_h - base_icon) * 0.58;
         let mut rects = Vec::with_capacity(self.items.len());
         let mut pinned_div_x = None;
         let mut cursor = 0.0_f32;
@@ -1463,7 +1766,7 @@ impl DockBar {
                 cursor += DIVIDER_GAP + DIVIDER_WIDTH;
             }
             let scale = item.hover_scale.value.clamp(0.8, MAX_MAGNIFY_SCALE + 0.05);
-            let size = ICON_BASE_SIZE * scale;
+            let size = base_icon * scale;
             let bounce_offset = if item.bounce_timer > 0.0 {
                 let p = 1.0 - (item.bounce_timer / BOUNCE_DURATION_SECS).clamp(0.0, 1.0);
                 item.bounce_amplitude * (p * std::f32::consts::PI).sin()
@@ -1485,25 +1788,42 @@ impl DockBar {
         }
         let has_group_div = self.has_pinned_running_divider();
         let pinned_len = self.pinned_count();
+        let base_icon = self.dock_size.icon_base_size();
         let mut cursor = 0.0_f32;
         for (i, item) in self.items.iter().enumerate() {
             if has_group_div && i == pinned_len {
                 cursor += DIVIDER_GAP + DIVIDER_WIDTH;
             }
             let scale = item.hover_scale.value.clamp(0.8, MAX_MAGNIFY_SCALE + 0.05);
-            cursor += ICON_BASE_SIZE * scale + ITEM_GAP;
+            cursor += base_icon * scale + ITEM_GAP;
         }
         (cursor - ITEM_GAP).max(0.0)
     }
 
     fn utilities_width(&self) -> f32 {
-        if self.ai_enabled {
-            // Hime AI + Spaces + Notifications + Show Hidden Icons
-            UTIL_BTN_SIZE * 3.0 + self.tray_btn_width() + ITEM_GAP * 3.0
-        } else {
-            // Spaces + Notifications + Show Hidden Icons
-            UTIL_BTN_SIZE * 2.0 + self.tray_btn_width() + ITEM_GAP * 2.0
+        let btn = self.dock_size.util_btn_size();
+        let mut count = 0usize;
+        if self.ai_enabled && self.show_hime_ai {
+            count += 1;
         }
+        if self.show_desktop {
+            count += 1;
+        }
+        if self.show_notifications {
+            count += 1;
+        }
+        if self.show_tray {
+            count += 1;
+        }
+        if count == 0 {
+            0.0
+        } else {
+            (count as f32) * btn + ((count - 1) as f32) * ITEM_GAP
+        }
+    }
+
+    fn has_utils_divider(&self) -> bool {
+        self.show_dividers && !self.items.is_empty() && self.utilities_width() > 0.0
     }
 
     /// Returns the `80px x 4px` bottom-edge wake reference rectangle used when `is_hidden`.
@@ -1527,16 +1847,19 @@ impl DockBar {
     /// Computes the outer dock container rectangle centered horizontally inside `surface_rect`.
     pub fn dock_rect(&self, surface_rect: Rect) -> Rect {
         let items_w = self.items_span_width();
-        let divider_extra = if self.items.is_empty() {
-            0.0
-        } else {
+        let util_w = self.utilities_width();
+        let divider_extra = if self.has_utils_divider() {
             DIVIDER_GAP * 2.0 + DIVIDER_WIDTH
+        } else if !self.items.is_empty() && util_w > 0.0 {
+            ITEM_GAP
+        } else {
+            0.0
         };
-        let width = DOCK_PAD_X * 2.0 + items_w + divider_extra + self.utilities_width();
-        let height = DOCK_HEIGHT;
+        let width = (DOCK_PAD_X * 2.0 + items_w + divider_extra + util_w).max(40.0);
+        let height = self.dock_size.dock_height();
         let x = surface_rect.x + (surface_rect.width - width) * 0.5;
         let vis_offset = (1.0 - self.visibility.value.clamp(0.0, 1.0)) * 28.0;
-        let hide_offset = (1.0 - self.show_progress.value.clamp(0.0, 1.0)) * (DOCK_HEIGHT + 16.0);
+        let hide_offset = (1.0 - self.show_progress.value.clamp(0.0, 1.0)) * (height + 16.0);
         let y = surface_rect.y + surface_rect.height - height - 8.0 + vis_offset + hide_offset;
         Rect::new(x, y, width, height)
     }
@@ -1552,34 +1875,51 @@ impl DockBar {
         let (rects, pinned_div_x, items_w) = self.layout_items_internal(dock.x, dock.y);
         let _ = rects;
 
-        let (utils_div_x, utils_start_x) = if self.items.is_empty() {
+        let util_w = self.utilities_width();
+        let (utils_div_x, mut cursor_x) = if self.items.is_empty() {
             (None, dock.x + DOCK_PAD_X)
-        } else {
+        } else if self.has_utils_divider() {
             let div_x = dock.x + DOCK_PAD_X + items_w + DIVIDER_GAP;
             (Some(div_x), div_x + DIVIDER_WIDTH + DIVIDER_GAP)
-        };
-
-        let btn_y = dock.y + (dock.height - UTIL_BTN_SIZE) * 0.5;
-        let (ai_rect, spaces_x) = if self.ai_enabled {
-            let r = Rect::new(utils_start_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
-            (Some(r), r.x + r.width + ITEM_GAP)
+        } else if util_w > 0.0 {
+            (None, dock.x + DOCK_PAD_X + items_w + ITEM_GAP)
         } else {
-            (None, utils_start_x)
+            (None, dock.x + DOCK_PAD_X + items_w)
         };
 
-        let spaces_rect = Rect::new(spaces_x, btn_y, UTIL_BTN_SIZE, UTIL_BTN_SIZE);
-        let notif_rect = Rect::new(
-            spaces_rect.x + spaces_rect.width + ITEM_GAP,
-            btn_y,
-            UTIL_BTN_SIZE,
-            UTIL_BTN_SIZE,
-        );
-        let tray_rect = Rect::new(
-            notif_rect.x + notif_rect.width + ITEM_GAP,
-            btn_y,
-            self.tray_btn_width(),
-            UTIL_BTN_SIZE,
-        );
+        let btn_size = self.dock_size.util_btn_size();
+        let btn_y = dock.y + (dock.height - btn_size) * 0.5;
+
+        let ai_rect = if self.ai_enabled && self.show_hime_ai {
+            let r = Rect::new(cursor_x, btn_y, btn_size, btn_size);
+            cursor_x += btn_size + ITEM_GAP;
+            Some(r)
+        } else {
+            None
+        };
+
+        let spaces_rect = if self.show_desktop {
+            let r = Rect::new(cursor_x, btn_y, btn_size, btn_size);
+            cursor_x += btn_size + ITEM_GAP;
+            r
+        } else {
+            Rect::new(cursor_x, btn_y, 0.0, 0.0)
+        };
+
+        let notif_rect = if self.show_notifications {
+            let r = Rect::new(cursor_x, btn_y, btn_size, btn_size);
+            cursor_x += btn_size + ITEM_GAP;
+            r
+        } else {
+            Rect::new(cursor_x, btn_y, 0.0, 0.0)
+        };
+
+        let tray_rect = if self.show_tray {
+            Rect::new(cursor_x, btn_y, self.tray_btn_width(), btn_size)
+        } else {
+            Rect::new(cursor_x, btn_y, 0.0, 0.0)
+        };
+
         UtilityLayout {
             pinned_div_x,
             utils_div_x,
@@ -1851,15 +2191,106 @@ impl DockBar {
                 return Some(DockAction::ToggleAiDrawer);
             }
         }
-        if point_in_rect(x, y, util.spaces_rect) {
+        if self.show_desktop && util.spaces_rect.width > 0.0 && point_in_rect(x, y, util.spaces_rect) {
             Some(DockAction::ToggleSpaces)
-        } else if point_in_rect(x, y, util.notif_rect) {
+        } else if self.show_notifications && util.notif_rect.width > 0.0 && point_in_rect(x, y, util.notif_rect) {
             Some(DockAction::OpenNotifications)
-        } else if point_in_rect(x, y, util.tray_rect) {
+        } else if self.show_tray && util.tray_rect.width > 0.0 && point_in_rect(x, y, util.tray_rect) {
             Some(DockAction::ToggleTray)
         } else {
             None
         }
+    }
+
+    fn active_preview_app_index(&self) -> Option<usize> {
+        if self.context_menu.is_some() || self.spaces_open || self.tray_open {
+            return None;
+        }
+        let idx = match self.hovered_target {
+            Some(DockHoverTarget::App(idx)) | Some(DockHoverTarget::WindowPreview(idx, _)) => idx,
+            _ => return None,
+        };
+        let item = self.items.get(idx)?;
+        if item.running && !item.hwnds.is_empty() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Computes the horizontal window-preview strip rectangle above the hovered running app icon.
+    pub fn preview_strip_rect(&self, surface_rect: Rect, dock: Rect) -> Option<Rect> {
+        if self.is_hidden && self.show_progress.value <= 0.08 {
+            return None;
+        }
+        let idx = self.active_preview_app_index()?;
+        let item = self.items.get(idx)?;
+        let count = item.hwnds.len();
+        if count == 0 {
+            return None;
+        }
+        let max_w = (surface_rect.width - 12.0).max(112.0);
+        let max_cards_w = (max_w - PREVIEW_STRIP_PAD * 2.0 - (count.saturating_sub(1) as f32) * PREVIEW_CARD_GAP)
+            .max(96.0);
+        let card_w = PREVIEW_CARD_WIDTH.min(max_cards_w / (count as f32)).max(96.0);
+        let width = (PREVIEW_STRIP_PAD * 2.0
+            + (count as f32) * card_w
+            + (count.saturating_sub(1) as f32) * PREVIEW_CARD_GAP)
+            .min(max_w);
+        let height = PREVIEW_STRIP_PAD * 2.0 + PREVIEW_CARD_HEIGHT;
+
+        let item_rects = self.item_rects(surface_rect);
+        let anchor_cx = item_rects
+            .get(idx)
+            .map(|r| r.x + r.width * 0.5)
+            .unwrap_or(dock.x + dock.width * 0.5);
+        let max_x = (surface_rect.x + surface_rect.width - width - 6.0).max(surface_rect.x + 6.0);
+        let x = (anchor_cx - width * 0.5).clamp(surface_rect.x + 6.0, max_x);
+        let y = (dock.y - height - 10.0).max(surface_rect.y + 4.0);
+        Some(Rect::new(x, y, width, height))
+    }
+
+    /// Computes `(hwnd, card_rect)` for every active window in the hovered Dock app's preview strip.
+    pub fn preview_card_rects(&self, surface_rect: Rect, dock: Rect) -> Vec<(isize, Rect)> {
+        let Some(strip) = self.preview_strip_rect(surface_rect, dock) else {
+            return Vec::new();
+        };
+        let Some(idx) = self.active_preview_app_index() else {
+            return Vec::new();
+        };
+        let Some(item) = self.items.get(idx) else {
+            return Vec::new();
+        };
+        let count = item.hwnds.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let avail_w = (strip.width - PREVIEW_STRIP_PAD * 2.0 - (count.saturating_sub(1) as f32) * PREVIEW_CARD_GAP)
+            .max(40.0);
+        let card_w = (avail_w / (count as f32)).max(40.0);
+        let card_y = strip.y + PREVIEW_STRIP_PAD;
+        item.hwnds
+            .iter()
+            .enumerate()
+            .map(|(i, &hwnd)| {
+                let cx = strip.x + PREVIEW_STRIP_PAD + (i as f32) * (card_w + PREVIEW_CARD_GAP);
+                (hwnd, Rect::new(cx, card_y, card_w, PREVIEW_CARD_HEIGHT))
+            })
+            .collect()
+    }
+
+    /// Hit-tests `(x, y)` against the open hover preview cards, returning the clicked `hwnd`.
+    pub fn hit_test_preview_window(&self, x: f32, y: f32, surface_rect: Rect) -> Option<isize> {
+        if (!self.visible && self.visibility.value <= 0.01)
+            || (self.is_hidden && self.show_progress.value <= 0.2)
+        {
+            return None;
+        }
+        let dock = self.dock_rect(surface_rect);
+        self.preview_card_rects(surface_rect, dock)
+            .into_iter()
+            .find(|(_, r)| point_in_rect(x, y, *r))
+            .map(|(hwnd, _)| hwnd)
     }
 
     /// Right-click hit test: opens the Windows-style options menu above Dock app or hidden tray icons.
@@ -1939,7 +2370,9 @@ impl DockBar {
                 let r = *rects.get(idx)?;
                 (r, item.label.clone())
             }
-            DockHoverTarget::ContextMenuItem(_) | DockHoverTarget::HandleStrip => return None,
+            DockHoverTarget::ContextMenuItem(_)
+            | DockHoverTarget::HandleStrip
+            | DockHoverTarget::WindowPreview(_, _) => return None,
         };
 
         let text_w = (label.chars().count() as f32 * 6.8 + 18.0).clamp(54.0, 210.0);
@@ -2008,9 +2441,10 @@ impl DockBar {
         let tray_flyout = self.tray_flyout_rect(surface_rect, dock);
         let spaces_flyout = self.spaces_flyout_rect(surface_rect, dock);
         let menu_rect = self.context_menu_rect(surface_rect, dock);
+        let preview_strip = self.preview_strip_rect(surface_rect, dock);
         let tooltip = self.active_tooltip(surface_rect, dock);
 
-        let mut regions = Vec::with_capacity(4 + rects.len());
+        let mut regions = Vec::with_capacity(5 + rects.len());
         regions.push((dock, CORNER_RADIUS));
         for r in &rects {
             if r.y < dock.y {
@@ -2028,6 +2462,9 @@ impl DockBar {
         }
         if let Some(mr) = menu_rect {
             regions.push((mr, 12.0));
+        }
+        if let Some(ps) = preview_strip {
+            regions.push((ps, 12.0));
         }
         set_dock_regions(surface, &regions);
 
@@ -2371,6 +2808,84 @@ impl DockBar {
             }
         }
 
+        // Single & Multi-window hover preview cards above hovered running Dock icon
+        if let (Some(strip), Some(app_idx)) = (preview_strip, self.active_preview_app_index()) {
+            surface.draw_liquid_glass_panel(
+                strip,
+                LiquidGlassStyle::regular(12.0)
+                    .with_shadow(12.0, 3.0, palette.shadow_color.a * alpha),
+            )?;
+            let app_item = self.items.get(app_idx);
+            let cards = self.preview_card_rects(surface_rect, dock);
+            for (hwnd, card_rect) in cards {
+                let card_hovered = matches!(
+                    self.hovered_target,
+                    Some(DockHoverTarget::WindowPreview(_, h)) if h == hwnd
+                );
+                surface.draw_liquid_glass_button(card_rect, 8.0, None, card_hovered, false)?;
+
+                let preview = self.window_previews.get(&hwnd);
+                let title = preview
+                    .map(|p| p.title.as_str())
+                    .filter(|t| !t.trim().is_empty())
+                    .or_else(|| self.window_titles.get(&hwnd).map(|s| s.as_str()))
+                    .or_else(|| app_item.map(|it| it.label.as_str()))
+                    .unwrap_or("Window");
+
+                let title_rect = Rect::new(
+                    card_rect.x + 8.0,
+                    card_rect.y + 5.0,
+                    (card_rect.width - 16.0).max(20.0),
+                    16.0,
+                );
+                surface.draw_text(
+                    title,
+                    title_rect,
+                    10.5,
+                    palette.text_primary.with_alpha_mul(alpha),
+                    TextAlign::Leading,
+                )?;
+
+                let thumb_rect = Rect::new(
+                    card_rect.x + 6.0,
+                    card_rect.y + 24.0,
+                    (card_rect.width - 12.0).max(24.0),
+                    (card_rect.height - 30.0).max(24.0),
+                );
+                if let Some(thumb) = preview.and_then(|p| p.thumbnail.as_ref()) {
+                    surface.draw_bgra_bitmap(
+                        thumb_rect,
+                        thumb.width,
+                        thumb.height,
+                        &thumb.bgra_premul,
+                        6.0,
+                    )?;
+                } else {
+                    surface.fill_rounded_rect(
+                        thumb_rect,
+                        6.0,
+                        palette.control_fill.with_alpha_mul(0.55 * alpha),
+                    )?;
+                    if let Some(ref icon_rgba) = app_item.and_then(|it| it.icon.as_ref()) {
+                        let icon_s = 28.0_f32.min(thumb_rect.width * 0.5).min(thumb_rect.height * 0.5);
+                        let icon_r = Rect::new(
+                            thumb_rect.x + (thumb_rect.width - icon_s) * 0.5,
+                            thumb_rect.y + (thumb_rect.height - icon_s) * 0.5,
+                            icon_s,
+                            icon_s,
+                        );
+                        surface.draw_bgra_bitmap(
+                            icon_r,
+                            icon_rgba.width,
+                            icon_rgba.height,
+                            &icon_rgba.bgra_premul,
+                            6.0,
+                        )?;
+                    }
+                }
+            }
+        }
+
         // Cardless text-only hover hint (no background box/card; GPU surface renders via companion ULW_ALPHA overlay)
         if !surface.is_gpu_acrylic() {
             if let Some((mut tip_rect, label)) = tooltip {
@@ -2410,57 +2925,63 @@ impl DockBar {
         }
 
         // 2. Spaces (Windows Virtual Desktop Switcher) button (`SfSymbol::Desktops`, frameless at rest)
-        surface.draw_icon_button(util.spaces_rect, 8.0, spaces_hovered, false, self.spaces_open)?;
-        let spaces_icon = Rect::new(
-            util.spaces_rect.x + 8.0,
-            util.spaces_rect.y + 8.0,
-            util.spaces_rect.width - 16.0,
-            util.spaces_rect.height - 16.0,
-        );
-        surface.draw_sf_symbol(
-            spaces_icon,
-            SfSymbol::Desktops,
-            palette
-                .text_primary
-                .with_alpha_mul(if spaces_hovered || self.spaces_open { 1.0 } else { 0.88 } * alpha),
-            1.5,
-        )?;
+        if self.show_desktop && util.spaces_rect.width > 0.0 {
+            surface.draw_icon_button(util.spaces_rect, 8.0, spaces_hovered, false, self.spaces_open)?;
+            let spaces_icon = Rect::new(
+                util.spaces_rect.x + 8.0,
+                util.spaces_rect.y + 8.0,
+                util.spaces_rect.width - 16.0,
+                util.spaces_rect.height - 16.0,
+            );
+            surface.draw_sf_symbol(
+                spaces_icon,
+                SfSymbol::Desktops,
+                palette
+                    .text_primary
+                    .with_alpha_mul(if spaces_hovered || self.spaces_open { 1.0 } else { 0.88 } * alpha),
+                1.5,
+            )?;
+        }
 
         // 3. Open Windows Notifications Center button (`SfSymbol::Bell`)
-        surface.draw_icon_button(util.notif_rect, 8.0, notif_hovered, false, false)?;
-        let notif_icon = Rect::new(
-            util.notif_rect.x + 8.0,
-            util.notif_rect.y + 8.0,
-            util.notif_rect.width - 16.0,
-            util.notif_rect.height - 16.0,
-        );
-        surface.draw_sf_symbol(
-            notif_icon,
-            SfSymbol::Bell,
-            palette
-                .text_primary
-                .with_alpha_mul(if notif_hovered { 1.0 } else { 0.88 } * alpha),
-            1.45,
-        )?;
+        if self.show_notifications && util.notif_rect.width > 0.0 {
+            surface.draw_icon_button(util.notif_rect, 8.0, notif_hovered, false, false)?;
+            let notif_icon = Rect::new(
+                util.notif_rect.x + 8.0,
+                util.notif_rect.y + 8.0,
+                util.notif_rect.width - 16.0,
+                util.notif_rect.height - 16.0,
+            );
+            surface.draw_sf_symbol(
+                notif_icon,
+                SfSymbol::Bell,
+                palette
+                    .text_primary
+                    .with_alpha_mul(if notif_hovered { 1.0 } else { 0.88 } * alpha),
+                1.45,
+            )?;
+        }
 
         // 4. Windows "Show hidden icons" overflow toggle (`ChevronUp`/`ChevronDown`, no count badge)
-        let tray_r = util.tray_rect;
-        surface.draw_icon_button(tray_r, 8.0, tray_hovered, false, self.tray_open)?;
-        let tray_fg = palette
-            .text_primary
-            .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
-        let chevron_sym = if self.tray_open {
-            SfSymbol::ChevronDown
-        } else {
-            SfSymbol::ChevronUp
-        };
-        let icon_r = Rect::new(
-            tray_r.x + 9.0,
-            tray_r.y + 9.0,
-            tray_r.width - 18.0,
-            tray_r.height - 18.0,
-        );
-        surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.55)?;
+        if self.show_tray && util.tray_rect.width > 0.0 {
+            let tray_r = util.tray_rect;
+            surface.draw_icon_button(tray_r, 8.0, tray_hovered, false, self.tray_open)?;
+            let tray_fg = palette
+                .text_primary
+                .with_alpha_mul(if tray_hovered || self.tray_open { 1.0 } else { 0.88 } * alpha);
+            let chevron_sym = if self.tray_open {
+                SfSymbol::ChevronDown
+            } else {
+                SfSymbol::ChevronUp
+            };
+            let icon_r = Rect::new(
+                tray_r.x + 9.0,
+                tray_r.y + 9.0,
+                tray_r.width - 18.0,
+                tray_r.height - 18.0,
+            );
+            surface.draw_sf_symbol(icon_r, chevron_sym, tray_fg, 1.55)?;
+        }
 
         Ok(())
     }
@@ -3334,5 +3855,132 @@ mod tests {
             .expect("tooltip spec present");
         assert_eq!(tip_label, "Notifications");
         assert!(tip_alpha > 0.5);
+    }
+
+    #[test]
+    fn dock_config_toggles_size_and_grouping_work_across_layout_and_hit_test() {
+        let mut dock = DockBar::new();
+        let surface_rect = Rect::new(0.0, 0.0, 1280.0, 260.0);
+
+        dock.set_dock_size(DockSize::Small);
+        assert_eq!(dock.dock_rect(surface_rect).height, 44.0);
+        dock.set_dock_size(DockSize::Large);
+        assert_eq!(dock.dock_rect(surface_rect).height, 64.0);
+        dock.set_dock_size(DockSize::Medium);
+        assert_eq!(dock.dock_rect(surface_rect).height, 54.0);
+
+        let windows = vec![
+            RunningWindow {
+                hwnd: 101,
+                title: "Tab A - Edge".into(),
+                app_name: "Microsoft Edge".into(),
+                executable: "msedge.exe".into(),
+                exe_path: String::new(),
+            },
+            RunningWindow {
+                hwnd: 102,
+                title: "Tab B - Edge".into(),
+                app_name: "Microsoft Edge".into(),
+                executable: "msedge.exe".into(),
+                exe_path: String::new(),
+            },
+        ];
+
+        dock.set_group_windows(true);
+        dock.sync_running_windows_configured(&windows);
+        assert_eq!(dock.items().len(), 1);
+        assert_eq!(dock.items()[0].hwnds, vec![101, 102]);
+
+        dock.set_group_windows(false);
+        dock.sync_running_windows_configured(&windows);
+        assert_eq!(dock.items().len(), 2);
+        assert_eq!(dock.items()[0].hwnds, vec![101]);
+        assert_eq!(dock.items()[1].hwnds, vec![102]);
+
+        dock.set_show_dividers(false);
+        dock.set_show_hime_ai(false);
+        dock.set_show_desktop(false);
+        dock.set_show_notifications(false);
+        dock.set_show_tray(false);
+
+        let rect = dock.dock_rect(surface_rect);
+        let util = dock.utility_rects(rect);
+        assert!(util.utils_div_x.is_none());
+        assert!(util.ai_rect.is_none());
+        assert_eq!(util.spaces_rect.width, 0.0);
+        assert_eq!(util.notif_rect.width, 0.0);
+        assert_eq!(util.tray_rect.width, 0.0);
+    }
+
+    #[test]
+    fn multi_window_hover_previews_layout_clamping_and_hit_test_work() {
+        let mut dock = DockBar::new();
+        let surface_rect = Rect::new(0.0, 0.0, 900.0, 260.0);
+        let windows = vec![
+            RunningWindow {
+                hwnd: 201,
+                title: "Doc 1".into(),
+                app_name: "Notepad".into(),
+                executable: "notepad.exe".into(),
+                exe_path: String::new(),
+            },
+            RunningWindow {
+                hwnd: 202,
+                title: "Doc 2".into(),
+                app_name: "Notepad".into(),
+                executable: "notepad.exe".into(),
+                exe_path: String::new(),
+            },
+            RunningWindow {
+                hwnd: 203,
+                title: "Doc 3".into(),
+                app_name: "Notepad".into(),
+                executable: "notepad.exe".into(),
+                exe_path: String::new(),
+            },
+        ];
+        dock.sync_running_windows_configured(&windows);
+        dock.set_window_previews(vec![
+            WindowPreviewEntry {
+                hwnd: 201,
+                title: "Doc 1".into(),
+                thumbnail: None,
+            },
+            WindowPreviewEntry {
+                hwnd: 202,
+                title: "Doc 2".into(),
+                thumbnail: Some(IconRgba {
+                    width: 2,
+                    height: 2,
+                    bgra_premul: vec![0xFF; 16],
+                }),
+            },
+            WindowPreviewEntry {
+                hwnd: 203,
+                title: "Doc 3".into(),
+                thumbnail: None,
+            },
+        ]);
+
+        dock.set_hovered(Some(0));
+        let dock_rect = dock.dock_rect(surface_rect);
+        let strip = dock
+            .preview_strip_rect(surface_rect, dock_rect)
+            .expect("preview strip");
+        assert!(strip.x >= surface_rect.x);
+        assert!(strip.x + strip.width <= surface_rect.x + surface_rect.width);
+
+        let cards = dock.preview_card_rects(surface_rect, dock_rect);
+        assert_eq!(cards.len(), 3);
+        let (hwnd2, card2) = cards[1];
+        assert_eq!(hwnd2, 202);
+        assert_eq!(
+            dock.hit_test_preview_window(
+                card2.x + card2.width * 0.5,
+                card2.y + card2.height * 0.5,
+                surface_rect
+            ),
+            Some(202)
+        );
     }
 }

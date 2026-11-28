@@ -2139,6 +2139,196 @@ fn composite_windows_below(
     }
 }
 
+/// Captured RGBA window thumbnail produced by [`capture_window_thumbnail`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThumbnailRgba {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+struct OwnedDc(HDC);
+
+impl OwnedDc {
+    fn new_compatible() -> Option<Self> {
+        let dc = unsafe { CreateCompatibleDC(None) };
+        (!dc.is_invalid()).then_some(Self(dc))
+    }
+}
+
+impl Drop for OwnedDc {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+}
+
+struct OwnedDib {
+    dc: HDC,
+    hbmp: HBITMAP,
+    prev_obj: HGDIOBJ,
+    bits: *mut u8,
+    byte_len: usize,
+}
+
+impl OwnedDib {
+    fn create(dc: HDC, width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut raw_bits: *mut c_void = std::ptr::null_mut();
+        let hbmp = unsafe {
+            CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut raw_bits, None, 0)
+        }
+        .ok()?;
+        if hbmp.is_invalid() || raw_bits.is_null() {
+            if !hbmp.is_invalid() {
+                unsafe {
+                    let _ = DeleteObject(HGDIOBJ(hbmp.0));
+                }
+            }
+            return None;
+        }
+        let prev_obj = unsafe { SelectObject(dc, HGDIOBJ(hbmp.0)) };
+        let byte_len = (width as usize) * (height as usize) * 4;
+        Some(Self {
+            dc,
+            hbmp,
+            prev_obj,
+            bits: raw_bits as *mut u8,
+            byte_len,
+        })
+    }
+}
+
+impl Drop for OwnedDib {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.prev_obj.is_invalid() {
+                let _ = SelectObject(self.dc, self.prev_obj);
+            }
+            if !self.hbmp.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.hbmp.0));
+            }
+        }
+    }
+}
+
+fn thumbnail_target_size(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> Option<(u32, u32)> {
+    if src_w == 0 || src_h == 0 || max_w == 0 || max_h == 0 {
+        return None;
+    }
+    let scale = (max_w as f32 / src_w as f32)
+        .min(max_h as f32 / src_h as f32)
+        .min(1.0);
+    let dst_w = ((src_w as f32 * scale).round() as u32).clamp(1, max_w);
+    let dst_h = ((src_h as f32 * scale).round() as u32).clamp(1, max_h);
+    Some((dst_w, dst_h))
+}
+
+fn bgra_to_rgba_opaque(bgra: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for px in bgra.chunks_exact(4) {
+        rgba.push(px[2]);
+        rgba.push(px[1]);
+        rgba.push(px[0]);
+        rgba.push(255);
+    }
+    rgba
+}
+
+/// Captures a scaled RGBA thumbnail of `hwnd` using `PrintWindow` + `StretchBlt` with RAII GDI cleanup.
+pub fn capture_window_thumbnail(hwnd: isize, max_w: u32, max_h: u32) -> Option<ThumbnailRgba> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn PrintWindow(hwnd: HWND, hdcblt: HDC, nflags: u32) -> BOOL;
+    }
+    const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+
+    if hwnd == 0 || max_w == 0 || max_h == 0 {
+        return None;
+    }
+    let target = HWND(hwnd as *mut c_void);
+    unsafe {
+        if !IsWindow(Some(target)).as_bool() || IsIconic(target).as_bool() {
+            return None;
+        }
+    }
+
+    let mut rect = RECT::default();
+    let got_rect = unsafe {
+        DwmGetWindowAttribute(
+            target,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_ok()
+            || GetWindowRect(target, &mut rect).is_ok()
+    };
+    if !got_rect {
+        return None;
+    }
+
+    let src_w = (rect.right - rect.left).max(0) as u32;
+    let src_h = (rect.bottom - rect.top).max(0) as u32;
+    let (dst_w, dst_h) = thumbnail_target_size(src_w, src_h, max_w, max_h)?;
+
+    let src_dc = OwnedDc::new_compatible()?;
+    let _src_dib = OwnedDib::create(src_dc.0, src_w, src_h)?;
+    let printed = unsafe {
+        PrintWindow(target, src_dc.0, PW_RENDERFULLCONTENT).as_bool()
+            || PrintWindow(target, src_dc.0, 0).as_bool()
+    };
+    if !printed {
+        return None;
+    }
+
+    let dst_dc = OwnedDc::new_compatible()?;
+    let dst_dib = OwnedDib::create(dst_dc.0, dst_w, dst_h)?;
+    unsafe {
+        let _ = SetStretchBltMode(dst_dc.0, HALFTONE);
+        if !StretchBlt(
+            dst_dc.0,
+            0,
+            0,
+            dst_w as i32,
+            dst_h as i32,
+            Some(src_dc.0),
+            0,
+            0,
+            src_w as i32,
+            src_h as i32,
+            SRCCOPY,
+        )
+        .as_bool()
+        {
+            return None;
+        }
+        let bgra = std::slice::from_raw_parts(dst_dib.bits, dst_dib.byte_len);
+        Some(ThumbnailRgba {
+            width: dst_w,
+            height: dst_h,
+            rgba: bgra_to_rgba_opaque(bgra),
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sample_wallpaper_slice(
     wp_bytes: &[u8],
@@ -2428,5 +2618,19 @@ mod tests {
         let h3 = visible_window_layout_hash((10, 0, 200, 100), &[]);
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn window_thumbnail_helpers_and_invalid_hwnd_guards() {
+        assert_eq!(capture_window_thumbnail(0, 240, 160), None);
+        assert_eq!(capture_window_thumbnail(12345, 0, 160), None);
+        assert_eq!(capture_window_thumbnail(12345, 240, 0), None);
+
+        assert_eq!(thumbnail_target_size(1920, 1080, 240, 160), Some((240, 135)));
+        assert_eq!(thumbnail_target_size(100, 80, 240, 160), Some((100, 80)));
+        assert_eq!(thumbnail_target_size(0, 100, 240, 160), None);
+
+        let rgba = bgra_to_rgba_opaque(&[10, 20, 30, 0, 40, 50, 60, 128]);
+        assert_eq!(rgba, vec![30, 20, 10, 255, 60, 50, 40, 255]);
     }
 }

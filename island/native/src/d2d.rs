@@ -1070,6 +1070,7 @@ pub enum SfSymbol {
     Refresh,
     StopCircle,
     PrivateMask,
+    AudioMixer,
 }
 
 /// Cached 32-bit premultiplied BGRA DIB section backing an `UpdateLayeredWindow` surface.
@@ -1264,13 +1265,8 @@ fn apply_dwm_acrylic_blur(hwnd: HWND, gradient_aabbggrr: u32) -> bool {
     const ACCENT_ENABLE_ACRYLICBLURBEHIND: i32 = 4;
     const ACCENT_FLAG_ALLOW_GRADIENT: u32 = 2;
 
-    #[link(name = "user32")]
-    extern "system" {
-        fn SetWindowCompositionAttribute(
-            hwnd: HWND,
-            data: *mut WindowCompositionAttribData,
-        ) -> i32;
-    }
+    type SetWindowCompositionAttributeFn =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
 
     let mut policy = WindowAccentPolicy {
         accent_state: ACCENT_ENABLE_ACRYLICBLURBEHIND,
@@ -1283,7 +1279,21 @@ fn apply_dwm_acrylic_blur(hwnd: HWND, gradient_aabbggrr: u32) -> bool {
         data: (&mut policy as *mut WindowAccentPolicy).cast(),
         size_of_data: std::mem::size_of::<WindowAccentPolicy>(),
     };
-    unsafe { SetWindowCompositionAttribute(hwnd, &mut data) != 0 }
+    unsafe {
+        let Ok(user32) = windows::Win32::System::LibraryLoader::GetModuleHandleW(
+            windows::core::w!("user32.dll"),
+        ) else {
+            return false;
+        };
+        let Some(proc_addr) = windows::Win32::System::LibraryLoader::GetProcAddress(
+            user32,
+            windows::core::s!("SetWindowCompositionAttribute"),
+        ) else {
+            return false;
+        };
+        let func: SetWindowCompositionAttributeFn = std::mem::transmute(proc_addr);
+        func(hwnd, &mut data) != 0
+    }
 }
 
 #[derive(Clone)]
@@ -3612,6 +3622,17 @@ impl NativeSurface {
                 self.stroke_circle(cx + s * 0.18, cy + s * 0.16, lr, color, sw)?;
                 self.draw_line(cx - s * 0.05, cy + s * 0.16, cx + s * 0.05, cy + s * 0.16, color, sw)?;
             }
+            SfSymbol::AudioMixer => {
+                // 3-slider vertical audio mixer icon
+                let cols = [(-0.26_f32, 0.08_f32), (0.0, -0.14), (0.26, 0.02)];
+                for (dx, ky) in cols {
+                    let x = cx + s * dx;
+                    let knob_y = cy + s * ky;
+                    self.draw_line(x, cy - s * 0.34, x, knob_y - s * 0.09, color, sw)?;
+                    self.draw_line(x, knob_y + s * 0.09, x, cy + s * 0.34, color, sw)?;
+                    self.stroke_circle(x, knob_y, s * 0.075, color, sw)?;
+                }
+            }
         }
         Ok(())
     }
@@ -5296,6 +5317,7 @@ mod tests {
             SfSymbol::Refresh,
             SfSymbol::StopCircle,
             SfSymbol::PrivateMask,
+            SfSymbol::AudioMixer,
         ];
         surface.begin_draw();
         for (idx, &sym) in symbols.iter().enumerate() {

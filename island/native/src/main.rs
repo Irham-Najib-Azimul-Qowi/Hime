@@ -60,10 +60,12 @@ use hime_island_native::ai_drawer::{
     DrawerAction, DrawerAttachment, DrawerTab,
 };
 use hime_island_native::d2d::{
-    self, HimeExpression, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind, WM_SURFACE_EVENT,
+    self, HimeExpression, IconRgba, NativeSurface, Rect, SurfaceEvent, SurfaceEventKind,
+    WM_SURFACE_EVENT,
 };
 use hime_island_native::dock::{
-    ContextMenuOp, DockAction, DockBar, DockItem, DockMode, SpaceEntry, TrayEntry,
+    ContextMenuOp, DockAction, DockBar, DockItem, DockMode, DockSize, SpaceEntry, TrayEntry,
+    WindowPreviewEntry,
 };
 use hime_island_native::hotkey::{self, HotkeyAction, HotkeyManager};
 use hime_island_native::ipc_client::{
@@ -84,7 +86,7 @@ use hime_island_native::notch_workspace::{
     TaskStatus, TaskTabFilter,
 };
 use hime_island_native::os_shell;
-use hime_island_native::overlay::{sanitize_device_name, DualEdgeOverlays};
+use hime_island_native::overlay::{sanitize_device_name, AudioDeviceSlot, DualEdgeOverlays};
 use hime_island_native::settings_store::{NativeSettings, SettingsStore};
 use hime_island_native::settings_ui::{
     ApiProfileConfig, NotchMode, ProviderPreset, SettingsAction, SettingsControl, SettingsPanel,
@@ -92,7 +94,8 @@ use hime_island_native::settings_ui::{
 };
 use hime_island_native::shelf::{FileShelf, ShelfItemKind};
 use hime_island_native::telemetry::{
-    self, NetworkKind, RunningWindow, TelemetryHandle, TelemetrySnapshot, WifiNetworkInfo,
+    self, AudioDeviceVolume, NetworkKind, RunningWindow, TelemetryHandle, TelemetrySnapshot,
+    WifiNetworkInfo,
 };
 use hime_island_native::theme::ColorThemeMode;
 
@@ -102,12 +105,14 @@ const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
 const WM_EXTRA_SURFACE_EVENT: u32 = WM_APP + 3;
 const WM_BACKDROP_READY: u32 = WM_APP + 4;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
 const TIMER_ANIM_ID: usize = 1;
 const ANIM_INTERVAL_ACTIVE_MS: u32 = 16;
 const ANIM_INTERVAL_EDGE_POLL_MS: u32 = 50;
 const ANIM_INTERVAL_IDLE_MS: u32 = 250;
 
 const OVERLAY_DIP_WIDTH: f32 = 80.0;
+const LEFT_OVERLAY_DIP_WIDTH: f32 = 250.0;
 const OVERLAY_DIP_HEIGHT: f32 = 240.0;
 const DOCK_DIP_WIDTH: f32 = 1080.0;
 const DOCK_DIP_HEIGHT: f32 = 304.0;
@@ -131,7 +136,7 @@ static EXTRA_EVENT_TARGET: AtomicIsize = AtomicIsize::new(0);
 #[derive(Debug, Clone, Copy)]
 enum ExtraSurfaceEventKind {
     RightButtonUp { x: f32, y: f32 },
-    MouseWheel { delta_steps: f32 },
+    MouseWheel { delta_x: f32, delta_y: f32 },
     MouseLeave,
 }
 
@@ -206,8 +211,26 @@ unsafe extern "system" fn extra_surface_wnd_proc(
         }
         WM_MOUSEWHEEL => {
             let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
-            let delta_steps = raw_delta as f32 / 120.0;
-            push_extra_event(key, ExtraSurfaceEventKind::MouseWheel { delta_steps });
+            let delta_y = raw_delta as f32 / 120.0;
+            push_extra_event(
+                key,
+                ExtraSurfaceEventKind::MouseWheel {
+                    delta_x: 0.0,
+                    delta_y,
+                },
+            );
+            return LRESULT(0);
+        }
+        WM_MOUSEHWHEEL => {
+            let raw_delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+            let delta_x = raw_delta as f32 / 120.0;
+            push_extra_event(
+                key,
+                ExtraSurfaceEventKind::MouseWheel {
+                    delta_x,
+                    delta_y: 0.0,
+                },
+            );
             return LRESULT(0);
         }
         _ => {}
@@ -247,6 +270,11 @@ enum IpcBgResult {
     WifiScan(Vec<WifiNetworkInfo>),
     WifiConnect(String, Result<(), String>),
     TrayEntries(Vec<TrayEntry>),
+    DockPreviews {
+        app_idx: usize,
+        previews: Vec<WindowPreviewEntry>,
+    },
+    AudioDevices(Vec<AudioDeviceVolume>),
     VirtualDesktops(Vec<os_shell::VirtualDesktopInfo>),
     MediaTimeline {
         title: String,
@@ -594,7 +622,6 @@ fn run_dev_workspace_check(
 
 enum OsCommand {
     SetVolume { percent: u8, unmute: bool },
-    ToggleMute,
     SetBrightness(u8),
     MediaPlayPause,
     MediaNext,
@@ -614,6 +641,15 @@ enum OsCommand {
     CloseWindows(Vec<isize>),
     EndTaskWindows(Vec<isize>),
     EndTaskPids(Vec<u32>),
+    CaptureDockPreviews {
+        app_idx: usize,
+        items: Vec<(isize, String)>,
+    },
+    ScanAudioDevices,
+    SetAudioDeviceVolume {
+        device_id: String,
+        percent: u8,
+    },
 }
 
 struct OsWorker {
@@ -650,6 +686,8 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
         // Coalesce rapid Volume/Brightness drag updates to the latest value.
         let mut latest_volume: Option<(u8, bool)> = None;
         let mut latest_brightness: Option<u8> = None;
+        let mut latest_previews: Option<(usize, Vec<(isize, String)>)> = None;
+        let mut latest_device_volume: Option<(String, u8)> = None;
         let mut ordered = Vec::with_capacity(cmds.len());
         for cmd in cmds {
             match cmd {
@@ -658,6 +696,12 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                 }
                 OsCommand::SetBrightness(pct) => {
                     latest_brightness = Some(pct);
+                }
+                OsCommand::CaptureDockPreviews { app_idx, items } => {
+                    latest_previews = Some((app_idx, items));
+                }
+                OsCommand::SetAudioDeviceVolume { device_id, percent } => {
+                    latest_device_volume = Some((device_id, percent));
                 }
                 other => ordered.push(other),
             }
@@ -672,12 +716,24 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
         if let Some(pct) = latest_brightness {
             let _ = telemetry::set_brightness(pct);
         }
+        if let Some((device_id, percent)) = latest_device_volume {
+            let _ = telemetry::set_audio_device_volume(&device_id, percent);
+        }
+        if let Some((app_idx, items)) = latest_previews {
+            let previews = items
+                .into_iter()
+                .map(|(hwnd, title)| WindowPreviewEntry {
+                    hwnd,
+                    title,
+                    thumbnail: os_shell::capture_window_thumbnail(hwnd, 200, 125)
+                        .map(thumbnail_to_icon_rgba),
+                })
+                .collect();
+            let _ = result_tx.send(IpcBgResult::DockPreviews { app_idx, previews });
+        }
 
         for cmd in ordered {
             match cmd {
-                OsCommand::ToggleMute => {
-                    let _ = telemetry::toggle_mute();
-                }
                 OsCommand::MediaPlayPause => {
                     if let Some(session) = get_smtc_session(&mut smtc_mgr) {
                         let _ = session.TryTogglePlayPauseAsync();
@@ -774,7 +830,14 @@ fn run_os_worker(rx: mpsc::Receiver<OsCommand>, result_tx: mpsc::Sender<IpcBgRes
                 OsCommand::EndTaskPids(pids) => {
                     os_shell::terminate_processes_by_pid(&pids);
                 }
-                OsCommand::SetVolume { .. } | OsCommand::SetBrightness(_) => {}
+                OsCommand::ScanAudioDevices => {
+                    let devices = telemetry::enumerate_audio_devices();
+                    let _ = result_tx.send(IpcBgResult::AudioDevices(devices));
+                }
+                OsCommand::SetVolume { .. }
+                | OsCommand::SetBrightness(_)
+                | OsCommand::CaptureDockPreviews { .. }
+                | OsCommand::SetAudioDeviceVolume { .. } => {}
             }
         }
     }
@@ -1210,6 +1273,8 @@ struct AppShell {
     workspace_checked_once: bool,
     dragging_notch: bool,
     dragging_notch_slider: bool,
+    dragging_mixer_device: Option<String>,
+    last_preview_hover_idx: Option<usize>,
     drag_moved: bool,
     drag_start_cursor: (i32, i32),
     notch_leave_at: Option<Instant>,
@@ -1342,6 +1407,8 @@ impl AppShell {
             workspace_checked_once: false,
             dragging_notch: false,
             dragging_notch_slider: false,
+            dragging_mixer_device: None,
+            last_preview_hover_idx: None,
             drag_moved: false,
             drag_start_cursor: (0, 0),
             notch_leave_at: None,
@@ -1858,10 +1925,18 @@ impl AppShell {
         // 2. Dock settings
         self.dock.set_ai_enabled(norm.hime_ai_enabled);
         self.dock.set_mode(parse_dock_mode(&norm.dock_mode));
+        self.dock.set_show_dividers(norm.dock_show_dividers);
+        self.dock.set_show_hime_ai(norm.dock_show_hime_ai);
+        self.dock.set_show_desktop(norm.dock_show_desktop);
+        self.dock.set_show_tray(norm.dock_show_tray);
+        self.dock.set_show_notifications(norm.dock_show_notifications);
+        self.dock.set_dock_size(parse_dock_size(&norm.dock_size));
+        self.dock.set_group_windows(norm.dock_group_windows);
         let pinned_items = build_pinned_dock_items(&norm.dock_pinned);
         self.dock.set_pinned_apps(pinned_items);
         if !self.last_running_windows.is_empty() {
-            self.dock.sync_running_windows(&self.last_running_windows);
+            self.dock
+                .sync_running_windows_configured(&self.last_running_windows);
         }
         if self.dock.visible != norm.dock_enabled {
             if norm.dock_enabled {
@@ -2144,7 +2219,8 @@ impl AppShell {
         // Sync running windows & tray count into DockBar
         if dock_data_changed {
             self.last_running_windows = snap.running_windows.clone();
-            self.dock.sync_running_windows(&snap.running_windows);
+            self.dock
+                .sync_running_windows_configured(&snap.running_windows);
             let effective_tray = snap.tray_count.max(self.dock.tray_items().len() as u32);
             self.dock.set_system_tray_count(effective_tray);
             if tray_count_changed {
@@ -2364,7 +2440,14 @@ impl AppShell {
                         .dock
                         .context_menu_rect(surf_rect, dock_rect)
                         .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
-                    let over_flyout = over_tray_flyout || over_spaces_flyout || over_context_menu;
+                    let over_preview_strip = self
+                        .dock
+                        .preview_strip_rect(surf_rect, dock_rect)
+                        .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                    let over_flyout = over_tray_flyout
+                        || over_spaces_flyout
+                        || over_context_menu
+                        || over_preview_strip;
                     let over_any = over_dock || over_flyout;
                     let keep_awake =
                         over_any || (self.dock.mode != DockMode::Fixed && over_wake);
@@ -2452,7 +2535,14 @@ impl AppShell {
                             .dock
                             .context_menu_rect(surf_rect, dock_rect)
                             .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
-                        let over_flyout = over_tray_flyout || over_spaces_flyout || over_context_menu;
+                        let over_preview_strip = self
+                            .dock
+                            .preview_strip_rect(surf_rect, dock_rect)
+                            .is_some_and(|r| os_shell::is_point_in_rect(local_dx, local_dy, r));
+                        let over_flyout = over_tray_flyout
+                            || over_spaces_flyout
+                            || over_context_menu
+                            || over_preview_strip;
 
                         if !over_dock && !over_flyout && !over_wake {
                             if self.dock.tray_open {
@@ -2526,7 +2616,12 @@ impl AppShell {
                 ((s.dpi() / 96.0).max(0.5), w, h)
             } else {
                 let s = (self.notch_surface.dpi() / 96.0).max(0.5);
-                (s, OVERLAY_DIP_WIDTH, OVERLAY_DIP_HEIGHT)
+                let dip_w = if is_left {
+                    LEFT_OVERLAY_DIP_WIDTH
+                } else {
+                    OVERLAY_DIP_WIDTH
+                };
+                (s, dip_w, OVERLAY_DIP_HEIGHT)
             }
         };
         let (ox, oy, _, _) = if is_left {
@@ -2878,21 +2973,43 @@ impl AppShell {
                 self.render_all();
                 self.ensure_fast_timer(ctrl_hwnd);
             }
-            ExtraSurfaceEventKind::MouseWheel { delta_steps, .. } => {
-                if self.notch.is_expanded && delta_steps.abs() > 0.01 {
-                    let shift_held =
-                        unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
-                    if shift_held || self.notch.active_panel != NotchPanel::CommandCenter {
-                        let act = if delta_steps > 0.0 {
-                            NotchAction::PrevPanel
-                        } else {
-                            NotchAction::NextPanel
-                        };
-                        self.execute_notch_action(act, ctrl_hwnd);
+            ExtraSurfaceEventKind::MouseWheel { delta_x, delta_y } => {
+                if self.notch.is_expanded && (delta_x.abs() > 0.01 || delta_y.abs() > 0.01) {
+                    let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
+                    let (nw, nh) = self.notch_surface.dip_size();
+                    let surf_rect = Rect::new(0.0, 0.0, nw, nh);
+                    let primary = os_shell::primary_screen_bounds();
+                    let (nx, ny, _, _) = notch_surface_bounds(self.notch.edge, primary, scale);
+                    let (lx, ly) = os_shell::cursor_position()
+                        .map(|(cx, cy)| ((cx - nx) as f32 / scale, (cy - ny) as f32 / scale))
+                        .unwrap_or((-1.0, -1.0));
+                    if self
+                        .notch
+                        .handle_header_scroll_at(lx, ly, surf_rect, delta_x, delta_y)
+                    {
+                        self.refresh_active_notch_panel();
                         self.dirty_notch = true;
                         self.update_surface_click_through();
                         self.render_all();
                         self.ensure_fast_timer(ctrl_hwnd);
+                    } else {
+                        let shift_held =
+                            unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
+                        let delta_steps = if delta_y.abs() > 0.01 { delta_y } else { delta_x };
+                        if (shift_held || self.notch.active_panel != NotchPanel::CommandCenter)
+                            && delta_steps.abs() > 0.01
+                        {
+                            let act = if delta_steps > 0.0 {
+                                NotchAction::PrevPanel
+                            } else {
+                                NotchAction::NextPanel
+                            };
+                            self.execute_notch_action(act, ctrl_hwnd);
+                            self.dirty_notch = true;
+                            self.update_surface_click_through();
+                            self.render_all();
+                            self.ensure_fast_timer(ctrl_hwnd);
+                        }
                     }
                 }
             }
@@ -3214,6 +3331,35 @@ impl AppShell {
                 let prev_hover = self.dock.hovered_index();
                 let prev_has_hover = self.dock.has_hover();
                 let next_hover = self.dock.set_hovered_at(x / scale, y / scale, rect);
+                if next_hover != self.last_preview_hover_idx {
+                    self.last_preview_hover_idx = next_hover;
+                    if let Some(idx) = next_hover {
+                        if let Some(item) = self.dock.items().get(idx) {
+                            if !item.hwnds.is_empty() {
+                                let items: Vec<(isize, String)> = item
+                                    .hwnds
+                                    .iter()
+                                    .map(|&hwnd| {
+                                        let title = self
+                                            .last_running_windows
+                                            .iter()
+                                            .find(|w| w.hwnd == hwnd)
+                                            .map(|w| w.title.clone())
+                                            .filter(|t| !t.trim().is_empty())
+                                            .unwrap_or_else(|| item.label.clone());
+                                        (hwnd, title)
+                                    })
+                                    .collect();
+                                self.os_worker.send(OsCommand::CaptureDockPreviews {
+                                    app_idx: idx,
+                                    items,
+                                });
+                            }
+                        }
+                    } else {
+                        self.dock.set_window_previews(Vec::new());
+                    }
+                }
                 if prev_hidden != self.dock.is_hidden
                     || prev_hover != next_hover
                     || prev_has_hover != self.dock.has_hover()
@@ -3223,7 +3369,14 @@ impl AppShell {
                 }
             }
             SurfaceEventKind::LeftButtonDown { x, y } => {
-                if let Some(act) = self.dock.hit_test_action(x / scale, y / scale, rect) {
+                let lx = x / scale;
+                let ly = y / scale;
+                if let Some(hwnd) = self.dock.hit_test_preview_window(lx, ly, rect) {
+                    focus_hwnd(hwnd);
+                    self.dock.clear_hover();
+                    self.last_preview_hover_idx = None;
+                    render_now = true;
+                } else if let Some(act) = self.dock.hit_test_action(lx, ly, rect) {
                     self.execute_dock_action(act, ctrl_hwnd);
                     render_now = true;
                 } else if self.dock.context_menu.is_some() {
@@ -3250,6 +3403,7 @@ impl AppShell {
             ExtraSurfaceEventKind::MouseLeave => {
                 self.dock.clear_hover();
                 self.dock.set_edge_hovered(false);
+                self.last_preview_hover_idx = None;
                 self.dirty_dock = true;
                 self.update_surface_click_through();
                 self.render_all();
@@ -3432,6 +3586,13 @@ impl AppShell {
             SurfaceEventKind::MouseMove { x, y } => {
                 let lx = x / scale;
                 let ly = y / scale;
+                if is_left {
+                    let icon_hov = self.overlays.volume.hit_test_icon_button(lx, ly, surf_rect);
+                    if self.overlays.volume.icon_hovered != icon_hov {
+                        self.overlays.volume.set_icon_hovered(icon_hov);
+                        render_now = true;
+                    }
+                }
                 let hud = if is_left {
                     &mut self.overlays.volume
                 } else {
@@ -3442,8 +3603,49 @@ impl AppShell {
                     render_now = true;
                 }
                 if hud.is_dragging {
-                    if let Some(ratio) = hud.hit_test_slider(lx, ly, surf_rect) {
-                        self.apply_overlay_slider_ratio(is_left, ratio);
+                    if is_left {
+                        if let Some(ref drag_dev_id) = self.dragging_mixer_device {
+                            let target_pct = self
+                                .overlays
+                                .volume
+                                .hit_test_device_slider(lx, ly, surf_rect)
+                                .map(|(_, p)| p)
+                                .or_else(|| {
+                                    self.overlays
+                                        .volume
+                                        .device_slider_rects(surf_rect)
+                                        .into_iter()
+                                        .find(|(id, _)| id == drag_dev_id)
+                                        .map(|(_, bar)| {
+                                            let r = ((lx - bar.x) / bar.width.max(1.0)).clamp(0.0, 1.0);
+                                            (r * 100.0).round() as u8
+                                        })
+                                });
+                            if let Some(pct) = target_pct {
+                                if let Some(slot) = self
+                                    .overlays
+                                    .volume
+                                    .devices
+                                    .iter_mut()
+                                    .find(|d| d.id == *drag_dev_id)
+                                {
+                                    slot.percent = pct;
+                                    slot.muted = pct == 0;
+                                }
+                                self.os_worker.send(OsCommand::SetAudioDeviceVolume {
+                                    device_id: drag_dev_id.clone(),
+                                    percent: pct,
+                                });
+                                render_now = true;
+                            }
+                        } else if let Some(ratio) =
+                            self.overlays.volume.hit_test_slider(lx, ly, surf_rect)
+                        {
+                            self.apply_overlay_slider_ratio(true, ratio);
+                            render_now = true;
+                        }
+                    } else if let Some(ratio) = hud.hit_test_slider(lx, ly, surf_rect) {
+                        self.apply_overlay_slider_ratio(false, ratio);
                         render_now = true;
                     }
                 }
@@ -3451,38 +3653,61 @@ impl AppShell {
             SurfaceEventKind::LeftButtonDown { x, y } => {
                 let lx = x / scale;
                 let ly = y / scale;
-                if is_left && self.overlays.volume.hit_test_mute_button(lx, ly, surf_rect) {
-                    let muted = self.overlays.volume.toggle_mute();
-                    self.last_volume_write_at = Some(Instant::now());
-                    self.os_worker.send(OsCommand::ToggleMute);
-                    self.notch
-                        .set_volume(self.overlays.volume.percent as f32 / 100.0, muted);
-                    self.dirty_notch = true;
+                if is_left && self.overlays.volume.hit_test_icon_button(lx, ly, surf_rect) {
+                    let open = self.overlays.volume.toggle_mixer();
+                    if open {
+                        self.os_worker.send(OsCommand::ScanAudioDevices);
+                    }
                     render_now = true;
-                } else {
-                    let hit_ratio = if is_left {
-                        self.overlays.volume.hit_test_slider(lx, ly, surf_rect)
-                    } else {
-                        self.overlays.brightness.hit_test_slider(lx, ly, surf_rect)
-                    };
-                    if let Some(ratio) = hit_ratio {
-                        if is_left {
-                            self.overlays.volume.set_dragging(true);
-                        } else {
-                            self.overlays.brightness.set_dragging(true);
+                } else if is_left {
+                    if let Some((dev_id, pct)) =
+                        self.overlays.volume.hit_test_device_slider(lx, ly, surf_rect)
+                    {
+                        if let Some(slot) = self
+                            .overlays
+                            .volume
+                            .devices
+                            .iter_mut()
+                            .find(|d| d.id == dev_id)
+                        {
+                            slot.percent = pct;
+                            slot.muted = pct == 0;
                         }
+                        self.overlays.volume.set_dragging(true);
+                        self.dragging_mixer_device = Some(dev_id.clone());
                         unsafe {
                             let _ = SetCapture(surface_hwnd);
                         }
-                        self.apply_overlay_slider_ratio(is_left, ratio);
+                        self.os_worker.send(OsCommand::SetAudioDeviceVolume {
+                            device_id: dev_id,
+                            percent: pct,
+                        });
+                        render_now = true;
+                    } else if let Some(ratio) =
+                        self.overlays.volume.hit_test_slider(lx, ly, surf_rect)
+                    {
+                        self.dragging_mixer_device = None;
+                        self.overlays.volume.set_dragging(true);
+                        unsafe {
+                            let _ = SetCapture(surface_hwnd);
+                        }
+                        self.apply_overlay_slider_ratio(true, ratio);
                         render_now = true;
                     } else {
-                        let hud = if is_left {
-                            &mut self.overlays.volume
-                        } else {
-                            &mut self.overlays.brightness
-                        };
-                        hud.set_hovered(true);
+                        self.overlays.volume.set_hovered(true);
+                        render_now = true;
+                    }
+                } else {
+                    if let Some(ratio) = self.overlays.brightness.hit_test_slider(lx, ly, surf_rect)
+                    {
+                        self.overlays.brightness.set_dragging(true);
+                        unsafe {
+                            let _ = SetCapture(surface_hwnd);
+                        }
+                        self.apply_overlay_slider_ratio(false, ratio);
+                        render_now = true;
+                    } else {
+                        self.overlays.brightness.set_hovered(true);
                         render_now = true;
                     }
                 }
@@ -3493,6 +3718,9 @@ impl AppShell {
                 } else {
                     self.overlays.brightness.is_dragging
                 };
+                if is_left {
+                    self.dragging_mixer_device = None;
+                }
                 if was_dragging {
                     if is_left {
                         self.overlays.volume.set_dragging(false);
@@ -3534,12 +3762,17 @@ impl AppShell {
                 } else {
                     &mut self.overlays.brightness
                 };
+                if is_left && hud.icon_hovered {
+                    hud.set_icon_hovered(false);
+                    render_now = true;
+                }
                 if !hud.is_dragging {
                     hud.set_hovered(false);
                     render_now = true;
                 }
             }
-            ExtraSurfaceEventKind::MouseWheel { delta_steps, .. } => {
+            ExtraSurfaceEventKind::MouseWheel { delta_x, delta_y } => {
+                let delta_steps = if delta_y.abs() > 0.01 { delta_y } else { delta_x };
                 if delta_steps.abs() > 0.01 {
                     if is_left {
                         let was_muted = self.overlays.volume.muted;
@@ -4329,6 +4562,26 @@ impl AppShell {
                     }
                     self.dirty_dock = true;
                 }
+                IpcBgResult::DockPreviews { app_idx, previews } => {
+                    if self.dock.hovered_index() == Some(app_idx) {
+                        self.dock.set_window_previews(previews);
+                        self.dirty_dock = true;
+                    }
+                }
+                IpcBgResult::AudioDevices(devices) => {
+                    let slots = devices
+                        .into_iter()
+                        .map(|d| AudioDeviceSlot {
+                            id: d.id,
+                            name: d.name,
+                            percent: d.volume_percent,
+                            muted: d.muted,
+                            is_default: d.is_default,
+                        })
+                        .collect();
+                    self.overlays.volume.set_devices(slots);
+                    self.dirty_overlay_left = true;
+                }
                 IpcBgResult::VirtualDesktops(spaces) => {
                     let mapped: Vec<SpaceEntry> = spaces
                         .into_iter()
@@ -4756,7 +5009,9 @@ impl AppShell {
             || set_anim
             || drw_anim
             || watch_outside_click
-            || self.notch.has_active_banner();
+            || self.notch.has_active_banner()
+            || self.overlays.volume.is_adjusting()
+            || self.overlays.brightness.is_adjusting();
 
         self.sync_backdrop_worker_targets();
         self.sync_overlay_visibility();
@@ -5123,6 +5378,14 @@ fn parse_dock_mode(raw: &str) -> DockMode {
     }
 }
 
+fn parse_dock_size(raw: &str) -> DockSize {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "small" => DockSize::Small,
+        "large" => DockSize::Large,
+        _ => DockSize::Medium,
+    }
+}
+
 fn capitalize_label(mode: &str) -> String {
     match mode.trim().to_ascii_lowercase().as_str() {
         "smart" => "Smart".to_string(),
@@ -5144,6 +5407,13 @@ fn apply_native_settings_to_panel(ns: &NativeSettings, panel: &mut SettingsPanel
     panel.state.dock_mode = norm.dock_mode.clone();
     panel.state.dock_pinned = norm.dock_pinned.clone();
     panel.state.dock_win_number_enabled = norm.dock_win_number_enabled;
+    panel.state.dock_show_dividers = norm.dock_show_dividers;
+    panel.state.dock_show_hime_ai = norm.dock_show_hime_ai;
+    panel.state.dock_show_desktop = norm.dock_show_desktop;
+    panel.state.dock_show_tray = norm.dock_show_tray;
+    panel.state.dock_show_notifications = norm.dock_show_notifications;
+    panel.state.dock_size = norm.dock_size.clone();
+    panel.state.dock_group_windows = norm.dock_group_windows;
     panel.state.volume_overlay_enabled = norm.volume_overlay_enabled;
     panel.state.brightness_overlay_enabled = norm.brightness_overlay_enabled;
     panel.state.color_theme = norm.color_theme.clone();
@@ -5178,6 +5448,13 @@ fn extract_native_settings_from_panel(panel: &SettingsPanel) -> NativeSettings {
         dock_mode: panel.state.dock_mode.clone(),
         dock_pinned: panel.state.dock_pinned.clone(),
         dock_win_number_enabled: panel.state.dock_win_number_enabled,
+        dock_show_dividers: panel.state.dock_show_dividers,
+        dock_show_hime_ai: panel.state.dock_show_hime_ai,
+        dock_show_desktop: panel.state.dock_show_desktop,
+        dock_show_tray: panel.state.dock_show_tray,
+        dock_show_notifications: panel.state.dock_show_notifications,
+        dock_size: panel.state.dock_size.clone(),
+        dock_group_windows: panel.state.dock_group_windows,
         volume_overlay_enabled: panel.state.volume_overlay_enabled,
         brightness_overlay_enabled: panel.state.brightness_overlay_enabled,
         color_theme: panel.state.color_theme.clone(),
@@ -5504,9 +5781,28 @@ fn dock_surface_bounds(screen: os_shell::ScreenBounds, scale: f32) -> (i32, i32,
 }
 
 fn left_overlay_bounds(screen: os_shell::ScreenBounds, scale: f32) -> (i32, i32, u32, u32) {
-    let w = (OVERLAY_DIP_WIDTH * scale).round() as u32;
+    let w = (LEFT_OVERLAY_DIP_WIDTH * scale).round() as u32;
     let h = (OVERLAY_DIP_HEIGHT * scale).round() as u32;
     (screen.x, screen.y + (screen.height - h as i32) / 2, w, h)
+}
+
+fn thumbnail_to_icon_rgba(thumb: os_shell::ThumbnailRgba) -> IconRgba {
+    let mut bgra_premul = thumb.rgba;
+    for px in bgra_premul.chunks_exact_mut(4) {
+        px.swap(0, 2);
+        let a = px[3];
+        if a < 255 {
+            let af = a as u16;
+            px[0] = ((px[0] as u16 * af + 127) / 255) as u8;
+            px[1] = ((px[1] as u16 * af + 127) / 255) as u8;
+            px[2] = ((px[2] as u16 * af + 127) / 255) as u8;
+        }
+    }
+    IconRgba {
+        width: thumb.width,
+        height: thumb.height,
+        bgra_premul,
+    }
 }
 
 fn right_overlay_bounds(screen: os_shell::ScreenBounds, scale: f32) -> (i32, i32, u32, u32) {
@@ -6040,7 +6336,7 @@ mod tests {
 
         let (olx, oly, olw, olh) = left_overlay_bounds(screen, 1.0);
         assert_eq!(olx, 0);
-        assert_eq!(olw, 80);
+        assert_eq!(olw, 250);
         assert_eq!(olh, 240);
         assert_eq!(oly, (1080 - 240) / 2);
 
