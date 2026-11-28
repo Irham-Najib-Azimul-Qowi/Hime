@@ -22,7 +22,7 @@ use crate::d2d::{
     SfSymbol, TextAlign,
 };
 use crate::telemetry::{group_running_windows, RunningWindow};
-use crate::theme::{AdaptivePalette, Color, CORNER_RADIUS};
+use crate::theme::{AdaptivePalette, Color, ThemePolarity, CORNER_RADIUS};
 
 const DOCK_HEIGHT: f32 = 54.0;
 const ICON_BASE_SIZE: f32 = 36.0;
@@ -2970,22 +2970,6 @@ impl DockBar {
                         6.0,
                         palette.control_fill.with_alpha_mul(0.55 * alpha),
                     )?;
-                    if let Some(ref icon_rgba) = app_item.and_then(|it| it.icon.as_ref()) {
-                        let icon_s = 28.0_f32.min(thumb_rect.width * 0.5).min(thumb_rect.height * 0.5);
-                        let icon_r = Rect::new(
-                            thumb_rect.x + (thumb_rect.width - icon_s) * 0.5,
-                            thumb_rect.y + (thumb_rect.height - icon_s) * 0.5,
-                            icon_s,
-                            icon_s,
-                        );
-                        surface.draw_bgra_bitmap(
-                            icon_r,
-                            icon_rgba.width,
-                            icon_rgba.height,
-                            &icon_rgba.bgra_premul,
-                            6.0,
-                        )?;
-                    }
                 }
             }
         }
@@ -3102,18 +3086,23 @@ pub fn draw_cardless_tooltip_text(
     if a <= 0.01 || label.trim().is_empty() {
         return Ok(());
     }
+    let palette = surface.palette();
+    let shadow_color = match palette.polarity {
+        ThemePolarity::DarkGlass => Color::rgba(0.0, 0.0, 0.0, 0.72 * a),
+        ThemePolarity::LightGlass => Color::rgba(1.0, 1.0, 1.0, 0.72 * a),
+    };
     surface.draw_text_bold(
         label,
         Rect::new(rect.x, rect.y + 1.0, rect.width, rect.height),
         11.5,
-        Color::rgba(0.0, 0.0, 0.0, 0.72 * a),
+        shadow_color,
         TextAlign::Center,
     )?;
     surface.draw_text_bold(
         label,
         rect,
         11.5,
-        Color::rgba(1.0, 1.0, 1.0, 0.96 * a),
+        palette.text_primary.with_alpha_mul(0.96 * a),
         TextAlign::Center,
     )
 }
@@ -3793,7 +3782,7 @@ mod tests {
 
     #[test]
     fn adaptive_palette_flips_light_and_dark_glass_and_renders_cleanly() {
-        use crate::theme::{ColorThemeMode, ThemePolarity, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
+        use crate::theme::{ColorThemeMode, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
 
         let surface = match NativeSurface::new("HimeDockAdaptiveTest", -2000, -2000, 1080, 136) {
             Ok(s) => s,
@@ -4142,5 +4131,62 @@ mod tests {
             truncate_single_line("Very Long Window Title Here", 14),
             "Very Long W..."
         );
+    }
+
+    #[test]
+    fn tooltip_and_window_preview_adapt_palette_and_render_cleanly() {
+        use crate::theme::{ColorThemeMode, LIGHT_TEXT_PRIMARY, TEXT_PRIMARY};
+
+        let surface = match NativeSurface::new("HimeDockPreviewContrastTest", -2000, -2000, 900, 260) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut dock = DockBar::new();
+        let mut item = DockItem::new("notepad.exe", "Notepad", "notepad.exe", false);
+        item.running = true;
+        item.hwnds = vec![201, 202];
+        item.icon = Some(IconRgba {
+            width: 2,
+            height: 2,
+            bgra_premul: vec![0x80; 16],
+        });
+        dock.add_item(item);
+        dock.set_window_previews(vec![
+            WindowPreviewEntry {
+                hwnd: 201,
+                title: "A Very Long Window Title That Should Ellipsize".into(),
+                thumbnail: Some(IconRgba {
+                    width: 2,
+                    height: 2,
+                    bgra_premul: vec![0xFF; 16],
+                }),
+            },
+            WindowPreviewEntry {
+                hwnd: 202,
+                title: "Pending Thumbnail".into(),
+                thumbnail: None,
+            },
+        ]);
+        dock.set_hovered(Some(0));
+
+        surface.set_color_theme_mode(ColorThemeMode::Auto);
+        let dark_bgra = vec![0x14, 0x14, 0x16, 0xFF].repeat(32 * 32);
+        surface.set_backdrop_pixels(32, 32, &dark_bgra);
+        assert_eq!(surface.palette().text_primary, TEXT_PRIMARY);
+        surface.begin_draw();
+        dock.render(&surface).expect("DarkGlass preview render");
+        draw_cardless_tooltip_text(&surface, Rect::new(10.0, 10.0, 120.0, 20.0), "Terminal", 1.0)
+            .expect("DarkGlass tooltip render");
+        surface.end_draw_and_present().expect("DarkGlass present");
+
+        let white_bgra = vec![0xFF, 0xFF, 0xFF, 0xFF].repeat(32 * 32);
+        surface.set_backdrop_pixels(32, 32, &white_bgra);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+        assert_eq!(surface.palette().text_primary, LIGHT_TEXT_PRIMARY);
+        surface.begin_draw();
+        dock.render(&surface).expect("LightGlass preview render");
+        draw_cardless_tooltip_text(&surface, Rect::new(10.0, 10.0, 120.0, 20.0), "Terminal", 1.0)
+            .expect("LightGlass tooltip render");
+        surface.end_draw_and_present().expect("LightGlass present");
     }
 }

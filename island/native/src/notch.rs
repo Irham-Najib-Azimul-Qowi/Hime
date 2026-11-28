@@ -22,7 +22,7 @@ use crate::notch_workspace::{
     TasksWorkspaceState, TranslateBannerAction, TranslateBannerState,
 };
 use crate::theme::{
-    AdaptivePalette, Color, CORNER_RADIUS, SAFE_PADDING, TEXT_PRIMARY,
+    AdaptivePalette, Color, ThemePolarity, CORNER_RADIUS, SAFE_PADDING, TEXT_PRIMARY,
 };
 
 const HIDDEN_BAR_THICKNESS: f32 = 3.0;
@@ -117,6 +117,8 @@ pub enum NotchAction {
     CalendarPrevMonth,
     CalendarNextMonth,
     CalendarToday,
+    CalendarSetView(CalendarViewMode),
+    CalendarSelectDay(u8),
     PomodoroStartPause,
     PomodoroReset,
     PomodoroPreset(u16),
@@ -148,12 +150,22 @@ pub enum NotchAction {
     TranslateOpenDrawer,
 }
 
+/// Calendar display mode inside [`NotchPanel::Calendar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CalendarViewMode {
+    #[default]
+    Weekly,
+    Monthly,
+}
+
 /// Network throughput & connectivity state.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct NetStats {
     pub down_kbps: f32,
     pub up_kbps: f32,
     pub is_internet_down: bool,
+    #[serde(default)]
+    pub kind: crate::telemetry::NetworkKind,
 }
 
 /// Battery telemetry state.
@@ -306,6 +318,7 @@ pub struct NotchView {
     pub music_active_lyric_idx: Option<usize>,
     pub music_show_lyrics: bool,
     pub ncm_center_alert: Option<String>,
+    ncm_alert_ttl_secs: f32,
     pub wifi_enabled: bool,
     pub wifi_ssid: Option<String>,
     pub wifi_networks: Vec<WifiNetworkItem>,
@@ -327,6 +340,8 @@ pub struct NotchView {
     pub calendar_today_year: i32,
     pub calendar_today_month: u8,
     pub calendar_today_day: u8,
+    pub calendar_selected_day: u8,
+    pub calendar_view_mode: CalendarViewMode,
     pub pomodoro: PomodoroState,
     pub shelf_items: Vec<ShelfSummaryItem>,
     pub tasks_ws: TasksWorkspaceState,
@@ -383,6 +398,7 @@ impl NotchView {
             music_active_lyric_idx: None,
             music_show_lyrics: false,
             ncm_center_alert: None,
+            ncm_alert_ttl_secs: 0.0,
             wifi_enabled: true,
             wifi_ssid: None,
             wifi_networks: Vec::new(),
@@ -404,6 +420,8 @@ impl NotchView {
             calendar_today_year: today_year,
             calendar_today_month: today_month,
             calendar_today_day: today_day,
+            calendar_selected_day: today_day,
+            calendar_view_mode: CalendarViewMode::Weekly,
             pomodoro: PomodoroState::default(),
             shelf_items: Vec::new(),
             tasks_ws: TasksWorkspaceState::default(),
@@ -724,7 +742,21 @@ impl NotchView {
     }
 
     pub fn set_ncm_center_alert(&mut self, alert: Option<String>) {
-        self.ncm_center_alert = alert.filter(|s| !s.trim().is_empty());
+        let normalized = alert
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                const MAX_CHARS: usize = 36;
+                if s.chars().count() > MAX_CHARS {
+                    let mut out: String = s.chars().take(MAX_CHARS - 1).collect();
+                    out.push('…');
+                    out
+                } else {
+                    s
+                }
+            });
+        self.ncm_alert_ttl_secs = if normalized.is_some() { 4.5 } else { 0.0 };
+        self.ncm_center_alert = normalized;
         self.sync_targets();
     }
 
@@ -761,7 +793,23 @@ impl NotchView {
         let focus_changed = self.focus_ws.tick(dt);
         let proactive_expired = self.proactive_banner.tick(dt);
         let translate_expired = self.translate_banner.tick(dt);
-        if proactive_expired || translate_expired {
+        let mut alert_expired = false;
+        if self.ncm_center_alert.is_some() {
+            if dt > 0.0 && dt.is_finite() {
+                if self.ncm_alert_ttl_secs <= 0.0 {
+                    self.ncm_alert_ttl_secs = 4.5;
+                }
+                self.ncm_alert_ttl_secs -= dt;
+                if self.ncm_alert_ttl_secs <= 0.0 {
+                    self.ncm_alert_ttl_secs = 0.0;
+                    self.ncm_center_alert = None;
+                    alert_expired = true;
+                }
+            }
+        } else {
+            self.ncm_alert_ttl_secs = 0.0;
+        }
+        if proactive_expired || translate_expired || alert_expired {
             self.sync_targets();
         }
         let is_playing = self.music.as_ref().is_some_and(|m| m.is_playing);
@@ -777,6 +825,8 @@ impl NotchView {
             || !self.press_spring.is_settled()
             || pomo_changed
             || focus_changed
+            || alert_expired
+            || self.ncm_center_alert.is_some()
             || self.pomodoro.running
             || (self.focus_ws.status == FocusSessionStatus::Active && !self.focus_ws.emergency_paused)
             || is_playing
@@ -827,6 +877,14 @@ impl NotchView {
             NotchAction::CalendarToday => {
                 self.calendar_year = self.calendar_today_year;
                 self.calendar_month = self.calendar_today_month;
+                self.calendar_selected_day = self.calendar_today_day;
+            }
+            NotchAction::CalendarSetView(mode) => {
+                self.calendar_view_mode = *mode;
+            }
+            NotchAction::CalendarSelectDay(day) => {
+                let max_d = days_in_month(self.calendar_year, self.calendar_month);
+                self.calendar_selected_day = (*day).clamp(1, max_d);
             }
             NotchAction::PomodoroStartPause => self.pomodoro.toggle_start_pause(),
             NotchAction::PomodoroReset => self.pomodoro.reset(),
@@ -1060,6 +1118,15 @@ impl NotchView {
                 }
             }
             BodyLayout::Calendar(cal) => {
+                if point_in_rect(x, y, cal.weekly_btn) {
+                    return Some(NotchAction::CalendarSetView(CalendarViewMode::Weekly));
+                }
+                if point_in_rect(x, y, cal.monthly_btn) {
+                    return Some(NotchAction::CalendarSetView(CalendarViewMode::Monthly));
+                }
+                if point_in_rect(x, y, cal.gear_btn) {
+                    return Some(NotchAction::OpenSettings);
+                }
                 if point_in_rect(x, y, cal.prev_month_btn) {
                     return Some(NotchAction::CalendarPrevMonth);
                 }
@@ -1068,6 +1135,16 @@ impl NotchView {
                 }
                 if point_in_rect(x, y, cal.today_btn) {
                     return Some(NotchAction::CalendarToday);
+                }
+                for (day, rect) in &cal.day_cells {
+                    if point_in_rect(x, y, *rect) {
+                        return Some(NotchAction::CalendarSelectDay(*day));
+                    }
+                }
+                if point_in_rect(x, y, cal.add_reminder_btn)
+                    || point_in_rect(x, y, cal.new_event_btn)
+                {
+                    return Some(NotchAction::ExpandPanel(NotchPanel::Tasks));
                 }
             }
             BodyLayout::Pomodoro(pomo) => {
@@ -1535,36 +1612,11 @@ impl NotchView {
         h: f32,
         percent: u8,
         charging: bool,
-        p: &AdaptivePalette,
+        _p: &AdaptivePalette,
     ) -> Result<()> {
-        let bw = (w - 2.5).max(8.0);
-        let bh = h.max(6.0);
-        let pct = (percent.min(100) as f32) / 100.0;
-        let fill_color = if charging {
-            p.status_green
-        } else if percent <= 20 {
-            p.status_amber
-        } else {
-            p.text_primary
-        };
-        surface.stroke_rounded_rect(Rect::new(x, y, bw, bh), 2.5, p.text_secondary, 1.2)?;
-        let nub_h = (bh * 0.45).max(3.0);
-        surface.fill_rounded_rect(
-            Rect::new(x + bw + 0.5, y + (bh - nub_h) * 0.5, 2.0, nub_h),
-            0.8,
-            p.text_secondary,
-        )?;
-        let pad = 2.0;
-        let max_fill_w = (bw - pad * 2.0).max(1.0);
-        let fill_w = (max_fill_w * pct).max(if percent > 0 { 2.0 } else { 0.0 });
-        if fill_w > 0.0 {
-            surface.fill_rounded_rect(
-                Rect::new(x + pad, y + pad, fill_w, (bh - pad * 2.0).max(2.0)),
-                1.2,
-                fill_color,
-            )?;
-        }
-        Ok(())
+        let size = w.max(h).max(16.0);
+        let cy = y + (h - size) * 0.5;
+        surface.draw_battery_icon(x, cy, size, size, percent, charging)
     }
 
     fn render_top_collapsed(
@@ -1599,30 +1651,39 @@ impl NotchView {
 
         let is_playing = self.music.as_ref().is_some_and(|m| m.is_playing);
         let has_music = self.music.is_some();
-        let has_alert = self.ncm_center_alert.is_some()
-            || self.net.is_internet_down
-            || self.expression != HimeExpression::Netral;
 
         // Left slot: Music visualizer when active, else SfSymbol::Wifi + monochrome speed
         if is_playing {
             let bars = animated_visualizer_bars(self.visualizer_phase);
             self.render_adaptive_visualizer(surface, outer.x + 22.0, outer.y + 10.0, 16.0, &bars, true, p)?;
         } else {
-            let (wifi_sym, wifi_color) = if self.net.is_internet_down {
-                (SfSymbol::WifiOff, p.status_red)
-            } else if !self.wifi_enabled {
-                (SfSymbol::WifiOff, p.text_tertiary)
-            } else {
-                (SfSymbol::Wifi, p.text_primary)
+            let (net_sym, net_color) = match self.net.kind {
+                crate::telemetry::NetworkKind::Ethernet => {
+                    if self.net.is_internet_down {
+                        (SfSymbol::WifiOff, p.status_red)
+                    } else {
+                        (SfSymbol::Ethernet, p.text_primary)
+                    }
+                }
+                crate::telemetry::NetworkKind::Offline => (SfSymbol::WifiOff, p.status_red),
+                crate::telemetry::NetworkKind::Wifi => {
+                    if self.net.is_internet_down {
+                        (SfSymbol::WifiOff, p.status_red)
+                    } else if !self.wifi_enabled {
+                        (SfSymbol::WifiOff, p.text_tertiary)
+                    } else {
+                        (SfSymbol::Wifi, p.text_primary)
+                    }
+                }
             };
             surface.draw_sf_symbol(
-                Rect::new(outer.x + 20.0, outer.y + 11.5, 13.0, 13.0),
-                wifi_sym,
-                wifi_color,
-                1.4,
+                Rect::new(outer.x + 19.0, outer.y + 10.5, 14.5, 14.5),
+                net_sym,
+                net_color,
+                1.75,
             )?;
-            if self.net.is_internet_down {
-                surface.draw_text(
+            if self.net.is_internet_down || self.net.kind == crate::telemetry::NetworkKind::Offline {
+                surface.draw_text_bold(
                     "Offline",
                     Rect::new(outer.x + 37.0, outer.y + 6.0, 68.0, 24.0),
                     10.5,
@@ -1634,20 +1695,20 @@ impl NotchView {
                     Rect::new(outer.x + 36.0, outer.y + 13.5, 9.0, 9.0),
                     SfSymbol::ChevronDown,
                     p.text_secondary,
-                    1.2,
+                    1.45,
                 )?;
-                let speed_rect = Rect::new(outer.x + 47.0, outer.y + 6.0, 62.0, 24.0);
-                surface.draw_text(
+                let speed_rect = Rect::new(outer.x + 47.0, outer.y + 6.0, 64.0, 24.0);
+                surface.draw_text_bold(
                     &format_net_speed(self.net.down_kbps),
                     speed_rect,
                     10.5,
-                    p.text_secondary,
+                    p.text_primary,
                     TextAlign::Leading,
                 )?;
             }
         }
 
-        // Center slot: Pomodoro timer (when active), HimeEyes + alert, or crisp monochrome clock
+        // Center slot: Pomodoro timer (when active), concise alert, or crisp monochrome clock
         let center_rect = Rect::new(
             outer.x + 104.0,
             outer.y + 5.0,
@@ -1667,22 +1728,14 @@ impl NotchView {
                 timer_color,
                 TextAlign::Center,
             )?;
-        } else if has_alert {
-            let eye_cx = if self.ncm_center_alert.is_some() {
-                center_rect.x + 16.0
-            } else {
-                outer.x + outer.width * 0.5
-            };
-            surface.draw_hime_eyes(eye_cx, outer.y + 18.0, 0.85, self.expression, self.blink_progress)?;
-            if let Some(alert) = &self.ncm_center_alert {
-                let msg_rect = Rect::new(
-                    center_rect.x + 32.0,
-                    outer.y + 6.0,
-                    (center_rect.width - 34.0).max(40.0),
-                    24.0,
-                );
-                surface.draw_text(alert, msg_rect, 11.0, p.text_primary, TextAlign::Leading)?;
-            }
+        } else if let Some(alert) = &self.ncm_center_alert {
+            let msg_rect = Rect::new(
+                center_rect.x + 4.0,
+                outer.y + 6.0,
+                (center_rect.width - 8.0).max(40.0),
+                24.0,
+            );
+            surface.draw_text_ellipsis(alert, msg_rect, 11.0, p.text_primary, TextAlign::Center)?;
         } else {
             surface.draw_text_bold(
                 &self.formatted_clock(),
@@ -1749,42 +1802,50 @@ impl NotchView {
             return Ok(());
         }
 
-        let has_alert = self.ncm_center_alert.is_some()
-            || self.net.is_internet_down
-            || self.expression != HimeExpression::Netral;
-
-        let (wifi_sym, wifi_color) = if self.net.is_internet_down {
-            (SfSymbol::WifiOff, p.status_red)
-        } else if !self.wifi_enabled {
-            (SfSymbol::WifiOff, p.text_tertiary)
-        } else {
-            (SfSymbol::Wifi, p.text_primary)
+        let (wifi_sym, wifi_color) = match self.net.kind {
+            crate::telemetry::NetworkKind::Ethernet => {
+                if self.net.is_internet_down {
+                    (SfSymbol::WifiOff, p.status_red)
+                } else {
+                    (SfSymbol::Ethernet, p.text_primary)
+                }
+            }
+            crate::telemetry::NetworkKind::Offline => (SfSymbol::WifiOff, p.status_red),
+            crate::telemetry::NetworkKind::Wifi => {
+                if self.net.is_internet_down {
+                    (SfSymbol::WifiOff, p.status_red)
+                } else if !self.wifi_enabled {
+                    (SfSymbol::WifiOff, p.text_tertiary)
+                } else {
+                    (SfSymbol::Wifi, p.text_primary)
+                }
+            }
         };
         surface.draw_sf_symbol(
-            Rect::new(cx - 6.0, outer.y + 18.0, 12.0, 12.0),
+            Rect::new(cx - 6.5, outer.y + 17.5, 13.0, 13.0),
             wifi_sym,
             wifi_color,
-            1.3,
+            1.65,
         )?;
-        if !self.net.is_internet_down {
+        if !self.net.is_internet_down && self.net.kind != crate::telemetry::NetworkKind::Offline {
             let net_rect = Rect::new(outer.x + 2.0, outer.y + 38.0, outer.width - 4.0, 20.0);
-            surface.draw_text(
+            surface.draw_text_bold(
                 &format_net_speed(self.net.down_kbps),
                 net_rect,
                 8.5,
-                p.text_secondary,
+                p.text_primary,
                 TextAlign::Center,
             )?;
         }
 
-        if has_alert {
-            surface.draw_hime_eyes(
-                cx,
-                outer.y + outer.height * 0.5,
-                0.8,
-                self.expression,
-                self.blink_progress,
-            )?;
+        if let Some(alert) = &self.ncm_center_alert {
+            let msg_rect = Rect::new(
+                outer.x + 4.0,
+                outer.y + outer.height * 0.5 - 12.0,
+                (outer.width - 8.0).max(20.0),
+                24.0,
+            );
+            surface.draw_text_ellipsis(alert, msg_rect, 9.5, p.text_primary, TextAlign::Center)?;
         } else {
             let clock_rect = Rect::new(
                 outer.x + 2.0,
@@ -2332,95 +2393,251 @@ impl NotchView {
         cal: &CalendarLayout,
         p: &AdaptivePalette,
     ) -> Result<()> {
-        // Left column: Real month calendar grid
-        let title = format!("{} {}", month_name(self.calendar_month), self.calendar_year);
-        surface.draw_text_bold(&title, cal.month_title, 12.0, p.text_primary, TextAlign::Leading)?;
+        let is_light = p.polarity == ThemePolarity::LightGlass;
+        let active_pill_fill = if is_light {
+            Color::from_rgb_u8(0x1C, 0x1D, 0x22)
+        } else {
+            Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0xEB)
+        };
+        let active_pill_fg = if is_light {
+            Color::from_rgb_u8(0xFF, 0xFF, 0xFF)
+        } else {
+            Color::from_rgb_u8(0x11, 0x12, 0x14)
+        };
 
-        let prev_m = self.press_rect(cal.prev_month_btn);
+        // Top segmented control: Weekly | Monthly + Settings gear on right
+        let weekly_r = self.press_rect(cal.weekly_btn);
+        let monthly_r = self.press_rect(cal.monthly_btn);
+        if self.calendar_view_mode == CalendarViewMode::Weekly {
+            surface.fill_rounded_rect(weekly_r, 9.0, active_pill_fill)?;
+            surface.draw_text_bold("Weekly", weekly_r, 10.5, active_pill_fg, TextAlign::Center)?;
+            if self.is_hovered(cal.monthly_btn) {
+                surface.fill_rounded_rect(monthly_r, 9.0, p.control_hover)?;
+            }
+            surface.draw_text("Monthly", monthly_r, 10.5, p.text_secondary, TextAlign::Center)?;
+        } else {
+            if self.is_hovered(cal.weekly_btn) {
+                surface.fill_rounded_rect(weekly_r, 9.0, p.control_hover)?;
+            }
+            surface.draw_text("Weekly", weekly_r, 10.5, p.text_secondary, TextAlign::Center)?;
+            surface.fill_rounded_rect(monthly_r, 9.0, active_pill_fill)?;
+            surface.draw_text_bold("Monthly", monthly_r, 10.5, active_pill_fg, TextAlign::Center)?;
+        }
+
+        let gear_r = self.press_rect(cal.gear_btn);
         self.render_plain_icon_hover(
             surface,
-            prev_m,
-            6.0,
-            self.is_hovered(cal.prev_month_btn),
-            self.is_pressed(cal.prev_month_btn),
+            gear_r,
+            8.0,
+            self.is_hovered(cal.gear_btn),
+            self.is_pressed(cal.gear_btn),
             false,
             p,
         )?;
         surface.draw_sf_symbol(
-            Rect::new(prev_m.x + 4.0, prev_m.y + 4.0, 10.0, 10.0),
-            SfSymbol::ChevronLeft,
+            Rect::new(gear_r.x + 5.0, gear_r.y + 5.0, 14.0, 14.0),
+            SfSymbol::Gear,
+            p.text_secondary,
+            1.4,
+        )?;
+
+        // Large macOS-style Month name (left) + Day number (right)
+        let selected_day = self
+            .calendar_selected_day
+            .clamp(1, days_in_month(self.calendar_year, self.calendar_month));
+        surface.draw_text_bold(
+            month_name(self.calendar_month),
+            cal.month_title,
+            24.0,
             p.text_primary,
-            1.3,
+            TextAlign::Leading,
         )?;
-        let next_m = self.press_rect(cal.next_month_btn);
-        self.render_plain_icon_hover(
-            surface,
-            next_m,
-            6.0,
-            self.is_hovered(cal.next_month_btn),
-            self.is_pressed(cal.next_month_btn),
-            false,
-            p,
+        surface.draw_text_bold(
+            &selected_day.to_string(),
+            cal.day_hero_rect,
+            24.0,
+            p.text_primary,
+            TextAlign::Trailing,
         )?;
+
+        if self.calendar_view_mode == CalendarViewMode::Weekly {
+            // 7-day horizontal strip (S M T W T F S) centered around selected_day's week
+            let weekdays = ["S", "M", "T", "W", "T", "F", "S"];
+            let offset = first_weekday_sun0(self.calendar_year, self.calendar_month) as i32;
+            let total_days = days_in_month(self.calendar_year, self.calendar_month) as i32;
+            let sel_slot = offset + (selected_day as i32 - 1);
+            let week_start_slot = sel_slot - (sel_slot % 7);
+
+            for (i, (day_num, cell_r)) in cal.day_cells.iter().enumerate() {
+                let col = i % 7;
+                let wd_r = Rect::new(cell_r.x, cell_r.y, cell_r.width, 16.0);
+                surface.draw_text(weekdays[col], wd_r, 9.5, p.text_tertiary, TextAlign::Center)?;
+
+                let slot_day = week_start_slot + col as i32 - offset + 1;
+                if slot_day >= 1 && slot_day <= total_days {
+                    let num_r = Rect::new(
+                        cell_r.x + (cell_r.width - 28.0) * 0.5,
+                        cell_r.y + 20.0,
+                        28.0,
+                        26.0,
+                    );
+                    let is_sel = *day_num == selected_day;
+                    if is_sel {
+                        surface.fill_rounded_rect(num_r, 8.0, active_pill_fill)?;
+                        surface.draw_text_bold(
+                            &day_num.to_string(),
+                            num_r,
+                            12.5,
+                            active_pill_fg,
+                            TextAlign::Center,
+                        )?;
+                    } else {
+                        if self.is_hovered(*cell_r) {
+                            surface.fill_rounded_rect(num_r, 8.0, p.control_hover)?;
+                        }
+                        surface.draw_text_bold(
+                            &day_num.to_string(),
+                            num_r,
+                            12.5,
+                            p.text_primary,
+                            TextAlign::Center,
+                        )?;
+                    }
+                    // Subtle event indicator dot on active weekdays
+                    if col % 2 == 0 || is_sel {
+                        surface.fill_circle(
+                            cell_r.x + cell_r.width * 0.5,
+                            cell_r.y + 52.0,
+                            1.6,
+                            p.text_tertiary,
+                        )?;
+                    }
+                }
+            }
+        } else {
+            // Compact Monthly view with < > Today controls
+            let prev_m = self.press_rect(cal.prev_month_btn);
+            self.render_plain_icon_hover(
+                surface,
+                prev_m,
+                6.0,
+                self.is_hovered(cal.prev_month_btn),
+                self.is_pressed(cal.prev_month_btn),
+                false,
+                p,
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(prev_m.x + 4.0, prev_m.y + 4.0, 10.0, 10.0),
+                SfSymbol::ChevronLeft,
+                p.text_primary,
+                1.3,
+            )?;
+            let next_m = self.press_rect(cal.next_month_btn);
+            self.render_plain_icon_hover(
+                surface,
+                next_m,
+                6.0,
+                self.is_hovered(cal.next_month_btn),
+                self.is_pressed(cal.next_month_btn),
+                false,
+                p,
+            )?;
+            surface.draw_sf_symbol(
+                Rect::new(next_m.x + 4.0, next_m.y + 4.0, 10.0, 10.0),
+                SfSymbol::ChevronRight,
+                p.text_primary,
+                1.3,
+            )?;
+            let today_r = self.press_rect(cal.today_btn);
+            self.render_plain_button(
+                surface,
+                today_r,
+                6.0,
+                None,
+                self.is_hovered(cal.today_btn),
+                self.is_pressed(cal.today_btn),
+                p,
+            )?;
+            surface.draw_text("Today", today_r, 9.0, p.text_primary, TextAlign::Center)?;
+
+            let weekdays = ["S", "M", "T", "W", "T", "F", "S"];
+            let cell_w = cal.grid_rect.width / 7.0;
+            let row_h = ((cal.grid_rect.height - 16.0) / 6.0).max(12.0);
+            for (i, wd) in weekdays.iter().enumerate() {
+                surface.draw_text(
+                    wd,
+                    Rect::new(cal.grid_rect.x + i as f32 * cell_w, cal.grid_rect.y, cell_w, 14.0),
+                    9.0,
+                    p.text_tertiary,
+                    TextAlign::Center,
+                )?;
+            }
+            let offset = first_weekday_sun0(self.calendar_year, self.calendar_month) as usize;
+            let total_days = days_in_month(self.calendar_year, self.calendar_month);
+            for day in 1..=total_days {
+                let slot = offset + (day as usize - 1);
+                let col = slot % 7;
+                let row = slot / 7;
+                if row >= 6 {
+                    break;
+                }
+                let cell_rect = Rect::new(
+                    cal.grid_rect.x + col as f32 * cell_w,
+                    cal.grid_rect.y + 16.0 + row as f32 * row_h,
+                    cell_w,
+                    row_h,
+                );
+                if day == selected_day {
+                    let pill = Rect::new(
+                        cell_rect.x + (cell_rect.width - 22.0) * 0.5,
+                        cell_rect.y + (cell_rect.height - 16.0) * 0.5,
+                        22.0,
+                        16.0,
+                    );
+                    surface.fill_rounded_rect(pill, 5.0, active_pill_fill)?;
+                    surface.draw_text_bold(&day.to_string(), pill, 9.5, active_pill_fg, TextAlign::Center)?;
+                } else {
+                    surface.draw_text(&day.to_string(), cell_rect, 9.5, p.text_primary, TextAlign::Center)?;
+                }
+            }
+        }
+
+        // Bottom bar: Add Reminder (left) + "+ New Event" pill (right)
+        let rem_r = self.press_rect(cal.add_reminder_btn);
+        if self.is_hovered(cal.add_reminder_btn) {
+            surface.fill_rounded_rect(rem_r, 8.0, p.control_hover)?;
+        }
         surface.draw_sf_symbol(
-            Rect::new(next_m.x + 4.0, next_m.y + 4.0, 10.0, 10.0),
-            SfSymbol::ChevronRight,
-            p.text_primary,
-            1.3,
+            Rect::new(rem_r.x + 6.0, rem_r.y + 6.0, 12.0, 12.0),
+            SfSymbol::ListChecklist,
+            p.text_secondary,
+            1.35,
         )?;
-        let today_r = self.press_rect(cal.today_btn);
+        surface.draw_text(
+            "Add Reminder",
+            Rect::new(rem_r.x + 22.0, rem_r.y, rem_r.width - 24.0, rem_r.height),
+            10.5,
+            p.text_secondary,
+            TextAlign::Leading,
+        )?;
+
+        let new_ev_r = self.press_rect(cal.new_event_btn);
         self.render_plain_button(
             surface,
-            today_r,
-            6.0,
+            new_ev_r,
+            11.0,
             None,
-            self.is_hovered(cal.today_btn),
-            self.is_pressed(cal.today_btn),
+            self.is_hovered(cal.new_event_btn),
+            self.is_pressed(cal.new_event_btn),
             p,
         )?;
-        surface.draw_text("Today", today_r, 9.0, p.text_primary, TextAlign::Center)?;
-
-        let weekdays = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-        let cell_w = cal.grid_rect.width / 7.0;
-        let row_h = (cal.grid_rect.height - 18.0) / 6.0;
-        for (i, wd) in weekdays.iter().enumerate() {
-            surface.draw_text(
-                wd,
-                Rect::new(cal.grid_rect.x + i as f32 * cell_w, cal.grid_rect.y, cell_w, 16.0),
-                9.0,
-                p.text_tertiary,
-                TextAlign::Center,
-            )?;
-        }
-
-        let offset = first_weekday_sun0(self.calendar_year, self.calendar_month) as usize;
-        let total_days = days_in_month(self.calendar_year, self.calendar_month);
-        let is_current_month = self.calendar_year == self.calendar_today_year
-            && self.calendar_month == self.calendar_today_month;
-
-        for day in 1..=total_days {
-            let slot = offset + (day as usize - 1);
-            let col = slot % 7;
-            let row = slot / 7;
-            if row >= 6 {
-                break;
-            }
-            let cx = cal.grid_rect.x + col as f32 * cell_w + cell_w * 0.5;
-            let cy = cal.grid_rect.y + 18.0 + row as f32 * row_h + row_h * 0.5;
-            let cell_rect = Rect::new(
-                cal.grid_rect.x + col as f32 * cell_w,
-                cal.grid_rect.y + 18.0 + row as f32 * row_h,
-                cell_w,
-                row_h,
-            );
-            let is_today = is_current_month && day == self.calendar_today_day;
-            if is_today {
-                surface.fill_circle(cx, cy, (row_h * 0.45).min(11.0), p.control_active)?;
-                surface.draw_text_bold(&day.to_string(), cell_rect, 10.0, p.text_primary, TextAlign::Center)?;
-            } else {
-                surface.draw_text(&day.to_string(), cell_rect, 10.0, p.text_primary, TextAlign::Center)?;
-            }
-        }
+        surface.draw_text_bold(
+            "+ New Event",
+            new_ev_r,
+            10.5,
+            p.text_primary,
+            TextAlign::Center,
+        )?;
 
         Ok(())
     }
@@ -2458,24 +2675,36 @@ impl NotchView {
             TextAlign::Center,
         )?;
 
-        // Primary Start/Pause pill + Reset (`SfSymbol::Refresh`)
+        // Primary Start/Pause pill + Reset (`SfSymbol::Refresh`) with guaranteed high-contrast text
+        let is_light = p.polarity == ThemePolarity::LightGlass;
+        let solid_pill_fill = if is_light {
+            Color::from_rgb_u8(0x1C, 0x1D, 0x22)
+        } else {
+            Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0xEB)
+        };
+        let solid_pill_fg = if is_light {
+            Color::from_rgb_u8(0xFF, 0xFF, 0xFF)
+        } else {
+            Color::from_rgb_u8(0x11, 0x12, 0x14)
+        };
+
         let play_r = self.press_rect(pomo.play_btn);
         let play_primary = !self.pomodoro.running;
         self.render_plain_button(
             surface,
             play_r,
             16.0,
-            if play_primary { Some(p.control_active) } else { None },
+            if play_primary { Some(solid_pill_fill) } else { None },
             self.is_hovered(pomo.play_btn),
             self.is_pressed(pomo.play_btn),
             p,
         )?;
-        let play_fg = p.text_primary;
+        let play_fg = if play_primary { solid_pill_fg } else { p.text_primary };
         surface.draw_sf_symbol(
             Rect::new(play_r.x + 18.0, play_r.y + 10.0, 14.0, 14.0),
             if self.pomodoro.running { SfSymbol::Pause } else { SfSymbol::Play },
             play_fg,
-            1.4,
+            1.5,
         )?;
         surface.draw_text_bold(
             if self.pomodoro.running { "Pause" } else { "Start" },
@@ -2486,20 +2715,20 @@ impl NotchView {
         )?;
 
         let reset_r = self.press_rect(pomo.reset_btn);
-        self.render_plain_icon_hover(
+        self.render_plain_button(
             surface,
             reset_r,
             16.0,
+            None,
             self.is_hovered(pomo.reset_btn),
             self.is_pressed(pomo.reset_btn),
-            false,
             p,
         )?;
         surface.draw_sf_symbol(
             Rect::new(reset_r.x + (reset_r.width - 15.0) * 0.5, reset_r.y + (reset_r.height - 15.0) * 0.5, 15.0, 15.0),
             SfSymbol::Refresh,
-            p.text_secondary,
-            1.4,
+            p.text_primary,
+            1.45,
         )?;
 
         // Preset buttons (5m, 15m, 25m, 50m)
@@ -2510,16 +2739,16 @@ impl NotchView {
                 surface,
                 btn_r,
                 8.0,
-                if active { Some(p.control_active) } else { None },
+                if active { Some(solid_pill_fill) } else { None },
                 self.is_hovered(*rect),
                 self.is_pressed(*rect),
                 p,
             )?;
-            surface.draw_text(
+            surface.draw_text_bold(
                 &format!("{}m", mins),
                 btn_r,
                 10.5,
-                if active { p.text_primary } else { p.text_secondary },
+                if active { solid_pill_fg } else { p.text_primary },
                 TextAlign::Center,
             )?;
         }
@@ -2694,9 +2923,7 @@ impl NotchView {
             1.4,
         )?;
 
-        // LRC Lyrics Area
-        self.render_adaptive_card(surface, mus.lyrics_box, 10.0, p)?;
-
+        // Clean floating macOS / Apple Music-style Lyrics (no boxy card wrapper)
         let active_line = self
             .music_active_lyric_idx
             .and_then(|idx| self.music_lrc_lines.get(idx).cloned())
@@ -2714,15 +2941,15 @@ impl NotchView {
                 };
                 let is_curr = line_idx == active_idx;
                 let rect = Rect::new(
-                    mus.lyrics_text_box.x + 10.0,
+                    mus.lyrics_text_box.x + 8.0,
                     mus.lyrics_text_box.y + 2.0 + row_i as f32 * line_h,
-                    mus.lyrics_text_box.width - 20.0,
+                    mus.lyrics_text_box.width - 16.0,
                     line_h,
                 );
                 if is_curr {
-                    surface.draw_text_bold(line, rect, 11.0, p.text_primary, TextAlign::Center)?;
+                    surface.draw_text_bold(line, rect, 12.0, p.text_primary, TextAlign::Center)?;
                 } else {
-                    surface.draw_text(line, rect, 9.5, p.text_tertiary, TextAlign::Center)?;
+                    surface.draw_text(line, rect, 10.0, p.text_tertiary, TextAlign::Center)?;
                 }
             }
         } else if let Some(line) = active_line {
@@ -2733,20 +2960,20 @@ impl NotchView {
                 let half_h = (mus.lyrics_text_box.height - 4.0) * 0.5;
                 surface.draw_text_bold(
                     &line,
-                    Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0, mus.lyrics_text_box.width - 20.0, half_h),
-                    11.0,
+                    Rect::new(mus.lyrics_text_box.x + 8.0, mus.lyrics_text_box.y + 2.0, mus.lyrics_text_box.width - 16.0, half_h),
+                    12.0,
                     p.text_primary,
                     TextAlign::Center,
                 )?;
                 surface.draw_text(
                     &upcoming,
-                    Rect::new(mus.lyrics_text_box.x + 10.0, mus.lyrics_text_box.y + 2.0 + half_h, mus.lyrics_text_box.width - 20.0, half_h),
-                    9.5,
-                    p.text_secondary,
+                    Rect::new(mus.lyrics_text_box.x + 8.0, mus.lyrics_text_box.y + 2.0 + half_h, mus.lyrics_text_box.width - 16.0, half_h),
+                    10.0,
+                    p.text_tertiary,
                     TextAlign::Center,
                 )?;
             } else {
-                surface.draw_text_bold(&line, mus.lyrics_text_box, 11.0, p.text_primary, TextAlign::Center)?;
+                surface.draw_text_bold(&line, mus.lyrics_text_box, 12.0, p.text_primary, TextAlign::Center)?;
             }
         } else {
             let fallback = if self.music_show_lyrics {
@@ -2871,8 +3098,13 @@ impl NotchView {
             TextAlign::Center,
         )?;
 
+        let wifi_title = match self.net.kind {
+            crate::telemetry::NetworkKind::Ethernet => "Network (Ethernet)",
+            crate::telemetry::NetworkKind::Offline => "Network (Offline)",
+            crate::telemetry::NetworkKind::Wifi => "Wi-Fi Networks",
+        };
         surface.draw_text_bold(
-            "Wi-Fi Networks",
+            wifi_title,
             wf.title_rect,
             12.0,
             p.text_primary,
@@ -2914,8 +3146,39 @@ impl NotchView {
             1.35,
         )?;
 
+        if self.net.kind == crate::telemetry::NetworkKind::Ethernet && !self.net.is_internet_down {
+            self.render_adaptive_card(surface, wf.list_box, 10.0, p)?;
+            surface.draw_sf_symbol(
+                Rect::new(wf.list_box.x + (wf.list_box.width - 20.0) * 0.5, wf.list_box.y + 38.0, 20.0, 20.0),
+                SfSymbol::Ethernet,
+                p.text_primary,
+                1.6,
+            )?;
+            surface.draw_text_bold(
+                "Wired Ethernet Connected",
+                Rect::new(wf.list_box.x, wf.list_box.y + 66.0, wf.list_box.width, 20.0),
+                11.5,
+                p.text_primary,
+                TextAlign::Center,
+            )?;
+            surface.draw_text(
+                &format!("Down {}", format_net_speed(self.net.down_kbps)),
+                Rect::new(wf.list_box.x, wf.list_box.y + 88.0, wf.list_box.width, 18.0),
+                10.0,
+                p.text_secondary,
+                TextAlign::Center,
+            )?;
+            return Ok(());
+        }
+
         if !self.wifi_enabled {
             self.render_adaptive_card(surface, wf.list_box, 10.0, p)?;
+            surface.draw_sf_symbol(
+                Rect::new(wf.list_box.x + (wf.list_box.width - 20.0) * 0.5, wf.list_box.y + 42.0, 20.0, 20.0),
+                SfSymbol::WifiOff,
+                p.text_tertiary,
+                1.6,
+            )?;
             surface.draw_text("Wi-Fi is turned off", wf.list_box, 11.0, p.text_secondary, TextAlign::Center)?;
             return Ok(());
         }
@@ -3353,18 +3616,61 @@ impl NotchView {
                 })
             }
             NotchPanel::Calendar => {
-                let month_title = Rect::new(inner_x, body_y, (inner_w - 94.0).max(80.0), 22.0);
-                let prev_month_btn = Rect::new(inner_x + inner_w - 88.0, body_y + 1.0, 20.0, 20.0);
-                let next_month_btn = Rect::new(inner_x + inner_w - 64.0, body_y + 1.0, 20.0, 20.0);
-                let today_btn = Rect::new(inner_x + inner_w - 40.0, body_y + 1.0, 40.0, 20.0);
-                let grid_rect = Rect::new(inner_x, body_y + 28.0, inner_w, (body_h - 30.0).max(120.0));
+                let weekly_btn = Rect::new(inner_x, body_y, 72.0, 24.0);
+                let monthly_btn = Rect::new(inner_x + 76.0, body_y, 72.0, 24.0);
+                let gear_btn = Rect::new(inner_x + inner_w - 24.0, body_y, 24.0, 24.0);
+
+                let hero_y = body_y + 30.0;
+                let month_title = Rect::new(inner_x, hero_y, (inner_w * 0.65).max(120.0), 32.0);
+                let day_hero_rect = Rect::new(inner_x + inner_w - 64.0, hero_y, 64.0, 32.0);
+
+                let prev_month_btn = Rect::new(inner_x + inner_w - 88.0, body_y + 2.0, 20.0, 20.0);
+                let next_month_btn = Rect::new(inner_x + inner_w - 64.0, body_y + 2.0, 20.0, 20.0);
+                let today_btn = Rect::new(inner_x + inner_w - 40.0, body_y + 2.0, 40.0, 20.0);
+
+                let grid_y = hero_y + 38.0;
+                let footer_h = 26.0;
+                let grid_h = (body_h - (grid_y - body_y) - footer_h - 6.0).max(58.0);
+                let grid_rect = Rect::new(inner_x, grid_y, inner_w, grid_h);
+
+                let mut day_cells = Vec::new();
+                if self.calendar_view_mode == CalendarViewMode::Weekly {
+                    let selected_day = self
+                        .calendar_selected_day
+                        .clamp(1, days_in_month(self.calendar_year, self.calendar_month));
+                    let offset = first_weekday_sun0(self.calendar_year, self.calendar_month) as i32;
+                    let total_days = days_in_month(self.calendar_year, self.calendar_month) as i32;
+                    let sel_slot = offset + (selected_day as i32 - 1);
+                    let week_start_slot = sel_slot - (sel_slot % 7);
+                    let col_w = inner_w / 7.0;
+                    for col in 0..7 {
+                        let slot_day = week_start_slot + col as i32 - offset + 1;
+                        if slot_day >= 1 && slot_day <= total_days {
+                            day_cells.push((
+                                slot_day as u8,
+                                Rect::new(inner_x + col as f32 * col_w, grid_y, col_w, grid_h),
+                            ));
+                        }
+                    }
+                }
+
+                let footer_y = body_y + body_h - footer_h;
+                let add_reminder_btn = Rect::new(inner_x, footer_y, 122.0, footer_h);
+                let new_event_btn = Rect::new(inner_x + inner_w - 104.0, footer_y, 104.0, footer_h);
 
                 BodyLayout::Calendar(CalendarLayout {
+                    weekly_btn,
+                    monthly_btn,
+                    gear_btn,
                     month_title,
+                    day_hero_rect,
                     prev_month_btn,
                     next_month_btn,
                     today_btn,
                     grid_rect,
+                    day_cells,
+                    add_reminder_btn,
+                    new_event_btn,
                 })
             }
             NotchPanel::Pomodoro => {
@@ -3446,7 +3752,6 @@ impl NotchView {
                     prev_btn,
                     play_pause_btn,
                     next_btn,
-                    lyrics_box,
                     lyrics_text_box,
                     offset_label_rect,
                     offset_minus_btn,
@@ -3620,11 +3925,18 @@ struct CommandCenterLayout {
 }
 
 struct CalendarLayout {
+    weekly_btn: Rect,
+    monthly_btn: Rect,
+    gear_btn: Rect,
     month_title: Rect,
+    day_hero_rect: Rect,
     prev_month_btn: Rect,
     next_month_btn: Rect,
     today_btn: Rect,
     grid_rect: Rect,
+    day_cells: Vec<(u8, Rect)>,
+    add_reminder_btn: Rect,
+    new_event_btn: Rect,
 }
 
 struct PomodoroLayout {
@@ -3644,7 +3956,6 @@ struct MusicLayout {
     prev_btn: Rect,
     play_pause_btn: Rect,
     next_btn: Rect,
-    lyrics_box: Rect,
     lyrics_text_box: Rect,
     offset_label_rect: Rect,
     offset_minus_btn: Rect,
@@ -3949,6 +4260,7 @@ mod tests {
 
         let mut notch = NotchView::new(NotchEdge::Top);
         notch.set_panel(NotchPanel::Calendar);
+        notch.calendar_view_mode = CalendarViewMode::Monthly;
         settle(&mut notch);
 
         let surf = Rect::new(0.0, 0.0, 560.0, 320.0);
@@ -4379,5 +4691,32 @@ mod tests {
         assert_eq!(notch.active_panel, NotchPanel::Pomodoro);
         assert!(notch.handle_scroll_step(clk_x, clk_y, surf, 0.6, 0.0));
         assert_eq!(notch.active_panel, NotchPanel::Music);
+    }
+
+    #[test]
+    fn ncm_center_alert_normalizes_to_single_line_and_auto_dismisses() {
+        let mut notch = NotchView::new(NotchEdge::Top);
+        notch.set_ncm_center_alert(Some("  Line one\nLine   two\t\twith   extra  spaces  ".to_string()));
+        assert_eq!(
+            notch.ncm_center_alert.as_deref(),
+            Some("Line one Line two with extra spaces")
+        );
+        assert!((notch.ncm_alert_ttl_secs - 4.5).abs() < 0.001);
+
+        // Still active before 4.5s elapses.
+        assert!(notch.tick(2.0));
+        assert!(notch.ncm_center_alert.is_some());
+
+        // Auto-dismisses once 4.5s total elapses.
+        assert!(notch.tick(2.5));
+        assert_eq!(notch.ncm_center_alert, None);
+        assert_eq!(notch.ncm_alert_ttl_secs, 0.0);
+
+        // Direct field assignment also auto-dismisses after 4.5s.
+        notch.ncm_center_alert = Some("Direct alert".to_string());
+        assert!(notch.tick(1.0));
+        assert!(notch.ncm_center_alert.is_some());
+        assert!(notch.tick(3.5));
+        assert_eq!(notch.ncm_center_alert, None);
     }
 }

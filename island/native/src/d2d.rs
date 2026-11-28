@@ -1252,6 +1252,7 @@ pub enum SfSymbol {
     Check,
     Wifi,
     WifiOff,
+    Ethernet,
     FolderDrop,
     Search,
     Sparkle,
@@ -2746,20 +2747,34 @@ impl NativeSurface {
                 )?;
             }
 
-            if self.try_draw_refracted_glass(
-                rect,
-                style,
-                Some((ear_w, radius, edge, flares)),
-            )? {
+            if self.glass_theme.get() != crate::theme::GlassThemePreset::Off
+                && self.try_draw_refracted_glass(
+                    rect,
+                    style,
+                    Some((ear_w, radius, edge, flares)),
+                )?
+            {
+                // Subtle crisp outer rim stroke for clear edge definition over any backdrop
+                let palette = self.palette();
+                let (_, border_col) = resolve_fallback_glass_colors(&palette, style);
+                let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
+                let geo = self.build_contour_geometry(&ops)?;
+                let border_brush = self.create_brush(border_col.with_alpha_mul(1.25))?;
+                self.d2d_target.DrawGeometry(&geo, &border_brush, 0.85, None);
                 return Ok(());
             }
 
-            // Headless / no-backdrop fallback: clean flat adaptive glass + subtle optical rim.
+            // Off mode or headless / no-backdrop fallback: clean opaque or flat adaptive glass + subtle optical rim.
             let palette = self.palette();
             let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
             let opacity = self.glass_opacity.get();
+            let is_off = self.glass_theme.get() == crate::theme::GlassThemePreset::Off;
             let theme_mul = self.glass_theme.get().tint_alpha_multiplier();
-            base_fill = base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.95));
+            base_fill = if is_off {
+                base_fill.with_alpha(0.98)
+            } else {
+                base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.96))
+            };
             let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
             let geo = self.build_contour_geometry(&ops)?;
             let fill_brush = self.create_brush(base_fill)?;
@@ -2904,16 +2919,19 @@ impl NativeSurface {
                 )?;
             }
 
-            if !self.is_gpu_acrylic() && self.try_draw_refracted_glass(rect, style, None)? {
+            let is_off = self.glass_theme.get() == crate::theme::GlassThemePreset::Off;
+            if !is_off && !self.is_gpu_acrylic() && self.try_draw_refracted_glass(rect, style, None)? {
                 return Ok(());
             }
 
-            // GpuAcrylic (real-time DWM blur beneath) or no-backdrop fallback:
+            // Off mode, GpuAcrylic (real-time DWM blur beneath), or no-backdrop fallback:
             let palette = self.palette();
             let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
             let theme_mul = self.glass_theme.get().tint_alpha_multiplier();
             let opacity = self.glass_opacity.get();
-            if self.is_gpu_acrylic() {
+            if is_off {
+                base_fill = base_fill.with_alpha(0.98);
+            } else if self.is_gpu_acrylic() {
                 // Keep surface fill light so live GPU DWM Acrylic shines through cleanly.
                 let gpu_alpha = match style.variant {
                     LiquidGlassVariant::Clear => 0.05,
@@ -2922,10 +2940,10 @@ impl NativeSurface {
                     LiquidGlassVariant::Tinted(_) => 0.34,
                 };
                 base_fill =
-                    base_fill.with_alpha((gpu_alpha * theme_mul * opacity).clamp(0.02, 0.55));
+                    base_fill.with_alpha((gpu_alpha * theme_mul * opacity).clamp(0.02, 0.72));
             } else {
                 base_fill =
-                    base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.95));
+                    base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.96));
             }
             let rr = D2D1_ROUNDED_RECT {
                 rect: rect.to_d2d(),
@@ -3410,7 +3428,7 @@ impl NativeSurface {
         color: Color,
     ) -> Result<()> {
         let s = size.max(8.0);
-        let stroke_w = (s * 0.12).max(1.2);
+        let stroke_w = (s * 0.16).max(1.75);
         let base_y = cy + s * 0.34;
         unsafe {
             let brush = self.create_brush(color)?;
@@ -3423,8 +3441,8 @@ impl NativeSurface {
             self.d2d_target.FillEllipse(
                 &D2D1_ELLIPSE {
                     point: pt(cx, base_y),
-                    radiusX: stroke_w * 0.75,
-                    radiusY: stroke_w * 0.75,
+                    radiusX: stroke_w * 0.82,
+                    radiusY: stroke_w * 0.82,
                 },
                 active_brush,
             );
@@ -3454,7 +3472,8 @@ impl NativeSurface {
         }
     }
 
-    /// Draws a crisp vector battery icon inside `(x, y, w, h)` with optional charging bolt.
+    /// Draws a crisp circular donut/ring battery progress icon centered inside `(x, y, w, h)`
+    /// with a green progress arc and centered lightning bolt when charging.
     pub fn draw_battery_icon(
         &self,
         x: f32,
@@ -3464,8 +3483,11 @@ impl NativeSurface {
         percent: u8,
         charging: bool,
     ) -> Result<()> {
-        let bw = (w - 2.5).max(8.0);
-        let bh = h.max(6.0);
+        let size = w.min(h).max(12.0);
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let radius = (size * 0.42).max(4.5);
+        let stroke_w = (size * 0.17).clamp(1.8, 3.0);
         let pct = (percent.min(100) as f32) / 100.0;
         let fill_color = if charging {
             STATUS_LIVE_GREEN
@@ -3474,41 +3496,42 @@ impl NativeSurface {
         } else {
             Color::from_rgb_u8(0xFF, 0xFF, 0xFF)
         };
+        let track_color = Color::from_rgba_u8(255, 255, 255, 58);
 
-        unsafe {
-            let border_brush = self.create_brush(Color::from_rgba_u8(255, 255, 255, 160))?;
-            let fill_brush = self.create_brush(fill_color)?;
-
-            let body = D2D1_ROUNDED_RECT {
-                rect: Rect::new(x, y, bw, bh).to_d2d(),
-                radiusX: 2.5,
-                radiusY: 2.5,
-            };
-            self.d2d_target.DrawRoundedRectangle(&body, &border_brush, 1.2, None);
-
-            // Positive terminal nub
-            let nub_h = (bh * 0.45).max(3.0);
-            let nub = D2D1_ROUNDED_RECT {
-                rect: Rect::new(x + bw + 0.5, y + (bh - nub_h) * 0.5, 2.0, nub_h).to_d2d(),
-                radiusX: 0.8,
-                radiusY: 0.8,
-            };
-            self.d2d_target.FillRoundedRectangle(&nub, &border_brush);
-
-            // Inner charge bar
-            let pad = 2.0;
-            let max_fill_w = (bw - pad * 2.0).max(1.0);
-            let fill_w = (max_fill_w * pct).max(if percent > 0 { 2.0 } else { 0.0 });
-            if fill_w > 0.0 {
-                let inner = D2D1_ROUNDED_RECT {
-                    rect: Rect::new(x + pad, y + pad, fill_w, (bh - pad * 2.0).max(2.0)).to_d2d(),
-                    radiusX: 1.2,
-                    radiusY: 1.2,
-                };
-                self.d2d_target.FillRoundedRectangle(&inner, &fill_brush);
+        self.stroke_circle(cx, cy, radius, track_color, stroke_w)?;
+        if pct > 0.01 {
+            let steps = ((pct * 32.0).ceil() as usize).max(4);
+            let start_a = -std::f32::consts::FRAC_PI_2;
+            let sweep = std::f32::consts::TAU * pct.min(0.999);
+            let mut pts = Vec::with_capacity(steps + 1);
+            for i in 0..=steps {
+                let a = start_a + sweep * (i as f32 / steps as f32);
+                pts.push((cx + a.cos() * radius, cy + a.sin() * radius));
             }
-            Ok(())
+            self.draw_polyline(&pts, pct >= 0.99, fill_color, stroke_w)?;
         }
+
+        if charging {
+            let bolt_s = radius * 0.68;
+            unsafe {
+                let brush = self.create_brush(fill_color)?;
+                let geo = self.d2d_factory.CreatePathGeometry()?;
+                let sink = geo.Open()?;
+                sink.BeginFigure(
+                    pt(cx + bolt_s * 0.12, cy - bolt_s * 0.95),
+                    D2D1_FIGURE_BEGIN_FILLED,
+                );
+                sink.AddLine(pt(cx - bolt_s * 0.48, cy + bolt_s * 0.08));
+                sink.AddLine(pt(cx + bolt_s * 0.04, cy + bolt_s * 0.08));
+                sink.AddLine(pt(cx - bolt_s * 0.14, cy + bolt_s * 0.95));
+                sink.AddLine(pt(cx + bolt_s * 0.48, cy - bolt_s * 0.08));
+                sink.AddLine(pt(cx - bolt_s * 0.04, cy - bolt_s * 0.08));
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink.Close()?;
+                self.d2d_target.FillGeometry(&geo, &brush, None);
+            }
+        }
+        Ok(())
     }
 
     /// Draws an equalizer/music visualizer of vertical pill bars.
@@ -3744,6 +3767,16 @@ impl NativeSurface {
             }
             SfSymbol::WifiOff => {
                 self.draw_wifi_icon(cx, cy, s, false, true, color)?;
+            }
+            SfSymbol::Ethernet => {
+                // Modern LAN / Ethernet cable & port glyph
+                let plug = Rect::new(cx - s * 0.30, cy - s * 0.32, s * 0.60, s * 0.44);
+                self.stroke_rounded_rect(plug, (s * 0.10).max(1.5), color, sw)?;
+                self.draw_line(cx - s * 0.12, plug.y + s * 0.14, cx - s * 0.12, plug.y + s * 0.28, color, sw)?;
+                self.draw_line(cx, plug.y + s * 0.14, cx, plug.y + s * 0.28, color, sw)?;
+                self.draw_line(cx + s * 0.12, plug.y + s * 0.14, cx + s * 0.12, plug.y + s * 0.28, color, sw)?;
+                self.draw_line(cx, plug.y + plug.height, cx, cy + s * 0.34, color, sw)?;
+                self.draw_line(cx - s * 0.32, cy + s * 0.34, cx + s * 0.32, cy + s * 0.34, color, sw)?;
             }
             SfSymbol::FolderDrop => {
                 // Folder silhouette + downward drop arrow
@@ -4311,15 +4344,23 @@ impl NativeSurface {
         Ok(())
     }
 
-    /// Draws a compact settings gear icon centered at `(cx, cy)`.
+    /// Draws a modern 8-tooth precision gear icon centered at `(cx, cy)`.
     pub fn draw_settings_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
         let s = size.max(8.0);
-        let sw = (s * 0.12).max(1.1);
-        self.stroke_circle(cx, cy, s * 0.22, color, sw)?;
-        for i in 0..6 {
-            let a = (i as f32) * (std::f32::consts::TAU / 6.0);
+        let sw = (s * 0.135).max(1.3);
+        self.stroke_circle(cx, cy, s * 0.15, color, sw)?;
+        self.stroke_circle(cx, cy, s * 0.30, color, sw)?;
+        for i in 0..8 {
+            let a = (i as f32) * (std::f32::consts::TAU / 8.0);
             let (sa, ca) = a.sin_cos();
-            self.draw_line(cx + ca * s * 0.28, cy + sa * s * 0.28, cx + ca * s * 0.42, cy + sa * s * 0.42, color, sw)?;
+            self.draw_line(
+                cx + ca * s * 0.31,
+                cy + sa * s * 0.31,
+                cx + ca * s * 0.43,
+                cy + sa * s * 0.43,
+                color,
+                sw * 1.15,
+            )?;
         }
         Ok(())
     }
@@ -4939,8 +4980,8 @@ fn blur_bgra_half_res(width: u32, height: u32, src: &[u8]) -> (u32, u32, Vec<u8>
     };
 
     let mut tmp = vec![0u8; buf.len()];
-    let radius = (bw.min(bh) as i32 / 12).clamp(2, 3);
-    for _ in 0..2 {
+    let radius = (bw.min(bh) as i32 / 6).clamp(4, 9);
+    for _ in 0..3 {
         box_blur_h(&buf, &mut tmp, bw as usize, bh as usize, radius);
         box_blur_v(&tmp, &mut buf, bw as usize, bh as usize, radius);
     }
@@ -5344,12 +5385,12 @@ fn rasterize_liquid_glass(
         (0.20 + 0.80 * opacity).clamp(0.20, 1.0)
     };
     let (refract_reach, base_tone_mix) = match style.variant {
-        LiquidGlassVariant::Regular => (depth * 0.55, 0.18_f32),
-        LiquidGlassVariant::Clear => (depth * 0.72, 0.06_f32),
-        LiquidGlassVariant::Elevated => (depth * 0.42, 0.24_f32),
-        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.22_f32),
+        LiquidGlassVariant::Regular => (depth * 0.55, 0.20_f32),
+        LiquidGlassVariant::Clear => (depth * 0.72, 0.08_f32),
+        LiquidGlassVariant::Elevated => (depth * 0.42, 0.26_f32),
+        LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.24_f32),
     };
-    let tone_mix = (base_tone_mix * opacity).clamp(0.02, 0.65);
+    let tone_mix = (base_tone_mix + opacity.powf(1.6) * 0.58).clamp(0.04, 0.88);
     let tone_target = match polarity {
         ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
         ThemePolarity::DarkGlass => [0.075_f32, 0.078_f32, 0.095_f32],

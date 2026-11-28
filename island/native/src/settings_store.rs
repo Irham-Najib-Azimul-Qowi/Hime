@@ -50,8 +50,10 @@ pub struct NativeSettings {
     pub brightness_overlay_enabled: bool,
     /// `"auto"` | `"dark"` | `"light"`
     pub color_theme: String,
-    /// `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"`
+    /// `"off"` | `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"` (Notch & Settings).
     pub glass_theme: String,
+    /// `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"` (Dock always uses Liquid Glass).
+    pub dock_glass_theme: String,
     /// Liquid Glass surface opacity (`0.20..=1.0`, default `0.78`).
     pub glass_opacity: f32,
 
@@ -84,6 +86,7 @@ impl Default for NativeSettings {
             brightness_overlay_enabled: true,
             color_theme: "auto".to_string(),
             glass_theme: "clear-glass".to_string(),
+            dock_glass_theme: "clear-glass".to_string(),
             glass_opacity: DEFAULT_GLASS_OPACITY,
             hime_ai_enabled: true,
             hime_router_url: DEFAULT_ROUTER_URL.to_string(),
@@ -102,6 +105,7 @@ impl NativeSettings {
         out.dock_size = normalize_dock_size(&out.dock_size).to_string();
         out.color_theme = normalize_color_theme(&out.color_theme).to_string();
         out.glass_theme = normalize_glass_theme(&out.glass_theme).to_string();
+        out.dock_glass_theme = normalize_dock_glass_theme(&out.dock_glass_theme).to_string();
         out.glass_opacity = clamp_glass_opacity(out.glass_opacity);
         if out.hime_router_url.trim().is_empty() {
             out.hime_router_url = DEFAULT_ROUTER_URL.to_string();
@@ -171,9 +175,23 @@ impl NativeSettings {
         &self.color_theme
     }
 
-    /// Cycles `glass_theme`: `"clear-glass"` -> `"dark-frosted"` -> `"light-frosted"` -> `"acrylic"` -> `"auto"` -> `"clear-glass"`.
+    /// Cycles `glass_theme`: `"off"` -> `"clear-glass"` -> `"dark-frosted"` -> `"light-frosted"` -> `"acrylic"` -> `"auto"` -> `"off"`.
     pub fn cycle_glass_theme(&mut self) -> &str {
         self.glass_theme = match normalize_glass_theme(&self.glass_theme) {
+            "off" => "clear-glass",
+            "clear-glass" => "dark-frosted",
+            "dark-frosted" => "light-frosted",
+            "light-frosted" => "acrylic",
+            "acrylic" => "auto",
+            _ => "off",
+        }
+        .to_string();
+        &self.glass_theme
+    }
+
+    /// Cycles `dock_glass_theme` (never `"off"`): `"clear-glass"` -> `"dark-frosted"` -> `"light-frosted"` -> `"acrylic"` -> `"auto"` -> `"clear-glass"`.
+    pub fn cycle_dock_glass_theme(&mut self) -> &str {
+        self.dock_glass_theme = match normalize_dock_glass_theme(&self.dock_glass_theme) {
             "clear-glass" => "dark-frosted",
             "dark-frosted" => "light-frosted",
             "light-frosted" => "acrylic",
@@ -181,7 +199,7 @@ impl NativeSettings {
             _ => "clear-glass",
         }
         .to_string();
-        &self.glass_theme
+        &self.dock_glass_theme
     }
 }
 
@@ -366,6 +384,12 @@ impl SettingsStore {
         )
         .map(|s| normalize_glass_theme(&s).to_string())
         .unwrap_or(def.glass_theme);
+        let dock_glass_theme = read_str(
+            map,
+            &["hime-dock-glass-theme", "dock_glass_theme"],
+        )
+        .map(|s| normalize_dock_glass_theme(&s).to_string())
+        .unwrap_or(def.dock_glass_theme);
         let glass_opacity = clamp_glass_opacity(read_f32(
             map,
             &["bloom-theme-opacity", "glass_opacity"],
@@ -406,6 +430,7 @@ impl SettingsStore {
             brightness_overlay_enabled,
             color_theme,
             glass_theme,
+            dock_glass_theme,
             glass_opacity,
             hime_ai_enabled,
             hime_router_url,
@@ -486,6 +511,10 @@ impl SettingsStore {
         );
         map.insert("bloom-color-theme".into(), Value::String(s.color_theme));
         map.insert("bloom-glass-theme".into(), Value::String(s.glass_theme));
+        map.insert(
+            "hime-dock-glass-theme".into(),
+            Value::String(s.dock_glass_theme),
+        );
         let rounded_opacity = ((s.glass_opacity as f64) * 1000.0).round() / 1000.0;
         if let Some(num) = serde_json::Number::from_f64(rounded_opacity) {
             map.insert("bloom-theme-opacity".into(), Value::Number(num));
@@ -550,11 +579,19 @@ pub fn normalize_color_theme(raw: &str) -> &'static str {
 
 pub fn normalize_glass_theme(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "solid" => "off",
         "dark-frosted" | "dark_frosted" | "dark" => "dark-frosted",
         "light-frosted" | "light_frosted" | "light" => "light-frosted",
         "acrylic" => "acrylic",
         "auto" => "auto",
         _ => "clear-glass",
+    }
+}
+
+pub fn normalize_dock_glass_theme(raw: &str) -> &'static str {
+    match normalize_glass_theme(raw) {
+        "off" => "clear-glass",
+        other => other,
     }
 }
 
@@ -702,6 +739,7 @@ mod tests {
             brightness_overlay_enabled: false,
             color_theme: "dark".to_string(),
             glass_theme: "acrylic".to_string(),
+            dock_glass_theme: "dark-frosted".to_string(),
             glass_opacity: 0.65,
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
@@ -826,7 +864,9 @@ mod tests {
         assert_eq!(ns.cycle_glass_theme(), "light-frosted");
         assert_eq!(ns.cycle_glass_theme(), "acrylic");
         assert_eq!(ns.cycle_glass_theme(), "auto");
+        assert_eq!(ns.cycle_glass_theme(), "off");
         assert_eq!(ns.cycle_glass_theme(), "clear-glass");
+        assert_eq!(normalize_dock_glass_theme("off"), "clear-glass");
 
         let legacy =
             SettingsStore::from_json_str(r#"{"bloom-glass-theme":"DARK-FROSTED"}"#).unwrap();

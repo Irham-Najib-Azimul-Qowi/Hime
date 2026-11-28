@@ -1458,8 +1458,13 @@ impl AppShell {
 
     fn apply_glass_theme_to_surfaces(&self) {
         let preset = GlassThemePreset::from_str_lossy(&self.native_settings.glass_theme);
+        let dock_preset = GlassThemePreset::from_str_lossy(
+            hime_island_native::settings_store::normalize_dock_glass_theme(
+                &self.native_settings.dock_glass_theme,
+            ),
+        );
         self.notch_surface.set_glass_theme(preset);
-        self.dock_surface.set_glass_theme(preset);
+        self.dock_surface.set_glass_theme(dock_preset);
         if let Some(ref surf) = self.overlay_left_surface {
             surf.set_glass_theme(preset);
         }
@@ -3360,6 +3365,8 @@ impl AppShell {
             | NotchAction::CalendarPrevMonth
             | NotchAction::CalendarNextMonth
             | NotchAction::CalendarToday
+            | NotchAction::CalendarSetView(_)
+            | NotchAction::CalendarSelectDay(_)
             | NotchAction::PomodoroStartPause
             | NotchAction::PomodoroReset
             | NotchAction::PomodoroPreset(_)
@@ -3958,6 +3965,7 @@ impl AppShell {
             | SettingsAction::ToggleHimeAi
             | SettingsAction::CycleColorTheme
             | SettingsAction::CycleGlassTheme
+            | SettingsAction::CycleDockGlassTheme
             | SettingsAction::ResetToDefaults => {
                 let ns = extract_native_settings_from_panel(&self.settings);
                 self.apply_native_settings(&ns, true);
@@ -5538,6 +5546,7 @@ fn apply_native_settings_to_panel(ns: &NativeSettings, panel: &mut SettingsPanel
     panel.state.brightness_overlay_enabled = norm.brightness_overlay_enabled;
     panel.state.color_theme = norm.color_theme.clone();
     panel.state.glass_theme = norm.glass_theme.clone();
+    panel.state.dock_glass_theme = norm.dock_glass_theme.clone();
     panel.state.glass_opacity = norm.glass_opacity;
     panel.state.hime_ai_enabled = norm.hime_ai_enabled;
     panel.state.hime_router_url = norm.hime_router_url.clone();
@@ -5581,6 +5590,7 @@ fn extract_native_settings_from_panel(panel: &SettingsPanel) -> NativeSettings {
         brightness_overlay_enabled: panel.state.brightness_overlay_enabled,
         color_theme: panel.state.color_theme.clone(),
         glass_theme: panel.state.glass_theme.clone(),
+        dock_glass_theme: panel.state.dock_glass_theme.clone(),
         glass_opacity: panel.state.glass_opacity,
         hime_ai_enabled: panel.state.hime_ai_enabled,
         hime_router_url: panel.state.hime_router_url.clone(),

@@ -136,6 +136,7 @@ impl ColorThemeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GlassThemePreset {
+    Off,
     #[default]
     ClearGlass,
     DarkFrosted,
@@ -146,7 +147,8 @@ pub enum GlassThemePreset {
 
 impl GlassThemePreset {
     /// All presets in UI display order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Off,
         Self::ClearGlass,
         Self::DarkFrosted,
         Self::LightFrosted,
@@ -154,10 +156,11 @@ impl GlassThemePreset {
         Self::Auto,
     ];
 
-    /// Parses a preset string (`"clear-glass"`, `"dark-frosted"`, `"light-frosted"`, `"acrylic"`,
-    /// `"bloom-glass-theme"`, `"auto"`) case-insensitively, defaulting to `ClearGlass`.
+    /// Parses a preset string (`"off"`, `"clear-glass"`, `"dark-frosted"`, `"light-frosted"`,
+    /// `"acrylic"`, `"bloom-glass-theme"`, `"auto"`) case-insensitively, defaulting to `ClearGlass`.
     pub fn from_str_lossy(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "solid" => Self::Off,
             "clear-glass" | "clear" => Self::ClearGlass,
             "dark-frosted" | "dark" => Self::DarkFrosted,
             "light-frosted" | "light" => Self::LightFrosted,
@@ -170,6 +173,7 @@ impl GlassThemePreset {
     /// Canonical kebab-case serialization token.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Off => "off",
             Self::ClearGlass => "clear-glass",
             Self::DarkFrosted => "dark-frosted",
             Self::LightFrosted => "light-frosted",
@@ -181,6 +185,7 @@ impl GlassThemePreset {
     /// Human-readable display label.
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Off => "Off",
             Self::ClearGlass => "Clear Glass",
             Self::DarkFrosted => "Dark Frosted",
             Self::LightFrosted => "Light Frosted",
@@ -192,7 +197,7 @@ impl GlassThemePreset {
     /// Maps this glass preset to its corresponding [`ColorThemeMode`] polarity preference.
     pub const fn to_color_theme_mode(self) -> ColorThemeMode {
         match self {
-            Self::ClearGlass | Self::Acrylic | Self::Auto => ColorThemeMode::Auto,
+            Self::Off | Self::ClearGlass | Self::Acrylic | Self::Auto => ColorThemeMode::Auto,
             Self::DarkFrosted => ColorThemeMode::Dark,
             Self::LightFrosted => ColorThemeMode::Light,
         }
@@ -201,7 +206,8 @@ impl GlassThemePreset {
     /// Alpha multiplier for glass surface tinting across software and GPU Acrylic surfaces.
     pub const fn tint_alpha_multiplier(self) -> f32 {
         match self {
-            Self::ClearGlass => 0.72,
+            Self::Off => 1.0,
+            Self::ClearGlass => 0.78,
             Self::DarkFrosted => 1.15,
             Self::LightFrosted => 1.10,
             Self::Acrylic => 1.28,
@@ -212,6 +218,8 @@ impl GlassThemePreset {
     /// DWM Acrylic tint alpha byte (`0x00..=0xFF`) for GPU DirectComposition surfaces.
     pub const fn gpu_acrylic_alpha(self, polarity: ThemePolarity) -> u8 {
         match (self, polarity) {
+            (Self::Off, ThemePolarity::DarkGlass) => 0xF5,
+            (Self::Off, ThemePolarity::LightGlass) => 0xF5,
             (Self::ClearGlass, ThemePolarity::DarkGlass) => 0x22,
             (Self::ClearGlass, ThemePolarity::LightGlass) => 0x1E,
             (Self::DarkFrosted, _) => 0x52,

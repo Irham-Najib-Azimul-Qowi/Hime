@@ -715,6 +715,7 @@ fn read_network_status(prev_sample: &mut Option<(Instant, u64, u64)>) -> Network
             down_kbps,
             up_kbps,
             is_internet_down: !has_internet,
+            kind,
         },
     }
 }

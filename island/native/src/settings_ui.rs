@@ -23,10 +23,10 @@ pub const SETTINGS_WINDOW_WIDTH: u32 = 740;
 pub const SETTINGS_WINDOW_HEIGHT: u32 = 520;
 
 const TITLEBAR_HEIGHT: f32 = 42.0;
-const CONTENT_TOP: f32 = TITLEBAR_HEIGHT + 66.0;
+const CONTENT_TOP: f32 = TITLEBAR_HEIGHT + 70.0;
 const SIDEBAR_WIDTH: f32 = 180.0;
 const CONTENT_PAD_X: f32 = 26.0;
-const ROW_HEIGHT: f32 = 48.0;
+const ROW_HEIGHT: f32 = 54.0;
 const TAB_START_Y: f32 = TITLEBAR_HEIGHT + 68.0;
 const TAB_HEIGHT: f32 = 36.0;
 const TAB_STEP_Y: f32 = 42.0;
@@ -34,6 +34,10 @@ const PRESS_MICRO_SCALE: f32 = 0.968;
 
 fn default_glass_opacity() -> f32 {
     0.78
+}
+
+fn default_dock_glass_theme() -> String {
+    "clear-glass".to_string()
 }
 
 fn clamp_glass_opacity(v: f32) -> f32 {
@@ -270,8 +274,11 @@ pub struct SettingsState {
     pub brightness_overlay_enabled: bool,
     /// `"auto"` | `"dark"` | `"light"`
     pub color_theme: String,
-    /// `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"`
+    /// `"off"` | `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"`
     pub glass_theme: String,
+    /// `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"` (Dock only)
+    #[serde(default = "default_dock_glass_theme")]
+    pub dock_glass_theme: String,
     /// Liquid Glass surface opacity (`0.20..=1.0`, default `0.78`).
     #[serde(default = "default_glass_opacity")]
     pub glass_opacity: f32,
@@ -315,6 +322,7 @@ impl Default for SettingsState {
             brightness_overlay_enabled: true,
             color_theme: "auto".to_string(),
             glass_theme: "clear-glass".to_string(),
+            dock_glass_theme: default_dock_glass_theme(),
             glass_opacity: default_glass_opacity(),
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
@@ -340,6 +348,7 @@ pub enum SettingsAction {
     ToggleFreeDrag,
     CycleColorTheme,
     CycleGlassTheme,
+    CycleDockGlassTheme,
     SetGlassOpacity(f32),
     ToggleHimeAi,
     ToggleTranslateOptIn,
@@ -369,6 +378,7 @@ pub enum SettingsControl {
 enum RowControlId {
     CycleColorTheme,
     CycleGlassTheme,
+    CycleDockGlassTheme,
     GlassOpacity,
     ToggleTimeFormat24h,
     ToggleNotifSuppression,
@@ -813,6 +823,18 @@ impl SettingsPanel {
             }
             RowControlId::CycleGlassTheme => {
                 self.state.glass_theme = match self.state.glass_theme.as_str() {
+                    "off" => "clear-glass",
+                    "clear-glass" => "dark-frosted",
+                    "dark-frosted" => "light-frosted",
+                    "light-frosted" => "acrylic",
+                    "acrylic" => "auto",
+                    _ => "off",
+                }
+                .to_string();
+                SettingsAction::CycleGlassTheme
+            }
+            RowControlId::CycleDockGlassTheme => {
+                self.state.dock_glass_theme = match self.state.dock_glass_theme.as_str() {
                     "clear-glass" => "dark-frosted",
                     "dark-frosted" => "light-frosted",
                     "light-frosted" => "acrylic",
@@ -820,7 +842,7 @@ impl SettingsPanel {
                     _ => "clear-glass",
                 }
                 .to_string();
-                SettingsAction::CycleGlassTheme
+                SettingsAction::CycleDockGlassTheme
             }
             RowControlId::GlassOpacity => SettingsAction::SetGlassOpacity(self.state.glass_opacity),
             RowControlId::ToggleTimeFormat24h => {
@@ -1209,17 +1231,10 @@ impl SettingsPanel {
                     kind: RowVisual::Picker(capitalize_mode(&self.state.color_theme)),
                 },
                 RenderedRow {
-                    id: RowControlId::CycleGlassTheme,
-                    section: "APPEARANCE",
-                    title: "Glass Blur Theme",
-                    desc: "Clear Glass, Frosted, Acrylic, or Auto across shell".to_string(),
-                    kind: RowVisual::Picker(glass_theme_label(&self.state.glass_theme).to_string()),
-                },
-                RenderedRow {
                     id: RowControlId::GlassOpacity,
                     section: "APPEARANCE",
                     title: "Glass Opacity",
-                    desc: "Adjust Liquid Glass translucency (20% – 100%)".to_string(),
+                    desc: "Adjust Liquid Glass frost & blur (20% – 100%)".to_string(),
                     kind: RowVisual::Slider {
                         value: self.state.glass_opacity,
                         min: 0.20,
@@ -1252,6 +1267,13 @@ impl SettingsPanel {
                 },
             ],
             SettingsTab::Notch => vec![
+                RenderedRow {
+                    id: RowControlId::CycleGlassTheme,
+                    section: "APPEARANCE",
+                    title: "Glass Effect",
+                    desc: "Off, Clear Glass, Frosted, Acrylic, or Auto".to_string(),
+                    kind: RowVisual::Picker(glass_theme_label(&self.state.glass_theme).to_string()),
+                },
                 RenderedRow {
                     id: RowControlId::CycleNotchBehavior,
                     section: "PLACEMENT & BEHAVIOR",
@@ -1288,6 +1310,13 @@ impl SettingsPanel {
                     title: "Enable Dock",
                     desc: "Show the floating macOS-style Dock".to_string(),
                     kind: RowVisual::Toggle(self.state.dock_enabled),
+                },
+                RenderedRow {
+                    id: RowControlId::CycleDockGlassTheme,
+                    section: "BEHAVIOR & SIZE",
+                    title: "Dock Glass Theme",
+                    desc: "Liquid Glass preset for the Dock".to_string(),
+                    kind: RowVisual::Picker(glass_theme_label(&self.state.dock_glass_theme).to_string()),
                 },
                 RenderedRow {
                     id: RowControlId::CycleDockMode,
@@ -1607,6 +1636,10 @@ impl SettingsPanel {
                 self.state.glass_theme = val.to_string();
                 SettingsAction::CycleGlassTheme
             }
+            RowControlId::CycleDockGlassTheme => {
+                self.state.dock_glass_theme = val.to_string();
+                SettingsAction::CycleDockGlassTheme
+            }
             RowControlId::CycleNotchBehavior => {
                 self.state.notch_behavior = val.to_string();
                 self.state.notch_mode = NotchMode::from_edge_and_behavior(
@@ -1638,6 +1671,7 @@ impl SettingsPanel {
     fn dropdown_current_value(&self, id: RowControlId) -> &str {
         match id {
             RowControlId::CycleGlassTheme => &self.state.glass_theme,
+            RowControlId::CycleDockGlassTheme => &self.state.dock_glass_theme,
             RowControlId::CycleNotchBehavior => &self.state.notch_behavior,
             RowControlId::CycleNotchEdge => &self.state.notch_edge,
             RowControlId::CycleDockMode => &self.state.dock_mode,
@@ -1951,7 +1985,7 @@ impl SettingsPanel {
                 action_label,
             } = row.kind
             {
-                let icon_rect = Rect::new(r.x + 12.0, r.y + (r.height - 15.0) * 0.5, 15.0, 15.0);
+                let icon_rect = Rect::new(r.x + 16.0, r.y + (r.height - 15.0) * 0.5, 15.0, 15.0);
                 surface.draw_sf_symbol(
                     icon_rect,
                     icon,
@@ -1960,15 +1994,15 @@ impl SettingsPanel {
                 )?;
                 surface.draw_text(
                     row.title,
-                    Rect::new(r.x + 34.0, r.y + 6.0, r.width * 0.48, 18.0),
-                    12.0,
+                    Rect::new(r.x + 40.0, r.y + 9.0, r.width * 0.48, 18.0),
+                    12.5,
                     palette.text_primary.with_alpha_mul(content_alpha),
                     TextAlign::Leading,
                 )?;
                 surface.draw_text(
                     &row.desc,
-                    Rect::new(r.x + 34.0, r.y + 23.0, r.width * 0.48, 16.0),
-                    10.5,
+                    Rect::new(r.x + 40.0, r.y + 29.0, r.width * 0.48, 16.0),
+                    11.0,
                     palette.text_secondary.with_alpha_mul(content_alpha),
                     TextAlign::Leading,
                 )?;
@@ -1976,7 +2010,7 @@ impl SettingsPanel {
                 let pill_w = 112.0_f32.min(r.width * 0.28);
                 let pill_h = 26.0;
                 let btn = Rect::new(
-                    r.x + r.width - pill_w - 14.0,
+                    r.x + r.width - pill_w - 16.0,
                     r.y + (r.height - pill_h) * 0.5,
                     pill_w,
                     pill_h,
@@ -2006,17 +2040,17 @@ impl SettingsPanel {
                 continue;
             }
 
-            // Crisp monochrome title & secondary subtitle
+            // Crisp monochrome title & secondary subtitle (equal top/bottom & left/right padding)
             surface.draw_text(
                 row.title,
-                Rect::new(r.x + 16.0, r.y + 8.0, r.width * 0.56, 18.0),
+                Rect::new(r.x + 16.0, r.y + 9.0, r.width * 0.56, 18.0),
                 12.5,
                 palette.text_primary.with_alpha_mul(content_alpha),
                 TextAlign::Leading,
             )?;
             surface.draw_text(
                 &row.desc,
-                Rect::new(r.x + 16.0, r.y + 27.0, r.width * 0.58, 16.0),
+                Rect::new(r.x + 16.0, r.y + 29.0, r.width * 0.58, 16.0),
                 11.0,
                 palette.text_secondary.with_alpha_mul(content_alpha),
                 TextAlign::Leading,
@@ -2306,6 +2340,14 @@ impl Default for SettingsPanel {
 fn dropdown_options(id: RowControlId) -> &'static [(&'static str, &'static str)] {
     match id {
         RowControlId::CycleGlassTheme => &[
+            ("off", "Off"),
+            ("clear-glass", "Clear Glass"),
+            ("dark-frosted", "Dark Frosted"),
+            ("light-frosted", "Light Frosted"),
+            ("acrylic", "Acrylic"),
+            ("auto", "Auto"),
+        ],
+        RowControlId::CycleDockGlassTheme => &[
             ("clear-glass", "Clear Glass"),
             ("dark-frosted", "Dark Frosted"),
             ("light-frosted", "Light Frosted"),
@@ -2340,6 +2382,7 @@ fn row_to_action(row: RowControlId) -> SettingsAction {
     match row {
         RowControlId::CycleColorTheme => SettingsAction::CycleColorTheme,
         RowControlId::CycleGlassTheme => SettingsAction::CycleGlassTheme,
+        RowControlId::CycleDockGlassTheme => SettingsAction::CycleDockGlassTheme,
         RowControlId::GlassOpacity => SettingsAction::SetGlassOpacity(default_glass_opacity()),
         RowControlId::CycleNotchBehavior | RowControlId::CycleNotchEdge => {
             SettingsAction::ToggleNotchMode
@@ -2391,6 +2434,7 @@ fn is_background_ipc_error(msg: &str) -> bool {
 
 fn glass_theme_label(theme: &str) -> &'static str {
     match theme {
+        "off" => "Off",
         "dark-frosted" => "Dark Frosted",
         "light-frosted" => "Light Frosted",
         "acrylic" => "Acrylic",
@@ -2580,11 +2624,10 @@ mod tests {
 
         panel.open();
         assert_eq!(panel.selected_index, Some(0));
-        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 1 (Glass Blur Theme)
-        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 2 (Glass Opacity)
-        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 3 (24-Hour Clock)
-        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 4 (Silence Native Toasts)
-        assert_eq!(panel.selected_index, Some(4));
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 1 (Glass Opacity)
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 2 (24-Hour Clock)
+        assert_eq!(panel.handle_key_down(0x28), None); // VK_DOWN -> row 3 (Silence Native Toasts)
+        assert_eq!(panel.selected_index, Some(3));
         assert_eq!(
             panel.handle_key_down(0x0D),
             Some(SettingsControl::ToggleNotifSuppression)
@@ -2999,15 +3042,17 @@ mod tests {
     fn glass_theme_dropdown_selects_all_presets() {
         let mut panel = SettingsPanel::new();
         panel.open();
+        panel.select_tab(SettingsTab::Notch);
         assert_eq!(panel.state.glass_theme, "clear-glass");
 
         let (cx, cy) = find_row_center(&mut panel, RowControlId::CycleGlassTheme);
         for (opt_idx, expected) in [
-            (1, "dark-frosted"),
-            (2, "light-frosted"),
-            (3, "acrylic"),
-            (4, "auto"),
-            (0, "clear-glass"),
+            (0, "off"),
+            (2, "dark-frosted"),
+            (3, "light-frosted"),
+            (4, "acrylic"),
+            (5, "auto"),
+            (1, "clear-glass"),
         ] {
             assert_eq!(
                 panel.handle_click(cx, cy),
