@@ -132,6 +132,98 @@ impl ColorThemeMode {
     }
 }
 
+/// Unified blur / glass material preset applied across Main Notch, Side Notches, Dock, and Settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GlassThemePreset {
+    #[default]
+    ClearGlass,
+    DarkFrosted,
+    LightFrosted,
+    Acrylic,
+    Auto,
+}
+
+impl GlassThemePreset {
+    /// All presets in UI display order.
+    pub const ALL: [Self; 5] = [
+        Self::ClearGlass,
+        Self::DarkFrosted,
+        Self::LightFrosted,
+        Self::Acrylic,
+        Self::Auto,
+    ];
+
+    /// Parses a preset string (`"clear-glass"`, `"dark-frosted"`, `"light-frosted"`, `"acrylic"`,
+    /// `"bloom-glass-theme"`, `"auto"`) case-insensitively, defaulting to `ClearGlass`.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "clear-glass" | "clear" => Self::ClearGlass,
+            "dark-frosted" | "dark" => Self::DarkFrosted,
+            "light-frosted" | "light" => Self::LightFrosted,
+            "acrylic" | "bloom-glass-theme" => Self::Acrylic,
+            "auto" => Self::Auto,
+            _ => Self::ClearGlass,
+        }
+    }
+
+    /// Canonical kebab-case serialization token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClearGlass => "clear-glass",
+            Self::DarkFrosted => "dark-frosted",
+            Self::LightFrosted => "light-frosted",
+            Self::Acrylic => "acrylic",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Human-readable display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ClearGlass => "Clear Glass",
+            Self::DarkFrosted => "Dark Frosted",
+            Self::LightFrosted => "Light Frosted",
+            Self::Acrylic => "Acrylic",
+            Self::Auto => "Auto",
+        }
+    }
+
+    /// Maps this glass preset to its corresponding [`ColorThemeMode`] polarity preference.
+    pub const fn to_color_theme_mode(self) -> ColorThemeMode {
+        match self {
+            Self::ClearGlass | Self::Acrylic | Self::Auto => ColorThemeMode::Auto,
+            Self::DarkFrosted => ColorThemeMode::Dark,
+            Self::LightFrosted => ColorThemeMode::Light,
+        }
+    }
+
+    /// Alpha multiplier for glass surface tinting across software and GPU Acrylic surfaces.
+    pub const fn tint_alpha_multiplier(self) -> f32 {
+        match self {
+            Self::ClearGlass => 0.72,
+            Self::DarkFrosted => 1.15,
+            Self::LightFrosted => 1.10,
+            Self::Acrylic => 1.28,
+            Self::Auto => 1.0,
+        }
+    }
+
+    /// DWM Acrylic tint alpha byte (`0x00..=0xFF`) for GPU DirectComposition surfaces.
+    pub const fn gpu_acrylic_alpha(self, polarity: ThemePolarity) -> u8 {
+        match (self, polarity) {
+            (Self::ClearGlass, ThemePolarity::DarkGlass) => 0x22,
+            (Self::ClearGlass, ThemePolarity::LightGlass) => 0x1E,
+            (Self::DarkFrosted, _) => 0x52,
+            (Self::LightFrosted, _) => 0x48,
+            (Self::Acrylic, ThemePolarity::DarkGlass) => 0x5A,
+            (Self::Acrylic, ThemePolarity::LightGlass) => 0x4E,
+            (Self::Auto, ThemePolarity::DarkGlass) => 0x38,
+            (Self::Auto, ThemePolarity::LightGlass) => 0x32,
+        }
+    }
+}
+
 /// Resolved Liquid Glass polarity for a surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThemePolarity {
@@ -241,6 +333,22 @@ impl AdaptivePalette {
         }
     }
 
+    /// Neutral-glass soft active highlight for sidebar rows and subtle selections.
+    pub const fn highlight_soft(&self) -> Color {
+        match self.polarity {
+            ThemePolarity::DarkGlass => HIGHLIGHT_SOFT,
+            ThemePolarity::LightGlass => LIGHT_HIGHLIGHT_SOFT,
+        }
+    }
+
+    /// Neutral-glass pill active highlight for active tabs and Notch selections.
+    pub const fn highlight_pill(&self) -> Color {
+        match self.polarity {
+            ThemePolarity::DarkGlass => HIGHLIGHT_PILL,
+            ThemePolarity::LightGlass => LIGHT_HIGHLIGHT_PILL,
+        }
+    }
+
     /// Resolves polarity & palette from `mode` and optional sampled `backdrop_luminance` (`0.0..=1.0`).
     /// Under `Auto`: dark backdrops (`< 0.45`) -> `DarkGlass` (white ink); bright backdrops (`>= 0.45`) -> `LightGlass` (dark ink).
     pub fn resolve(mode: ColorThemeMode, backdrop_luminance: Option<f32>) -> Self {
@@ -297,20 +405,32 @@ pub const GLASS_SPECULAR_BOTTOM: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0
 /// Soft inner shadow rim inside the glass border (`rgba(0, 0, 0, 0.24)`).
 pub const GLASS_INNER_SHADE: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x3D);
 
-/// Crisp 1px Liquid Glass hairline border (Dark, `rgba(255, 255, 255, 0.18)`).
-pub const GLASS_HAIRLINE: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x2E);
+/// Subtle 1px Liquid Glass hairline border (Dark, `rgba(255, 255, 255, 0.11)`).
+pub const GLASS_HAIRLINE: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x1C);
 
-/// Crisp 1px Liquid Glass hairline border (Light, `rgba(0, 0, 0, 0.14)`).
-pub const LIGHT_GLASS_HAIRLINE: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x24);
+/// Subtle 1px Liquid Glass hairline border (Light, `rgba(0, 0, 0, 0.086)`).
+pub const LIGHT_GLASS_HAIRLINE: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x16);
 
 /// Soft outer drop shadow base (`rgba(0, 0, 0, 0.30)`).
 pub const GLASS_SHADOW: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x4D);
 
 /// Subtle section & toolbar hairline divider (Dark).
-pub const DIVIDER_HAIRLINE: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x1F);
+pub const DIVIDER_HAIRLINE: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x14);
 
 /// Subtle section & toolbar hairline divider (Light).
-pub const LIGHT_DIVIDER_HAIRLINE: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x1A);
+pub const LIGHT_DIVIDER_HAIRLINE: Color = Color::from_rgba_u8(0x00, 0x00, 0x00, 0x12);
+
+/// Refined neutral-glass soft active highlight (Dark Glass: subtle frosted white).
+pub const HIGHLIGHT_SOFT: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x1A);
+
+/// Refined neutral-glass active pill highlight (Dark Glass: frosted white/slate).
+pub const HIGHLIGHT_PILL: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x26);
+
+/// Refined neutral-glass soft active highlight (Light Glass: subtle slate ink).
+pub const LIGHT_HIGHLIGHT_SOFT: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0x10);
+
+/// Refined neutral-glass active pill highlight (Light Glass: frosted slate ink).
+pub const LIGHT_HIGHLIGHT_PILL: Color = Color::from_rgba_u8(0x11, 0x12, 0x14, 0x1A);
 
 /// Subtle slider track background (Dark).
 pub const SLIDER_TRACK: Color = Color::from_rgba_u8(0xFF, 0xFF, 0xFF, 0x28);
@@ -423,8 +543,11 @@ pub const CORNER_RADIUS: f32 = 18.0;
 /// Safe inner padding in DIPs for expanded surfaces.
 pub const SAFE_PADDING: f32 = 24.0;
 
-/// Default UI font family on Windows 11/10.
-pub const FONT_FAMILY: &str = "Segoe UI";
+/// Default UI font family on Windows 11 (`"Segoe UI Variable"`), with `"Inter"` / `"Segoe UI"` fallback.
+pub const FONT_FAMILY: &str = "Segoe UI Variable";
+
+/// Ordered font family preference list for DirectWrite resolution.
+pub const FONT_FAMILY_FALLBACKS: [&str; 3] = ["Segoe UI Variable", "Inter", "Segoe UI"];
 
 #[cfg(test)]
 mod tests {
@@ -483,5 +606,38 @@ mod tests {
     fn geometry_constants_match_spec() {
         assert_eq!(CORNER_RADIUS, 18.0);
         assert_eq!(SAFE_PADDING, 24.0);
+    }
+
+    #[test]
+    fn glass_theme_preset_roundtrips_and_maps_polarity() {
+        assert_eq!(GlassThemePreset::from_str_lossy("clear-glass"), GlassThemePreset::ClearGlass);
+        assert_eq!(GlassThemePreset::from_str_lossy("Dark-Frosted"), GlassThemePreset::DarkFrosted);
+        assert_eq!(GlassThemePreset::from_str_lossy("light-frosted"), GlassThemePreset::LightFrosted);
+        assert_eq!(GlassThemePreset::from_str_lossy("acrylic"), GlassThemePreset::Acrylic);
+        assert_eq!(GlassThemePreset::from_str_lossy("bloom-glass-theme"), GlassThemePreset::Acrylic);
+        assert_eq!(GlassThemePreset::from_str_lossy("auto"), GlassThemePreset::Auto);
+        assert_eq!(GlassThemePreset::from_str_lossy("unknown"), GlassThemePreset::ClearGlass);
+
+        assert_eq!(GlassThemePreset::DarkFrosted.to_color_theme_mode(), ColorThemeMode::Dark);
+        assert_eq!(GlassThemePreset::LightFrosted.to_color_theme_mode(), ColorThemeMode::Light);
+        assert_eq!(GlassThemePreset::ClearGlass.to_color_theme_mode(), ColorThemeMode::Auto);
+        for preset in GlassThemePreset::ALL {
+            assert_eq!(GlassThemePreset::from_str_lossy(preset.as_str()), preset);
+        }
+    }
+
+    #[test]
+    fn neutral_highlight_tokens_and_modern_typography_are_defined() {
+        assert_eq!(FONT_FAMILY, "Segoe UI Variable");
+        assert_eq!(FONT_FAMILY_FALLBACKS, ["Segoe UI Variable", "Inter", "Segoe UI"]);
+
+        let dark = AdaptivePalette::dark_glass();
+        assert_eq!(dark.highlight_soft(), HIGHLIGHT_SOFT);
+        assert_eq!(dark.highlight_pill(), HIGHLIGHT_PILL);
+
+        let light = AdaptivePalette::light_glass();
+        assert_eq!(light.highlight_soft(), LIGHT_HIGHLIGHT_SOFT);
+        assert_eq!(light.highlight_pill(), LIGHT_HIGHLIGHT_PILL);
+        assert!(GLASS_BORDER.a < 0.15);
     }
 }

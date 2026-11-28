@@ -32,9 +32,10 @@ use windows::Win32::System::Threading::{
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
-    UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE,
-    TRACKMOUSEEVENT, VK_LBUTTON, VK_RBUTTON, VK_SHIFT,
+    GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SendInput, SetCapture, TrackMouseEvent,
+    UnregisterHotKey, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON,
+    VK_LWIN, VK_RBUTTON,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
@@ -97,7 +98,7 @@ use hime_island_native::telemetry::{
     self, AudioDeviceVolume, NetworkKind, RunningWindow, TelemetryHandle, TelemetrySnapshot,
     WifiNetworkInfo,
 };
-use hime_island_native::theme::ColorThemeMode;
+use hime_island_native::theme::{ColorThemeMode, GlassThemePreset};
 
 const CONTROLLER_CLASS: PCWSTR = w!("HimeIslandNativeController");
 const TRAY_ICON_ID: u32 = 1;
@@ -1275,6 +1276,7 @@ struct AppShell {
     dragging_notch_slider: bool,
     dragging_mixer_device: Option<String>,
     last_preview_hover_idx: Option<usize>,
+    pending_preview_hover: Option<(usize, Instant)>,
     drag_moved: bool,
     drag_start_cursor: (i32, i32),
     notch_leave_at: Option<Instant>,
@@ -1409,6 +1411,7 @@ impl AppShell {
             dragging_notch_slider: false,
             dragging_mixer_device: None,
             last_preview_hover_idx: None,
+            pending_preview_hover: None,
             drag_moved: false,
             drag_start_cursor: (0, 0),
             notch_leave_at: None,
@@ -1450,6 +1453,42 @@ impl AppShell {
         }
         if let Some(ref surf) = self.drawer_surface {
             surf.set_color_theme_mode(mode);
+        }
+    }
+
+    fn apply_glass_theme_to_surfaces(&self) {
+        let preset = GlassThemePreset::from_str_lossy(&self.native_settings.glass_theme);
+        self.notch_surface.set_glass_theme(preset);
+        self.dock_surface.set_glass_theme(preset);
+        if let Some(ref surf) = self.overlay_left_surface {
+            surf.set_glass_theme(preset);
+        }
+        if let Some(ref surf) = self.overlay_right_surface {
+            surf.set_glass_theme(preset);
+        }
+        if let Some(ref surf) = self.settings_surface {
+            surf.set_glass_theme(preset);
+        }
+        if let Some(ref surf) = self.drawer_surface {
+            surf.set_glass_theme(preset);
+        }
+    }
+
+    fn apply_glass_opacity_to_surfaces(&self) {
+        let opacity = self.native_settings.glass_opacity;
+        self.notch_surface.set_glass_opacity(opacity);
+        self.dock_surface.set_glass_opacity(opacity);
+        if let Some(ref surf) = self.overlay_left_surface {
+            surf.set_glass_opacity(opacity);
+        }
+        if let Some(ref surf) = self.overlay_right_surface {
+            surf.set_glass_opacity(opacity);
+        }
+        if let Some(ref surf) = self.settings_surface {
+            surf.set_glass_opacity(opacity);
+        }
+        if let Some(ref surf) = self.drawer_surface {
+            surf.set_glass_opacity(opacity);
         }
     }
 
@@ -1776,6 +1815,10 @@ impl AppShell {
         settings_surface.set_color_theme_mode(ColorThemeMode::from_str_lossy(
             &self.native_settings.color_theme,
         ));
+        settings_surface.set_glass_theme(GlassThemePreset::from_str_lossy(
+            &self.native_settings.glass_theme,
+        ));
+        settings_surface.set_glass_opacity(self.native_settings.glass_opacity);
         self.settings_surface = Some(settings_surface);
         self.backdrop_settings = BackdropSlot::default();
         self.capture_settings_backdrop(true, true);
@@ -1814,6 +1857,10 @@ impl AppShell {
         drawer_surface.set_color_theme_mode(ColorThemeMode::from_str_lossy(
             &self.native_settings.color_theme,
         ));
+        drawer_surface.set_glass_theme(GlassThemePreset::from_str_lossy(
+            &self.native_settings.glass_theme,
+        ));
+        drawer_surface.set_glass_opacity(self.native_settings.glass_opacity);
         self.drawer_surface = Some(drawer_surface);
         self.backdrop_drawer = BackdropSlot::default();
         self.capture_drawer_backdrop(true, true);
@@ -1900,6 +1947,9 @@ impl AppShell {
         let norm = ns.normalized();
         self.native_settings = norm.clone();
         self.apply_color_theme_to_surfaces();
+        self.apply_glass_theme_to_surfaces();
+        self.apply_glass_opacity_to_surfaces();
+        self.mark_all_dirty();
         apply_native_settings_to_panel(&norm, &mut self.settings);
         if save {
             let _ = SettingsStore::save(&norm);
@@ -2030,6 +2080,10 @@ impl AppShell {
         }
         let hwnd = surf.hwnd();
         subclass_surface(hwnd);
+        surf.set_glass_theme(GlassThemePreset::from_str_lossy(
+            &self.native_settings.glass_theme,
+        ));
+        surf.set_glass_opacity(self.native_settings.glass_opacity);
         if is_left {
             self.overlay_left_surface = Some(surf);
             self.dirty_overlay_left = true;
@@ -2839,6 +2893,14 @@ impl AppShell {
             self.handle_dock_extra_event(ev.kind, ctrl_hwnd);
             return;
         }
+        if self
+            .settings_surface
+            .as_ref()
+            .is_some_and(|s| ev.hwnd == s.hwnd().0 as isize)
+        {
+            self.handle_settings_extra_event(ev.kind, ctrl_hwnd);
+            return;
+        }
         if ev.hwnd == self.notch_surface.hwnd().0 as isize {
             self.handle_notch_extra_event(ev.kind, ctrl_hwnd);
         }
@@ -2974,7 +3036,7 @@ impl AppShell {
                 self.ensure_fast_timer(ctrl_hwnd);
             }
             ExtraSurfaceEventKind::MouseWheel { delta_x, delta_y } => {
-                if self.notch.is_expanded && (delta_x.abs() > 0.01 || delta_y.abs() > 0.01) {
+                if delta_x.abs() > 0.01 || delta_y.abs() > 0.01 {
                     let scale = (self.notch_surface.dpi() / 96.0).max(0.5);
                     let (nw, nh) = self.notch_surface.dip_size();
                     let surf_rect = Rect::new(0.0, 0.0, nw, nh);
@@ -2986,30 +3048,15 @@ impl AppShell {
                     if self
                         .notch
                         .handle_header_scroll_at(lx, ly, surf_rect, delta_x, delta_y)
+                        || self
+                            .notch
+                            .handle_scroll_step(lx, ly, surf_rect, delta_x, delta_y)
                     {
                         self.refresh_active_notch_panel();
                         self.dirty_notch = true;
                         self.update_surface_click_through();
                         self.render_all();
                         self.ensure_fast_timer(ctrl_hwnd);
-                    } else {
-                        let shift_held =
-                            unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 };
-                        let delta_steps = if delta_y.abs() > 0.01 { delta_y } else { delta_x };
-                        if (shift_held || self.notch.active_panel != NotchPanel::CommandCenter)
-                            && delta_steps.abs() > 0.01
-                        {
-                            let act = if delta_steps > 0.0 {
-                                NotchAction::PrevPanel
-                            } else {
-                                NotchAction::NextPanel
-                            };
-                            self.execute_notch_action(act, ctrl_hwnd);
-                            self.dirty_notch = true;
-                            self.update_surface_click_through();
-                            self.render_all();
-                            self.ensure_fast_timer(ctrl_hwnd);
-                        }
                     }
                 }
             }
@@ -3058,6 +3105,7 @@ impl AppShell {
             | NotchPanel::Calendar
             | NotchPanel::Shortcuts
             | NotchPanel::Shelf
+            | NotchPanel::Pomodoro
             | NotchPanel::HimeAi => {}
         }
     }
@@ -3334,38 +3382,19 @@ impl AppShell {
                 if next_hover != self.last_preview_hover_idx {
                     self.last_preview_hover_idx = next_hover;
                     if let Some(idx) = next_hover {
-                        if let Some(item) = self.dock.items().get(idx) {
-                            if !item.hwnds.is_empty() {
-                                let items: Vec<(isize, String)> = item
-                                    .hwnds
-                                    .iter()
-                                    .map(|&hwnd| {
-                                        let title = self
-                                            .last_running_windows
-                                            .iter()
-                                            .find(|w| w.hwnd == hwnd)
-                                            .map(|w| w.title.clone())
-                                            .filter(|t| !t.trim().is_empty())
-                                            .unwrap_or_else(|| item.label.clone());
-                                        (hwnd, title)
-                                    })
-                                    .collect();
-                                self.os_worker.send(OsCommand::CaptureDockPreviews {
-                                    app_idx: idx,
-                                    items,
-                                });
-                            }
-                        }
+                        self.pending_preview_hover = Some((idx, Instant::now()));
                     } else {
+                        self.pending_preview_hover = None;
                         self.dock.set_window_previews(Vec::new());
                     }
                 }
-                if prev_hidden != self.dock.is_hidden
+                let hover_state_changed = prev_hidden != self.dock.is_hidden
                     || prev_hover != next_hover
-                    || prev_has_hover != self.dock.has_hover()
-                    || self.dock.has_hover()
-                {
+                    || prev_has_hover != self.dock.has_hover();
+                if hover_state_changed || (self.dock.has_hover() && !self.fast_timer_active) {
                     render_now = true;
+                } else if self.dock.has_hover() {
+                    self.dirty_dock = true;
                 }
             }
             SurfaceEventKind::LeftButtonDown { x, y } => {
@@ -3375,6 +3404,7 @@ impl AppShell {
                     focus_hwnd(hwnd);
                     self.dock.clear_hover();
                     self.last_preview_hover_idx = None;
+                    self.pending_preview_hover = None;
                     render_now = true;
                 } else if let Some(act) = self.dock.hit_test_action(lx, ly, rect) {
                     self.execute_dock_action(act, ctrl_hwnd);
@@ -3404,6 +3434,7 @@ impl AppShell {
                 self.dock.clear_hover();
                 self.dock.set_edge_hovered(false);
                 self.last_preview_hover_idx = None;
+                self.pending_preview_hover = None;
                 self.dirty_dock = true;
                 self.update_surface_click_through();
                 self.render_all();
@@ -3452,6 +3483,37 @@ impl AppShell {
             }
             DockAction::ToggleAiDrawer => {
                 self.handle_action(HotkeyAction::ToggleAssistant, ctrl_hwnd);
+            }
+            DockAction::OpenStartMenu => {
+                let inputs = [
+                    INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: VK_LWIN,
+                                wScan: 0,
+                                dwFlags: Default::default(),
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                    INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: VK_LWIN,
+                                wScan: 0,
+                                dwFlags: KEYEVENTF_KEYUP,
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                ];
+                unsafe {
+                    let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                }
             }
             DockAction::ToggleSpaces => {
                 let opened = self.dock.toggle_spaces();
@@ -3617,21 +3679,17 @@ impl AppShell {
                                         .into_iter()
                                         .find(|(id, _)| id == drag_dev_id)
                                         .map(|(_, bar)| {
-                                            let r = ((lx - bar.x) / bar.width.max(1.0)).clamp(0.0, 1.0);
+                                            let r = ((bar.y + bar.height - ly)
+                                                / bar.height.max(1.0))
+                                            .clamp(0.0, 1.0);
                                             (r * 100.0).round() as u8
                                         })
                                 });
                             if let Some(pct) = target_pct {
-                                if let Some(slot) = self
-                                    .overlays
+                                self.overlays
                                     .volume
-                                    .devices
-                                    .iter_mut()
-                                    .find(|d| d.id == *drag_dev_id)
-                                {
-                                    slot.percent = pct;
-                                    slot.muted = pct == 0;
-                                }
+                                    .set_device_adjusting(Some(drag_dev_id.clone()));
+                                self.overlays.volume.set_device_percent(drag_dev_id, pct);
                                 self.os_worker.send(OsCommand::SetAudioDeviceVolume {
                                     device_id: drag_dev_id.clone(),
                                     percent: pct,
@@ -3663,16 +3721,10 @@ impl AppShell {
                     if let Some((dev_id, pct)) =
                         self.overlays.volume.hit_test_device_slider(lx, ly, surf_rect)
                     {
-                        if let Some(slot) = self
-                            .overlays
+                        self.overlays
                             .volume
-                            .devices
-                            .iter_mut()
-                            .find(|d| d.id == dev_id)
-                        {
-                            slot.percent = pct;
-                            slot.muted = pct == 0;
-                        }
+                            .set_device_adjusting(Some(dev_id.clone()));
+                        self.overlays.volume.set_device_percent(&dev_id, pct);
                         self.overlays.volume.set_dragging(true);
                         self.dragging_mixer_device = Some(dev_id.clone());
                         unsafe {
@@ -3830,6 +3882,19 @@ impl AppShell {
         self.dirty_notch = true;
     }
 
+    fn handle_settings_extra_event(&mut self, kind: ExtraSurfaceEventKind, ctrl_hwnd: HWND) {
+        match kind {
+            ExtraSurfaceEventKind::MouseWheel { delta_y, .. } => {
+                if delta_y.abs() > 0.01 && self.settings.handle_scroll(-delta_y * 32.0) {
+                    self.dirty_settings = true;
+                    self.render_all();
+                    self.ensure_fast_timer(ctrl_hwnd);
+                }
+            }
+            ExtraSurfaceEventKind::MouseLeave | ExtraSurfaceEventKind::RightButtonUp { .. } => {}
+        }
+    }
+
     fn handle_settings_surface_event(&mut self, kind: SurfaceEventKind, ctrl_hwnd: HWND) {
         let Some((scale, surf_hwnd)) = self
             .settings_surface
@@ -3840,7 +3905,16 @@ impl AppShell {
         };
         match kind {
             SurfaceEventKind::MouseMove { x, y } => {
-                if self.settings.set_hovered_at(x / scale, y / scale) {
+                let lx = x / scale;
+                let ly = y / scale;
+                if self.settings.is_dragging() {
+                    if let Some(act) = self.settings.handle_drag(lx, ly) {
+                        self.dirty_settings = true;
+                        self.apply_settings_action(act, ctrl_hwnd);
+                        self.render_all();
+                    }
+                    self.ensure_fast_timer(ctrl_hwnd);
+                } else if self.settings.set_hovered_at(lx, ly) {
                     self.dirty_settings = true;
                     self.render_all();
                     self.ensure_fast_timer(ctrl_hwnd);
@@ -3857,7 +3931,10 @@ impl AppShell {
                 }
                 self.ensure_fast_timer(ctrl_hwnd);
             }
-            SurfaceEventKind::LeftButtonUp { .. } | SurfaceEventKind::DropFiles { .. } => {}
+            SurfaceEventKind::LeftButtonUp { .. } => {
+                self.settings.handle_mouse_up();
+            }
+            SurfaceEventKind::DropFiles { .. } => {}
         }
     }
 
@@ -3869,12 +3946,18 @@ impl AppShell {
                     self.send_ipc(IpcCommand::RefreshAiSettingsAndCounts);
                 }
             }
+            SettingsAction::SetGlassOpacity(opacity) => {
+                self.settings.state.glass_opacity = opacity.clamp(0.20, 1.0);
+                let ns = extract_native_settings_from_panel(&self.settings);
+                self.apply_native_settings(&ns, true);
+            }
             SettingsAction::UpdateSettings
             | SettingsAction::ToggleDockMode
             | SettingsAction::ToggleNotchMode
             | SettingsAction::ToggleFreeDrag
             | SettingsAction::ToggleHimeAi
             | SettingsAction::CycleColorTheme
+            | SettingsAction::CycleGlassTheme
             | SettingsAction::ResetToDefaults => {
                 let ns = extract_native_settings_from_panel(&self.settings);
                 self.apply_native_settings(&ns, true);
@@ -4972,6 +5055,36 @@ impl AppShell {
                 self.send_ipc(IpcCommand::FocusComplete { session_id });
             }
         }
+        if let Some((idx, hovered_at)) = self.pending_preview_hover {
+            if now.duration_since(hovered_at) >= Duration::from_millis(90) {
+                self.pending_preview_hover = None;
+                if self.last_preview_hover_idx == Some(idx) {
+                    if let Some(item) = self.dock.items().get(idx) {
+                        if !item.hwnds.is_empty() {
+                            let items: Vec<(isize, String)> = item
+                                .hwnds
+                                .iter()
+                                .map(|&hwnd| {
+                                    let title = self
+                                        .last_running_windows
+                                        .iter()
+                                        .find(|w| w.hwnd == hwnd)
+                                        .map(|w| w.title.clone())
+                                        .filter(|t| !t.trim().is_empty())
+                                        .unwrap_or_else(|| item.label.clone());
+                                    (hwnd, title)
+                                })
+                                .collect();
+                            self.os_worker.send(OsCommand::CaptureDockPreviews {
+                                app_idx: idx,
+                                items,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         let dock_anim = self.dock.tick(dt);
         if dock_anim {
             self.dirty_dock = true;
@@ -5009,8 +5122,15 @@ impl AppShell {
             || set_anim
             || drw_anim
             || watch_outside_click
+            || self.pending_preview_hover.is_some()
             || self.notch.has_active_banner()
             || self.overlays.volume.is_adjusting()
+            || self
+                .overlays
+                .volume
+                .adjusting_device_id
+                .as_deref()
+                .is_some_and(|id| self.overlays.volume.is_device_adjusting(id))
             || self.overlays.brightness.is_adjusting();
 
         self.sync_backdrop_worker_targets();
@@ -5417,6 +5537,8 @@ fn apply_native_settings_to_panel(ns: &NativeSettings, panel: &mut SettingsPanel
     panel.state.volume_overlay_enabled = norm.volume_overlay_enabled;
     panel.state.brightness_overlay_enabled = norm.brightness_overlay_enabled;
     panel.state.color_theme = norm.color_theme.clone();
+    panel.state.glass_theme = norm.glass_theme.clone();
+    panel.state.glass_opacity = norm.glass_opacity;
     panel.state.hime_ai_enabled = norm.hime_ai_enabled;
     panel.state.hime_router_url = norm.hime_router_url.clone();
     panel.state.hime_router_model = norm.hime_router_model.clone();
@@ -5458,6 +5580,8 @@ fn extract_native_settings_from_panel(panel: &SettingsPanel) -> NativeSettings {
         volume_overlay_enabled: panel.state.volume_overlay_enabled,
         brightness_overlay_enabled: panel.state.brightness_overlay_enabled,
         color_theme: panel.state.color_theme.clone(),
+        glass_theme: panel.state.glass_theme.clone(),
+        glass_opacity: panel.state.glass_opacity,
         hime_ai_enabled: panel.state.hime_ai_enabled,
         hime_router_url: panel.state.hime_router_url.clone(),
         hime_router_model: panel.state.hime_router_model.clone(),

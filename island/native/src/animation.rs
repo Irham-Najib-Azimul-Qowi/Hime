@@ -75,6 +75,8 @@ impl Spring {
     pub const RECEDE: Self = Self::new(0.3, 0.0);
     /// Slider or switch knob settling back after release: ~0.18s, zero wobble.
     pub const KNOB_SETTLE: Self = Self::new(0.18, 0.0);
+    /// Snappy Dock icon hover magnification (`stiffness: 420.0, damping: 28.0`), zero stutter on rapid hover.
+    pub const DOCK_MAGNIFY: Self = Self::new(0.306_588, 0.316_870);
 
     /// Creates a spring from a perceptual `duration` (seconds) and `bounce`.
     pub const fn new(duration: f32, bounce: f32) -> Self {
@@ -282,6 +284,11 @@ impl SpringValue {
     /// Apple `KNOB_SETTLE` preset for slider/toggle release settle.
     pub fn knob_settle(initial: f32) -> Self {
         Self::from_spring(initial, Spring::KNOB_SETTLE)
+    }
+
+    /// Snappy Dock hover magnification preset (`stiffness: 420.0, damping: 28.0`).
+    pub fn dock_magnify(initial: f32) -> Self {
+        Self::new(initial, 420.0, 28.0, 1.0)
     }
 
     /// Updates physical parameters from `spring` without resetting value or velocity.
@@ -493,5 +500,34 @@ mod tests {
             .fold(0.0_f32, f32::max);
         assert!(peak > 1.02, "peak {peak}");
         assert!(settle_animated(Spring::SNAPPY, 120, 1.0 / 120.0).is_at_rest());
+    }
+
+    #[test]
+    fn dock_magnify_spring_matches_stiffness_420_damping_28_and_retargets_smoothly() {
+        let (stiff, damp) = Spring::DOCK_MAGNIFY.to_stiffness_damping();
+        assert!((stiff - 420.0).abs() < 0.05, "stiffness={stiff}");
+        assert!((damp - 28.0).abs() < 0.05, "damping={damp}");
+
+        let mut sv = SpringValue::dock_magnify(1.0);
+        assert_eq!(sv.stiffness, 420.0);
+        assert_eq!(sv.damping, 28.0);
+
+        // Simulate rapid hover sweep: 1.0 -> 1.65 -> 1.15 -> 1.65
+        sv.set_target(1.65);
+        for _ in 0..4 {
+            let v = sv.tick(1.0 / 120.0);
+            assert!(v.is_finite());
+        }
+        sv.set_target(1.15);
+        for _ in 0..4 {
+            let v = sv.tick(1.0 / 120.0);
+            assert!(v.is_finite());
+        }
+        sv.set_target(1.65);
+        for _ in 0..120 {
+            sv.tick(1.0 / 120.0);
+        }
+        assert!(sv.is_settled());
+        assert!((sv.value - 1.65).abs() < 0.02);
     }
 }

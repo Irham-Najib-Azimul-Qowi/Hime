@@ -37,6 +37,8 @@ const HANDLE_STRIP_HEIGHT: f32 = 4.0;
 const MIN_MAGNIFY_SCALE: f32 = 1.0;
 const MAX_MAGNIFY_SCALE: f32 = 1.65;
 const MAGNIFY_EFFECT_WIDTH: f32 = 190.0;
+/// Smooth return spring when the cursor leaves the Dock magnification band.
+const DOCK_MAGNIFY_RETURN: Spring = Spring::new(0.22, 0.0);
 const BOUNCE_DURATION_SECS: f32 = 0.38;
 const MAX_RUNNING_GROUPS: usize = 12;
 const AUTO_HIDE_GRACE_SECS: f32 = 1.0;
@@ -182,6 +184,8 @@ impl SpaceEntry {
 /// Clickable / context action emitted by [`DockBar::hit_test_action`] and [`DockBar::hit_test_context_action`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockAction {
+    /// Open the Windows Start Menu from the permanent Start anchor button.
+    OpenStartMenu,
     /// Focus or launch the application item at `index`.
     App(usize),
     /// Pin or unpin the application item at `index`.
@@ -269,6 +273,7 @@ pub struct UtilityLayout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DockHoverTarget {
+    StartMenu,
     App(usize),
     WindowPreview(usize, isize),
     AiDrawer,
@@ -306,7 +311,7 @@ pub struct DockItem {
 }
 
 fn default_item_scale() -> SpringValue {
-    SpringValue::interactive(1.0)
+    SpringValue::dock_magnify(1.0)
 }
 
 impl DockItem {
@@ -327,7 +332,7 @@ impl DockItem {
             badge_count: 0,
             hwnds: Vec::new(),
             icon: None,
-            hover_scale: SpringValue::interactive(1.0),
+            hover_scale: SpringValue::dock_magnify(1.0),
             bounce_timer: 0.0,
             bounce_amplitude: 0.0,
         }
@@ -353,6 +358,7 @@ pub struct DockBar {
     pub is_overlapped: bool,
     pub is_edge_hovered: bool,
     pub ai_enabled: bool,
+    pub show_start: bool,
     pub show_dividers: bool,
     pub show_hime_ai: bool,
     pub show_desktop: bool,
@@ -399,6 +405,7 @@ impl DockBar {
             is_overlapped: false,
             is_edge_hovered: false,
             ai_enabled: true,
+            show_start: true,
             show_dividers: true,
             show_hime_ai: true,
             show_desktop: true,
@@ -514,6 +521,9 @@ impl DockBar {
     }
 
     fn set_hover_target(&mut self, target: Option<DockHoverTarget>) {
+        if self.hovered_target == target {
+            return;
+        }
         self.hovered_target = target;
         self.refresh_tooltip_target();
     }
@@ -585,6 +595,14 @@ impl DockBar {
         self.ai_enabled = enabled;
         self.show_hime_ai = enabled;
         if !enabled && self.hovered_target == Some(DockHoverTarget::AiDrawer) {
+            self.set_hover_target(None);
+        }
+    }
+
+    /// Shows or hides the permanent Windows Start anchor button on the left of the Dock.
+    pub fn set_show_start(&mut self, show: bool) {
+        self.show_start = show;
+        if !show && self.hovered_target == Some(DockHoverTarget::StartMenu) {
             self.set_hover_target(None);
         }
     }
@@ -1440,12 +1458,13 @@ impl DockBar {
         (left, left + ICON_BASE_SIZE)
     }
 
-    /// Authentic macOS cosine-based magnification targets driven by Apple `Spring` curves.
+    /// Authentic macOS cosine-based magnification targets driven by snappy [`Spring::DOCK_MAGNIFY`] curves.
     fn update_magnification_targets(&mut self) {
         let Some(mouse_pos) = self.hover_mouse_x else {
-            let return_spring = Spring::new(0.26, 0.0);
             for item in &mut self.items {
-                item.hover_scale.animate_to(MIN_MAGNIFY_SCALE, return_spring);
+                if (item.hover_scale.target - MIN_MAGNIFY_SCALE).abs() > 1e-4 {
+                    item.hover_scale.animate_to(MIN_MAGNIFY_SCALE, DOCK_MAGNIFY_RETURN);
+                }
             }
             return;
         };
@@ -1473,7 +1492,9 @@ impl DockBar {
                 let scale_factor = (1.0 - theta.cos()) * 0.5;
                 MIN_MAGNIFY_SCALE + scale_factor * (MAX_MAGNIFY_SCALE - MIN_MAGNIFY_SCALE)
             };
-            item.hover_scale.animate_to(target, Spring::INTERACTIVE);
+            if (item.hover_scale.target - target).abs() > 1e-4 {
+                item.hover_scale.animate_to(target, Spring::DOCK_MAGNIFY);
+            }
         }
     }
 
@@ -1525,14 +1546,30 @@ impl DockBar {
         self.update_magnification_targets();
     }
 
+    fn set_non_app_hover(&mut self, target: DockHoverTarget) {
+        self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
+        if self.hovered_target == Some(target) && self.hover_mouse_x.is_none() {
+            return;
+        }
+        self.hovered_index = None;
+        self.hover_mouse_x = None;
+        self.set_hover_target(Some(target));
+        self.update_magnification_targets();
+        if self.is_hidden {
+            self.recompute_hidden();
+        }
+    }
+
     /// Performs hit-testing at `(x, y)` and updates hover state, continuous cosine wave magnification,
     /// utility buttons, Spaces/Tray flyout items, and bottom-edge wake region.
     pub fn set_hovered_at(&mut self, x: f32, y: f32, surface_rect: Rect) -> Option<usize> {
         if self.is_hidden && self.show_progress.value <= 0.2 {
             if point_in_rect(x, y, self.wake_hit_rect(surface_rect)) {
-                self.set_edge_hovered(true);
+                if !self.is_edge_hovered {
+                    self.set_edge_hovered(true);
+                }
                 self.set_hover_target(Some(DockHoverTarget::HandleStrip));
-            } else {
+            } else if self.is_edge_hovered || self.has_hover() {
                 self.set_edge_hovered(false);
                 self.clear_hover();
             }
@@ -1540,90 +1577,66 @@ impl DockBar {
         }
 
         match self.hit_test_action(x, y, surface_rect) {
+            Some(DockAction::OpenStartMenu) => {
+                self.set_non_app_hover(DockHoverTarget::StartMenu);
+                None
+            }
             Some(DockAction::App(idx)) => {
                 let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
+                let target_changed = self.hovered_target != Some(DockHoverTarget::App(idx));
+                let pos_changed = self
+                    .hover_mouse_x
+                    .map_or(true, |prev| (prev - rest_x).abs() > 0.25);
                 self.hovered_index = Some(idx);
-                self.hover_mouse_x = Some(rest_x);
-                self.set_hover_target(Some(DockHoverTarget::App(idx)));
                 self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
-                self.update_magnification_targets();
+                if target_changed {
+                    self.set_hover_target(Some(DockHoverTarget::App(idx)));
+                }
+                if self.is_hidden {
+                    self.recompute_hidden();
+                }
+                if target_changed || pos_changed {
+                    self.hover_mouse_x = Some(rest_x);
+                    self.update_magnification_targets();
+                }
                 Some(idx)
             }
             Some(DockAction::ToggleAiDrawer) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::AiDrawer));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::AiDrawer);
                 None
             }
             Some(DockAction::ToggleSpaces) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::Spaces));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::Spaces);
                 None
             }
             Some(DockAction::SwitchDesktop(idx)) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::SpaceItem(idx)));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::SpaceItem(idx));
                 None
             }
             Some(DockAction::NewDesktop) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::NewSpace));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::NewSpace);
                 None
             }
             Some(DockAction::OpenNotifications) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::Notifications));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::Notifications);
                 None
             }
             Some(DockAction::ToggleTray) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::Tray));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::Tray);
                 None
             }
             Some(DockAction::ActivateTrayItem(idx)) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::TrayItem(idx)));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::TrayItem(idx));
                 None
             }
             Some(DockAction::ExecuteContextMenuItem(row_idx)) => {
-                self.hovered_index = None;
-                self.hover_mouse_x = None;
-                self.set_hover_target(Some(DockHoverTarget::ContextMenuItem(row_idx)));
-                self.update_magnification_targets();
-                self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                self.recompute_hidden();
+                self.set_non_app_hover(DockHoverTarget::ContextMenuItem(row_idx));
                 None
             }
             Some(DockAction::WakeHiddenDock) => {
-                self.set_edge_hovered(true);
+                if !self.is_edge_hovered {
+                    self.set_edge_hovered(true);
+                }
                 self.set_hover_target(Some(DockHoverTarget::HandleStrip));
                 None
             }
@@ -1638,17 +1651,27 @@ impl DockBar {
                     let dock = self.dock_rect(surface_rect);
                     if let Some(strip) = self.preview_strip_rect(surface_rect, dock) {
                         if let Some(hwnd) = self.hit_test_preview_window(x, y, surface_rect) {
-                            self.hovered_index = Some(app_idx);
-                            self.set_hover_target(Some(DockHoverTarget::WindowPreview(app_idx, hwnd)));
+                            let target = DockHoverTarget::WindowPreview(app_idx, hwnd);
                             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                            self.recompute_hidden();
+                            if self.hovered_target != Some(target) {
+                                self.hovered_index = Some(app_idx);
+                                self.set_hover_target(Some(target));
+                                if self.is_hidden {
+                                    self.recompute_hidden();
+                                }
+                            }
                             return None;
                         }
                         if point_in_rect(x, y, strip) {
-                            self.hovered_index = Some(app_idx);
-                            self.set_hover_target(Some(DockHoverTarget::App(app_idx)));
+                            let target = DockHoverTarget::App(app_idx);
                             self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                            self.recompute_hidden();
+                            if self.hovered_target != Some(target) {
+                                self.hovered_index = Some(app_idx);
+                                self.set_hover_target(Some(target));
+                                if self.is_hidden {
+                                    self.recompute_hidden();
+                                }
+                            }
                             return None;
                         }
                     }
@@ -1664,13 +1687,23 @@ impl DockBar {
                 };
                 if in_items_band {
                     let rest_x = self.map_cursor_x_to_resting_x(x, surface_rect);
+                    let target_changed = self.hovered_target.is_some();
+                    let pos_changed = self
+                        .hover_mouse_x
+                        .map_or(true, |prev| (prev - rest_x).abs() > 0.25);
                     self.hovered_index = None;
-                    self.hover_mouse_x = Some(rest_x);
-                    self.set_hover_target(None);
                     self.hide_grace_timer = AUTO_HIDE_GRACE_SECS;
-                    self.recompute_hidden();
-                    self.update_magnification_targets();
-                } else {
+                    if target_changed {
+                        self.set_hover_target(None);
+                    }
+                    if self.is_hidden {
+                        self.recompute_hidden();
+                    }
+                    if target_changed || pos_changed {
+                        self.hover_mouse_x = Some(rest_x);
+                        self.update_magnification_targets();
+                    }
+                } else if self.has_hover() {
                     self.clear_hover();
                 }
                 None
@@ -1746,18 +1779,34 @@ impl DockBar {
         self.dock_size.util_btn_size()
     }
 
+    /// Returns the bounding rectangle of the permanent Windows Start anchor button on the left of the Dock.
+    pub fn start_rect(&self, dock: Rect) -> Option<Rect> {
+        if !self.show_start {
+            return None;
+        }
+        let dock_h = self.dock_size.dock_height();
+        let size = self.dock_size.icon_base_size();
+        let bottom_y = dock.y + dock_h - (dock_h - size) * 0.58;
+        Some(Rect::new(dock.x + DOCK_PAD_X, bottom_y - size, size, size))
+    }
+
     fn layout_items_internal(&self, dock_x: f32, dock_y: f32) -> (Vec<Rect>, Option<f32>, f32) {
+        let base_icon = self.dock_size.icon_base_size();
         if self.items.is_empty() {
-            return (Vec::new(), None, 0.0);
+            let start_w = if self.show_start { base_icon } else { 0.0 };
+            return (Vec::new(), None, start_w);
         }
         let has_group_div = self.has_pinned_running_divider();
         let pinned_len = self.pinned_count();
         let dock_h = self.dock_size.dock_height();
-        let base_icon = self.dock_size.icon_base_size();
         let bottom_y = dock_y + dock_h - (dock_h - base_icon) * 0.58;
         let mut rects = Vec::with_capacity(self.items.len());
         let mut pinned_div_x = None;
-        let mut cursor = 0.0_f32;
+        let mut cursor = if self.show_start {
+            base_icon + ITEM_GAP
+        } else {
+            0.0_f32
+        };
 
         for (i, item) in self.items.iter().enumerate() {
             if has_group_div && i == pinned_len {
@@ -1783,13 +1832,17 @@ impl DockBar {
     }
 
     fn items_span_width(&self) -> f32 {
+        let base_icon = self.dock_size.icon_base_size();
         if self.items.is_empty() {
-            return 0.0;
+            return if self.show_start { base_icon } else { 0.0 };
         }
         let has_group_div = self.has_pinned_running_divider();
         let pinned_len = self.pinned_count();
-        let base_icon = self.dock_size.icon_base_size();
-        let mut cursor = 0.0_f32;
+        let mut cursor = if self.show_start {
+            base_icon + ITEM_GAP
+        } else {
+            0.0_f32
+        };
         for (i, item) in self.items.iter().enumerate() {
             if has_group_div && i == pinned_len {
                 cursor += DIVIDER_GAP + DIVIDER_WIDTH;
@@ -1823,7 +1876,9 @@ impl DockBar {
     }
 
     fn has_utils_divider(&self) -> bool {
-        self.show_dividers && !self.items.is_empty() && self.utilities_width() > 0.0
+        self.show_dividers
+            && (!self.items.is_empty() || self.show_start)
+            && self.utilities_width() > 0.0
     }
 
     /// Returns the `80px x 4px` bottom-edge wake reference rectangle used when `is_hidden`.
@@ -1848,9 +1903,10 @@ impl DockBar {
     pub fn dock_rect(&self, surface_rect: Rect) -> Rect {
         let items_w = self.items_span_width();
         let util_w = self.utilities_width();
+        let has_left_items = !self.items.is_empty() || self.show_start;
         let divider_extra = if self.has_utils_divider() {
             DIVIDER_GAP * 2.0 + DIVIDER_WIDTH
-        } else if !self.items.is_empty() && util_w > 0.0 {
+        } else if has_left_items && util_w > 0.0 {
             ITEM_GAP
         } else {
             0.0
@@ -2181,6 +2237,12 @@ impl DockBar {
             }
         }
 
+        if let Some(sr) = self.start_rect(dock) {
+            if point_in_rect(x, y, sr) {
+                return Some(DockAction::OpenStartMenu);
+            }
+        }
+
         if let Some(idx) = self.hit_test(x, y, surface_rect) {
             return Some(DockAction::App(idx));
         }
@@ -2326,6 +2388,7 @@ impl DockBar {
                 | DockHoverTarget::NewSpace
         );
         let (target_rect, label) = match target {
+            DockHoverTarget::StartMenu => (self.start_rect(dock)?, "Start".to_string()),
             DockHoverTarget::App(idx) => {
                 let item = self.items.get(idx)?;
                 let rects = self.item_rects(surface_rect);
@@ -2474,6 +2537,39 @@ impl DockBar {
             LiquidGlassStyle::clear(CORNER_RADIUS)
                 .with_shadow(12.0, 3.0, palette.shadow_color.a * alpha * show_t),
         )?;
+
+        // Permanent Windows Start anchor item (ensures Dock is never empty)
+        if let Some(sr) = self.start_rect(dock) {
+            let start_hovered = self.hovered_target == Some(DockHoverTarget::StartMenu);
+            surface.draw_liquid_glass_button(
+                sr,
+                ICON_CORNER_RADIUS,
+                None,
+                start_hovered,
+                false,
+            )?;
+            let logo_size = (sr.width * 0.48).max(12.0);
+            let gap = (logo_size * 0.14).clamp(1.6, 2.5);
+            let pane = (logo_size - gap) * 0.5;
+            let lx = sr.x + (sr.width - logo_size) * 0.5;
+            let ly = sr.y + (sr.height - logo_size) * 0.5;
+            let win_color = if start_hovered {
+                palette.text_primary.with_alpha_mul(alpha)
+            } else {
+                palette.text_primary.with_alpha_mul(0.90 * alpha)
+            };
+            for row in 0..2 {
+                for col in 0..2 {
+                    let pr = Rect::new(
+                        lx + col as f32 * (pane + gap),
+                        ly + row as f32 * (pane + gap),
+                        pane,
+                        pane,
+                    );
+                    surface.fill_rounded_rect(pr, 1.5, win_color)?;
+                }
+            }
+        }
 
         // Application items (crystal-clear BGRA icons + soft clean shadow, zero dark hover borders)
         for (i, (item, rect)) in self.items.iter().zip(rects.iter()).enumerate() {
@@ -2822,7 +2918,13 @@ impl DockBar {
                     self.hovered_target,
                     Some(DockHoverTarget::WindowPreview(_, h)) if h == hwnd
                 );
-                surface.draw_liquid_glass_button(card_rect, 8.0, None, card_hovered, false)?;
+                if card_hovered {
+                    surface.fill_rounded_rect(
+                        card_rect,
+                        8.0,
+                        palette.control_hover.with_alpha_mul(0.55 * alpha),
+                    )?;
+                }
 
                 let preview = self.window_previews.get(&hwnd);
                 let title = preview
@@ -2838,8 +2940,10 @@ impl DockBar {
                     (card_rect.width - 16.0).max(20.0),
                     16.0,
                 );
+                let max_chars = ((title_rect.width / 6.2).floor() as usize).max(8);
+                let truncated_title = truncate_single_line(title, max_chars);
                 surface.draw_text(
-                    title,
+                    &truncated_title,
                     title_rect,
                     10.5,
                     palette.text_primary.with_alpha_mul(alpha),
@@ -3016,6 +3120,21 @@ pub fn draw_cardless_tooltip_text(
 
 fn point_in_rect(x: f32, y: f32, r: Rect) -> bool {
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
+}
+
+/// Collapses whitespace/newlines and truncates `text` to a single line with `...` ellipsis.
+pub fn truncate_single_line(text: &str, max_chars: usize) -> String {
+    let single: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = single.chars().count();
+    if count <= max_chars {
+        return single;
+    }
+    if max_chars <= 3 {
+        return "...".chars().take(max_chars).collect();
+    }
+    let keep = max_chars - 3;
+    let prefix: String = single.chars().take(keep).collect();
+    format!("{}...", prefix.trim_end())
 }
 
 fn rects_overlap(a: Rect, b: Rect, pad: f32) -> bool {
@@ -3981,6 +4100,47 @@ mod tests {
                 surface_rect
             ),
             Some(202)
+        );
+    }
+
+    #[test]
+    fn start_menu_anchor_never_empty_and_hit_tests() {
+        let mut dock = DockBar::new();
+        dock.set_ai_enabled(false);
+        dock.set_show_desktop(false);
+        dock.set_show_tray(false);
+        dock.set_show_notifications(false);
+        assert!(dock.items().is_empty());
+
+        let surface_rect = Rect::new(0.0, 0.0, 800.0, 120.0);
+        let dock_rect = dock.dock_rect(surface_rect);
+        assert!(dock_rect.width >= 56.0);
+        assert!(dock_rect.height >= 44.0);
+
+        let start = dock.start_rect(dock_rect).expect("Start anchor always present");
+        let cx = start.x + start.width * 0.5;
+        let cy = start.y + start.height * 0.5;
+        assert_eq!(
+            dock.hit_test_action(cx, cy, surface_rect),
+            Some(DockAction::OpenStartMenu)
+        );
+        dock.set_hovered_at(cx, cy, surface_rect);
+        assert_eq!(
+            dock.active_tooltip(surface_rect, dock_rect).map(|(_, t)| t),
+            Some("Start".to_string())
+        );
+    }
+
+    #[test]
+    fn truncate_single_line_appends_ellipsis_and_collapses_newlines() {
+        assert_eq!(truncate_single_line("Short title", 24), "Short title");
+        assert_eq!(
+            truncate_single_line("Line one\nLine two\tLine three", 18),
+            "Line one Line t..."
+        );
+        assert_eq!(
+            truncate_single_line("Very Long Window Title Here", 14),
+            "Very Long W..."
         );
     }
 }

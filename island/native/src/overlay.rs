@@ -16,8 +16,7 @@ use serde::{Deserialize, Serialize};
 use windows::core::Result;
 
 use crate::animation::{Spring, SpringValue};
-use crate::d2d::{EdgeSide, NativeSurface, Rect, SfSymbol, TextAlign};
-use crate::theme::{AdaptivePalette, Color};
+use crate::d2d::{EdgeSide, LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign};
 
 const DEFAULT_AUTO_HIDE_SECS: f32 = 2.5;
 const ADJUST_DISPLAY_SECS: f32 = 0.85;
@@ -82,6 +81,7 @@ pub struct OverlayHud {
     pub icon_hovered: bool,
     pub mixer_open: bool,
     pub devices: Vec<AudioDeviceSlot>,
+    pub adjusting_device_id: Option<String>,
     pub visibility: SpringValue,
     pub expand: SpringValue,
     pub mixer_expand: SpringValue,
@@ -90,6 +90,7 @@ pub struct OverlayHud {
     auto_hide_timer: f32,
     auto_hide_duration: f32,
     adjust_timer: f32,
+    device_adjust_timer: f32,
 }
 
 impl Default for OverlayHud {
@@ -133,6 +134,7 @@ impl OverlayHud {
             icon_hovered: false,
             mixer_open: false,
             devices: Vec::new(),
+            adjusting_device_id: None,
             visibility: SpringValue::emerge(0.0),
             expand: SpringValue::emerge(0.0),
             mixer_expand: SpringValue::emerge(0.0),
@@ -141,6 +143,7 @@ impl OverlayHud {
             auto_hide_timer: 0.0,
             auto_hide_duration: DEFAULT_AUTO_HIDE_SECS,
             adjust_timer: 0.0,
+            device_adjust_timer: 0.0,
         }
     }
 
@@ -157,6 +160,40 @@ impl OverlayHud {
     /// Replaces the connected audio devices displayed when the Left Volume mixer drawer is open.
     pub fn set_devices(&mut self, devices: Vec<AudioDeviceSlot>) {
         self.devices = devices;
+    }
+
+    /// Marks `device_id` as actively being adjusted (replacing its 1-word label with `%`),
+    /// or clears the active device adjustment when `None`.
+    pub fn set_device_adjusting(&mut self, device_id: Option<String>) {
+        self.adjusting_device_id = device_id;
+        if self.adjusting_device_id.is_some() {
+            self.device_adjust_timer = ADJUST_DISPLAY_SECS;
+            if self.enabled {
+                self.auto_hide_timer = self.auto_hide_duration;
+            }
+        } else {
+            self.device_adjust_timer = 0.0;
+        }
+    }
+
+    /// Returns `true` while `device_id` is actively being adjusted or within the settle window.
+    pub fn is_device_adjusting(&self, device_id: &str) -> bool {
+        self.adjusting_device_id.as_deref() == Some(device_id)
+            && (self.is_dragging || self.device_adjust_timer > 0.0)
+    }
+
+    /// Updates a specific audio device's percentage, marks it as adjusting so its label
+    /// temporarily shows `%`, and refreshes the auto-hide timer.
+    pub fn set_device_percent(&mut self, device_id: &str, percent: u8) -> bool {
+        let clamped = percent.min(100);
+        if let Some(dev) = self.devices.iter_mut().find(|d| d.id == device_id) {
+            dev.percent = clamped;
+            dev.muted = clamped == 0;
+            self.set_device_adjusting(Some(device_id.to_string()));
+            true
+        } else {
+            false
+        }
     }
 
     /// Toggles the expanded audio device mixer drawer (Volume HUD only) and returns `mixer_open`.
@@ -385,6 +422,8 @@ impl OverlayHud {
     pub fn hide(&mut self) {
         self.auto_hide_timer = 0.0;
         self.adjust_timer = 0.0;
+        self.device_adjust_timer = 0.0;
+        self.adjusting_device_id = None;
         self.is_hovered = false;
         self.is_dragging = false;
         self.icon_hovered = false;
@@ -398,6 +437,12 @@ impl OverlayHud {
         if dt > 0.0 && dt.is_finite() {
             if self.adjust_timer > 0.0 && !self.is_dragging {
                 self.adjust_timer = (self.adjust_timer - dt).max(0.0);
+            }
+            if self.device_adjust_timer > 0.0 && !self.is_dragging {
+                self.device_adjust_timer = (self.device_adjust_timer - dt).max(0.0);
+                if self.device_adjust_timer == 0.0 {
+                    self.adjusting_device_id = None;
+                }
             }
             if !self.is_hovered && !self.is_dragging && self.auto_hide_timer > 0.0 {
                 self.auto_hide_timer = (self.auto_hide_timer - dt).max(0.0);
@@ -413,6 +458,7 @@ impl OverlayHud {
         self.sun_angle.tick(dt);
         self.auto_hide_timer > 0.0
             || self.adjust_timer > 0.0
+            || self.device_adjust_timer > 0.0
             || !self.visibility.is_settled()
             || !self.expand.is_settled()
             || !self.mixer_expand.is_settled()
@@ -599,7 +645,8 @@ impl OverlayHud {
         self.hit_test_icon_button(x, y, surface_rect)
     }
 
-    /// Computes `(device_id, slider_rect)` pairs for connected audio devices in the open mixer drawer.
+    /// Computes `(device_id, vertical_slider_rect)` pairs for connected audio devices
+    /// arranged side-by-side in the open mixer drawer.
     pub fn device_slider_rects(&self, surface_rect: Rect) -> Vec<(String, Rect)> {
         if self.kind != HudKind::Volume || !self.is_expanded() || !self.mixer_open {
             return Vec::new();
@@ -609,36 +656,41 @@ impl OverlayHud {
         } else {
             self.expanded_rect(surface_rect.width, surface_rect.height)
         };
-        if panel.width <= EXPANDED_PANEL_WIDTH + 40.0 {
+        if panel.width <= EXPANDED_PANEL_WIDTH + 40.0 || self.devices.is_empty() {
             return Vec::new();
         }
         let drawer_x = surface_rect.x + panel.x + EXPANDED_PANEL_WIDTH + 10.0;
         let drawer_w = (panel.width - EXPANDED_PANEL_WIDTH - 22.0).max(40.0);
-        let start_y = surface_rect.y + panel.y + 40.0;
-        let row_h = 34.0_f32;
-        let max_rows = ((panel.height - 54.0) / row_h).floor().max(0.0) as usize;
+        let max_cols = ((drawer_w / 32.0).floor() as usize).clamp(1, 4);
+        let count = self.devices.len().min(max_cols);
+        let col_w = drawer_w / count as f32;
+        let bar_w = SLIDER_TRACK_WIDTH;
+        let bar_y = surface_rect.y + panel.y + 20.0;
+        let bar_h = (panel.height - 76.0).max(40.0);
+
         self.devices
             .iter()
-            .take(max_rows)
+            .take(count)
             .enumerate()
             .map(|(i, dev)| {
-                let row_y = start_y + (i as f32) * row_h;
-                let bar = Rect::new(drawer_x, row_y + 18.0, drawer_w, 8.0);
+                let col_x = drawer_x + (i as f32) * col_w;
+                let bar_x = col_x + (col_w - bar_w) * 0.5;
+                let bar = Rect::new(bar_x, bar_y, bar_w, bar_h);
                 (dev.id.clone(), bar)
             })
             .collect()
     }
 
-    /// Hit-tests `(x, y)` against a connected audio device's volume bar in the open mixer drawer,
-    /// returning `(device_id, target_percent)`.
+    /// Hit-tests `(x, y)` against a connected audio device's vertical volume bar in the open
+    /// mixer drawer, returning `(device_id, target_percent)` (`0%` = bottom, `100%` = top).
     pub fn hit_test_device_slider(&self, x: f32, y: f32, surface_rect: Rect) -> Option<(String, u8)> {
         for (id, bar) in self.device_slider_rects(surface_rect) {
-            if x >= bar.x - 4.0
-                && x <= bar.x + bar.width + 4.0
-                && y >= bar.y - 14.0
-                && y <= bar.y + bar.height + 8.0
+            if x >= bar.x - 10.0
+                && x <= bar.x + bar.width + 10.0
+                && y >= bar.y - SLIDER_HIT_MARGIN_Y
+                && y <= bar.y + bar.height + SLIDER_HIT_MARGIN_Y
             {
-                let ratio = ((x - bar.x) / bar.width.max(1.0)).clamp(0.0, 1.0);
+                let ratio = ((bar.y + bar.height - y) / bar.height.max(1.0)).clamp(0.0, 1.0);
                 let pct = (ratio * 100.0).round() as u8;
                 return Some((id, pct));
             }
@@ -682,15 +734,14 @@ impl OverlayHud {
 
         surface.set_edge_surface_region(rect, EDGE_EAR_WIDTH, PANEL_CORNER_RADIUS, edge_side, true);
 
-        // Screen-edge curved-flare contour on plain solid black (#000000), zero stroke/glass
-        surface.draw_edge_surface(
+        // Screen-edge curved-flare contour with Dock-matched Liquid Glass blur
+        surface.draw_liquid_glass_edge_surface(
             rect,
             EDGE_EAR_WIDTH,
             PANEL_CORNER_RADIUS,
             edge_side,
             true,
-            Color::rgba(0.0, 0.0, 0.0, vis_alpha),
-            None,
+            LiquidGlassStyle::clear(PANEL_CORNER_RADIUS),
         )?;
 
         let content_alpha = ((t - 0.14) / 0.86).clamp(0.0, 1.0) * vis_alpha;
@@ -698,7 +749,7 @@ impl OverlayHud {
             return Ok(());
         }
 
-        let palette = AdaptivePalette::dark_glass();
+        let palette = surface.palette();
         let strip_w = rect.width.min(EXPANDED_PANEL_WIDTH);
         let strip_x = match self.edge {
             HudEdge::Left => rect.x,
@@ -825,71 +876,87 @@ impl OverlayHud {
 
             let drawer_x = div_x + 10.0;
             let drawer_w = (rect.width - EXPANDED_PANEL_WIDTH - 22.0).max(40.0);
-            surface.draw_text_bold(
-                "Audio Devices",
-                Rect::new(drawer_x, rect.y + 16.0, drawer_w, 16.0),
-                11.0,
-                palette.text_secondary.with_alpha_mul(drawer_alpha),
-                TextAlign::Leading,
-            )?;
 
             if self.devices.is_empty() {
                 surface.draw_text(
                     "No audio devices",
-                    Rect::new(drawer_x, rect.y + 44.0, drawer_w, rect.height - 64.0),
+                    Rect::new(drawer_x, rect.y + 20.0, drawer_w, (rect.height - 76.0).max(40.0)),
                     11.0,
                     palette.text_secondary.with_alpha_mul(drawer_alpha),
                     TextAlign::Center,
                 )?;
             } else {
-                let start_y = rect.y + 40.0;
-                let row_h = 34.0_f32;
-                let max_rows = ((rect.height - 54.0) / row_h).floor().max(0.0) as usize;
-                for (idx, dev) in self.devices.iter().take(max_rows).enumerate() {
-                    let row_y = start_y + (idx as f32) * row_h;
-                    let name_w = (drawer_w - 34.0).max(24.0);
-                    let name_color = if dev.is_default {
-                        palette.text_primary.with_alpha_mul(drawer_alpha)
-                    } else {
-                        palette.text_secondary.with_alpha_mul(drawer_alpha)
-                    };
-                    surface.draw_text(
-                        &dev.name,
-                        Rect::new(drawer_x, row_y, name_w, 15.0),
-                        10.5,
-                        name_color,
-                        TextAlign::Leading,
-                    )?;
-                    let pct_str = if dev.muted {
-                        "Muted".to_string()
-                    } else {
-                        format!("{}%", dev.percent.min(100))
-                    };
-                    surface.draw_text(
-                        &pct_str,
-                        Rect::new(drawer_x + drawer_w - 34.0, row_y, 34.0, 15.0),
-                        10.0,
-                        palette.text_secondary.with_alpha_mul(drawer_alpha),
-                        TextAlign::Trailing,
-                    )?;
+                let max_cols = ((drawer_w / 32.0).floor() as usize).clamp(1, 4);
+                let count = self.devices.len().min(max_cols);
+                let col_w = drawer_w / count as f32;
+                let bar_w = SLIDER_TRACK_WIDTH;
+                let bar_r = bar_w * 0.5;
+                let bar_y = rect.y + 20.0;
+                let bar_h = (rect.height - 76.0).max(40.0);
+                let label_y = bottom_center_y - 10.0;
 
-                    let bar_rect = Rect::new(drawer_x, row_y + 18.0, drawer_w, 7.0);
+                for (idx, dev) in self.devices.iter().take(count).enumerate() {
+                    let col_x = drawer_x + (idx as f32) * col_w;
+                    let bar_x = col_x + (col_w - bar_w) * 0.5;
+                    let bar_rect = Rect::new(bar_x, bar_y, bar_w, bar_h);
+
                     surface.fill_rounded_rect(
                         bar_rect,
-                        3.5,
+                        bar_r,
                         palette.slider_track.with_alpha_mul(drawer_alpha),
                     )?;
+
                     let dev_fill = if dev.muted {
                         0.0
                     } else {
                         (dev.percent.min(100) as f32) / 100.0
                     };
+                    let adjusting = self.is_device_adjusting(&dev.id);
                     if dev_fill > 0.01 {
-                        let fill_w = (bar_rect.width * dev_fill).max(7.0);
-                        surface.fill_rounded_rect(
-                            Rect::new(bar_rect.x, bar_rect.y, fill_w, bar_rect.height),
-                            3.5,
-                            palette.slider_fill.with_alpha_mul(drawer_alpha),
+                        let fill_h = (bar_rect.height * dev_fill).max(bar_w);
+                        let fill_rect = Rect::new(
+                            bar_rect.x,
+                            bar_rect.y + bar_rect.height - fill_h,
+                            bar_rect.width,
+                            fill_h,
+                        );
+                        let fill_color = if dev.muted {
+                            palette.status_muted.with_alpha(0.55 * drawer_alpha)
+                        } else if adjusting {
+                            palette.text_primary.with_alpha_mul(drawer_alpha)
+                        } else {
+                            palette.slider_fill.with_alpha_mul(drawer_alpha)
+                        };
+                        surface.fill_rounded_rect(fill_rect, bar_r, fill_color)?;
+                    }
+
+                    let label_rect = Rect::new(col_x + 1.0, label_y, (col_w - 2.0).max(20.0), 18.0);
+                    if adjusting {
+                        let pct_str = if dev.muted {
+                            "0%".to_string()
+                        } else {
+                            format!("{}%", dev.percent.min(100))
+                        };
+                        surface.draw_text(
+                            &pct_str,
+                            label_rect,
+                            10.5,
+                            palette.text_primary.with_alpha_mul(drawer_alpha),
+                            TextAlign::Center,
+                        )?;
+                    } else {
+                        let word = short_device_word(&dev.name);
+                        let name_color = if dev.is_default {
+                            palette.text_primary.with_alpha_mul(drawer_alpha)
+                        } else {
+                            palette.text_secondary.with_alpha_mul(drawer_alpha)
+                        };
+                        surface.draw_text(
+                            word,
+                            label_rect,
+                            9.5,
+                            name_color,
+                            TextAlign::Center,
                         )?;
                     }
                 }
@@ -952,6 +1019,13 @@ pub fn sanitize_device_name(raw: Option<&str>) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// Extracts a concise 1-word label from an audio device name (e.g. `"Headphones (USB)"` -> `"Headphones"`).
+pub fn short_device_word(name: &str) -> &str {
+    name.split(|c: char| c.is_whitespace() || c == '(' || c == '[' || c == ',')
+        .find(|s| !s.is_empty())
+        .unwrap_or("Audio")
 }
 
 #[cfg(test)]
@@ -1270,17 +1344,44 @@ mod tests {
         assert!((expanded.width - MIXER_PANEL_WIDTH).abs() < 0.5);
 
         let dev_rects = hud.device_slider_rects(surf_rect);
+        let main_slider = hud.slider_rect(surf_rect).expect("main slider rect");
         assert_eq!(dev_rects.len(), 2);
         let (first_id, first_bar) = &dev_rects[0];
+        let (second_id, second_bar) = &dev_rects[1];
         assert_eq!(first_id, "dev-1");
-        let hit = hud
-            .hit_test_device_slider(
-                first_bar.x + first_bar.width * 0.5,
-                first_bar.y + first_bar.height * 0.5,
-                surf_rect,
-            )
-            .expect("device slider hit");
-        assert_eq!(hit.0, "dev-1");
-        assert!((hit.1 as i32 - 50).abs() <= 1);
+        assert_eq!(second_id, "dev-2");
+        // Vertical bars arranged side-by-side and aligned identically to main slider_rect.
+        assert!(first_bar.height > first_bar.width);
+        assert_eq!(first_bar.y, main_slider.y);
+        assert_eq!(first_bar.height, main_slider.height);
+        assert_eq!(first_bar.y, second_bar.y);
+        assert!(second_bar.x > first_bar.x);
+
+        // Hit-testing vertical bar: top = 100%, middle = 50%, bottom = 0%
+        let mid_x = first_bar.x + first_bar.width * 0.5;
+        let hit_mid = hud
+            .hit_test_device_slider(mid_x, first_bar.y + first_bar.height * 0.5, surf_rect)
+            .expect("device slider hit mid");
+        assert_eq!(hit_mid.0, "dev-1");
+        assert!((hit_mid.1 as i32 - 50).abs() <= 1);
+
+        let hit_top = hud
+            .hit_test_device_slider(mid_x, first_bar.y, surf_rect)
+            .expect("device slider hit top");
+        assert_eq!(hit_top.1, 100);
+
+        // 1-word label extraction & per-device adjusting percentage swap
+        assert_eq!(short_device_word("Headphones (USB)"), "Headphones");
+        assert_eq!(short_device_word("Realtek(R) Audio"), "Realtek");
+        assert!(!hud.is_device_adjusting("dev-1"));
+        assert!(hud.set_device_percent("dev-1", 68));
+        assert!(hud.is_device_adjusting("dev-1"));
+        assert!(!hud.is_device_adjusting("dev-2"));
+
+        // Reverts back to 1-word name once settled
+        for _ in 0..90 {
+            hud.tick(1.0 / 60.0);
+        }
+        assert!(!hud.is_device_adjusting("dev-1"));
     }
 }

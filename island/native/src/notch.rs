@@ -14,7 +14,7 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::animation::{Spring, SpringValue};
 use crate::d2d::{
-    EdgeSide, HimeExpression, NativeSurface, Rect, SfSymbol, TextAlign,
+    EdgeSide, HimeExpression, LiquidGlassStyle, NativeSurface, Rect, SfSymbol, TextAlign,
 };
 use crate::notch_workspace::{
     active_lyric_index, parse_lrc_lines, FocusHitAction, FocusSessionStatus, FocusWorkspaceState,
@@ -45,6 +45,7 @@ const SIDE_EXPANDED_HEIGHT: f32 = 300.0;
 const EAR_WIDTH: f32 = 13.0;
 
 const HEADER_HEIGHT: f32 = 36.0;
+const SCROLL_SWITCH_COOLDOWN_SECS: f32 = 0.28;
 
 /// Screen edge where the Dynamic Island / Notch is anchored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -64,6 +65,7 @@ pub enum NotchPanel {
     Status,
     CommandCenter,
     Calendar,
+    Pomodoro,
     Music,
     Wifi,
     Shortcuts,
@@ -79,6 +81,7 @@ impl NotchPanel {
             Self::Status => "Status",
             Self::CommandCenter => "Controls",
             Self::Calendar => "Calendar",
+            Self::Pomodoro => "Timer",
             Self::Music => "Music",
             Self::Wifi => "Wi-Fi",
             Self::Shortcuts => "Keys",
@@ -334,6 +337,9 @@ pub struct NotchView {
     pub drag_hover: bool,
     pub pointer_pos: Option<(f32, f32)>,
     pub pointer_pressed: bool,
+    scroll_accum_x: f32,
+    scroll_accum_y: f32,
+    scroll_cooldown: f32,
     pub width_spring: SpringValue,
     pub height_spring: SpringValue,
     pub expand_spring: SpringValue,
@@ -408,6 +414,9 @@ impl NotchView {
             drag_hover: false,
             pointer_pos: None,
             pointer_pressed: false,
+            scroll_accum_x: 0.0,
+            scroll_accum_y: 0.0,
+            scroll_cooldown: 0.0,
             width_spring: SpringValue::from_spring(w, Spring::EMERGE),
             height_spring: SpringValue::from_spring(h, Spring::EMERGE),
             expand_spring: SpringValue::from_spring(0.0, Spring::EMERGE),
@@ -550,9 +559,8 @@ impl NotchView {
         let mut panels = vec![
             NotchPanel::CommandCenter,
             NotchPanel::Calendar,
+            NotchPanel::Pomodoro,
             NotchPanel::Music,
-            NotchPanel::Wifi,
-            NotchPanel::Shortcuts,
             NotchPanel::Shelf,
             NotchPanel::Tasks,
             NotchPanel::Focus,
@@ -746,6 +754,9 @@ impl NotchView {
         self.drag_hover_spring.tick(dt);
         self.hover_spring.tick(dt);
         self.press_spring.tick(dt);
+        if dt > 0.0 && dt.is_finite() && self.scroll_cooldown > 0.0 {
+            self.scroll_cooldown = (self.scroll_cooldown - dt).max(0.0);
+        }
         let pomo_changed = self.pomodoro.tick(dt);
         let focus_changed = self.focus_ws.tick(dt);
         let proactive_expired = self.proactive_banner.tick(dt);
@@ -1020,7 +1031,7 @@ impl NotchView {
                     NotchAction::ToggleVolumeOverlay,
                     NotchAction::ToggleBrightnessOverlay,
                     NotchAction::ToggleNotifSuppression,
-                    NotchAction::ToggleHimeAi,
+                    NotchAction::OpenSettings,
                 ];
                 for (idx, rect) in cc.quick_toggles.iter().enumerate() {
                     if point_in_rect(x, y, *rect) {
@@ -1058,13 +1069,15 @@ impl NotchView {
                 if point_in_rect(x, y, cal.today_btn) {
                     return Some(NotchAction::CalendarToday);
                 }
-                if point_in_rect(x, y, cal.pomo_play_btn) {
+            }
+            BodyLayout::Pomodoro(pomo) => {
+                if point_in_rect(x, y, pomo.play_btn) {
                     return Some(NotchAction::PomodoroStartPause);
                 }
-                if point_in_rect(x, y, cal.pomo_reset_btn) {
+                if point_in_rect(x, y, pomo.reset_btn) {
                     return Some(NotchAction::PomodoroReset);
                 }
-                for (mins, rect) in &cal.preset_btns {
+                for (mins, rect) in &pomo.preset_btns {
                     if point_in_rect(x, y, *rect) {
                         return Some(NotchAction::PomodoroPreset(*mins));
                     }
@@ -1214,6 +1227,106 @@ impl NotchView {
         self.active_panel != before
     }
 
+    /// Quantized 1-step-per-scroll-notch handler with accumulator & cooldown.
+    ///
+    /// - When expanded: switches exactly 1 panel when scrolling over `header_clock` or `tabs`.
+    /// - When collapsed/resting: left/right scroll (`dx`) on the Notch automatically expands
+    ///   and switches 1 panel without requiring a click first.
+    pub fn handle_scroll_step(
+        &mut self,
+        x: f32,
+        y: f32,
+        surface_rect: Rect,
+        dx: f32,
+        dy: f32,
+    ) -> bool {
+        if self.is_hidden || !dx.is_finite() || !dy.is_finite() {
+            return false;
+        }
+        let local_outer = self.computed_rect(surface_rect.width, surface_rect.height);
+        let outer = Rect::new(
+            surface_rect.x + local_outer.x,
+            surface_rect.y + local_outer.y,
+            local_outer.width,
+            local_outer.height,
+        );
+        if !point_in_rect(x, y, outer) {
+            return false;
+        }
+
+        if self.scroll_cooldown > 0.0 {
+            return false;
+        }
+
+        if !self.is_expanded {
+            // Collapsed/resting: only left/right scroll auto-expands and switches panels.
+            if dx == 0.0 || dx.abs() < dy.abs() {
+                return false;
+            }
+            if (self.scroll_accum_x > 0.0 && dx < 0.0) || (self.scroll_accum_x < 0.0 && dx > 0.0) {
+                self.scroll_accum_x = 0.0;
+            }
+            self.scroll_accum_x += dx;
+            if self.scroll_accum_x.abs() < 1.0 {
+                return false;
+            }
+            let step = if self.scroll_accum_x > 0.0 { 1 } else { -1 };
+            self.scroll_accum_x = 0.0;
+            self.scroll_accum_y = 0.0;
+            self.scroll_cooldown = SCROLL_SWITCH_COOLDOWN_SECS;
+            self.set_expanded(true);
+            self.cycle_panel(step);
+            return true;
+        }
+
+        let layout = self.compute_expanded_layout(outer);
+        let over_clock = point_in_rect(x, y, layout.header_clock);
+        let over_tabs = match (layout.tabs.first(), layout.tabs.last()) {
+            (Some((_, first)), Some((_, last))) => {
+                let tabs_bar = Rect::new(
+                    first.x,
+                    first.y,
+                    (last.x + last.width - first.x).max(0.0),
+                    first.height,
+                );
+                point_in_rect(x, y, tabs_bar)
+            }
+            _ => false,
+        };
+        if !over_clock && !over_tabs {
+            return false;
+        }
+
+        let step = if dx.abs() >= dy.abs() && dx != 0.0 {
+            if (self.scroll_accum_x > 0.0 && dx < 0.0) || (self.scroll_accum_x < 0.0 && dx > 0.0) {
+                self.scroll_accum_x = 0.0;
+            }
+            self.scroll_accum_x += dx;
+            if self.scroll_accum_x.abs() < 1.0 {
+                return false;
+            }
+            if self.scroll_accum_x > 0.0 { 1 } else { -1 }
+        } else if dy != 0.0 {
+            if (self.scroll_accum_y > 0.0 && dy < 0.0) || (self.scroll_accum_y < 0.0 && dy > 0.0) {
+                self.scroll_accum_y = 0.0;
+            }
+            self.scroll_accum_y += dy;
+            if self.scroll_accum_y.abs() < 1.0 {
+                return false;
+            }
+            if self.scroll_accum_y < 0.0 { 1 } else { -1 }
+        } else {
+            return false;
+        };
+
+        self.scroll_accum_x = 0.0;
+        self.scroll_accum_y = 0.0;
+        self.scroll_cooldown = SCROLL_SWITCH_COOLDOWN_SECS;
+        let before = self.active_panel;
+        self.cycle_panel(step);
+        self.active_panel != before
+    }
+
     fn is_hovered(&self, rect: Rect) -> bool {
         self.pointer_pos
             .is_some_and(|(x, y)| point_in_rect(x, y, rect))
@@ -1255,7 +1368,7 @@ impl NotchView {
             return Ok(());
         }
 
-        let p = AdaptivePalette::dark_glass();
+        let p = surface.palette();
         let open_t = match self.edge {
             NotchEdge::Top => ((rect.height - HIDDEN_BAR_THICKNESS)
                 / (TOP_COLLAPSED_HEIGHT - HIDDEN_BAR_THICKNESS))
@@ -1267,14 +1380,13 @@ impl NotchView {
         let radius = 1.5 + (CORNER_RADIUS - 1.5) * open_t;
         let flares = open_t > 0.20;
         surface.set_edge_surface_region(rect, EAR_WIDTH, radius, edge_side, flares);
-        surface.draw_edge_surface(
+        surface.draw_liquid_glass_edge_surface(
             rect,
             EAR_WIDTH,
             radius,
             edge_side,
             flares,
-            Color::rgba(0.0, 0.0, 0.0, 1.0),
-            None,
+            LiquidGlassStyle::clear(radius),
         )?;
 
         if open_t < 0.72 {
@@ -1332,7 +1444,7 @@ impl NotchView {
         radius: f32,
         p: &AdaptivePalette,
     ) -> Result<()> {
-        surface.fill_rounded_rect(rect, radius, p.glass_elevated)
+        surface.fill_rounded_rect(rect, radius, p.control_fill)
     }
 
     fn render_plain_button(
@@ -1398,7 +1510,7 @@ impl NotchView {
     ) -> Result<()> {
         let bar_w = 2.5_f32;
         let gap = 2.0_f32;
-        let color = if is_playing { p.accent } else { p.status_muted };
+        let color = if is_playing { p.text_primary } else { p.status_muted };
         for (i, &level) in bars.iter().enumerate() {
             let norm = if is_playing {
                 level.clamp(0.18, 1.0)
@@ -1792,7 +1904,7 @@ impl NotchView {
                 r_lo.width,
                 r_lo.height,
             );
-            surface.fill_rounded_rect(pill, 7.0, p.accent)?;
+            surface.fill_rounded_rect(pill, 7.0, p.control_active)?;
         }
 
         for (panel, tab_rect) in &layout.tabs {
@@ -1801,9 +1913,7 @@ impl NotchView {
             if hovered {
                 surface.fill_rounded_rect(*tab_rect, 7.0, p.control_hover)?;
             }
-            let icon_color = if active {
-                TEXT_PRIMARY
-            } else if hovered {
+            let icon_color = if active || hovered {
                 p.text_primary
             } else {
                 p.text_secondary
@@ -1811,6 +1921,7 @@ impl NotchView {
             let symbol = match panel {
                 NotchPanel::CommandCenter => SfSymbol::SettingsSliders,
                 NotchPanel::Calendar => SfSymbol::Calendar,
+                NotchPanel::Pomodoro => SfSymbol::FocusTimer,
                 NotchPanel::Music => SfSymbol::MusicNote,
                 NotchPanel::Wifi => {
                     if self.wifi_enabled {
@@ -1869,6 +1980,7 @@ impl NotchView {
         match &layout.body {
             BodyLayout::CommandCenter(cc) => self.render_command_center(surface, cc, p),
             BodyLayout::Calendar(cal) => self.render_calendar(surface, cal, p),
+            BodyLayout::Pomodoro(pomo) => self.render_pomodoro(surface, pomo, p),
             BodyLayout::Music(mus) => self.render_music(surface, mus, p),
             BodyLayout::Wifi(wf) => self.render_wifi(surface, wf, p),
             BodyLayout::Shortcuts(sc) => self.render_shortcuts(surface, sc, p),
@@ -1893,12 +2005,12 @@ impl NotchView {
             wifi_badge_cx,
             wifi_badge_cy,
             11.0,
-            if self.wifi_enabled { p.accent } else { p.control_fill },
+            if self.wifi_enabled { p.control_active } else { p.control_fill },
         )?;
         surface.draw_sf_symbol(
             Rect::new(wifi_badge_cx - 6.5, wifi_badge_cy - 6.5, 13.0, 13.0),
             if self.wifi_enabled { SfSymbol::Wifi } else { SfSymbol::WifiOff },
-            if self.wifi_enabled { TEXT_PRIMARY } else { p.text_secondary },
+            if self.wifi_enabled { p.text_primary } else { p.text_secondary },
             1.35,
         )?;
         let wifi_sub = if !self.wifi_enabled {
@@ -1912,14 +2024,14 @@ impl NotchView {
         };
         surface.draw_text_bold(
             "Wi-Fi",
-            Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 4.0, cc.wifi_tile.width - 60.0, 16.0),
+            Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 5.0, cc.wifi_tile.width - 60.0, 15.0),
             11.0,
             p.text_primary,
             TextAlign::Leading,
         )?;
-        surface.draw_text(
+        surface.draw_text_ellipsis(
             wifi_sub,
-            Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 19.0, cc.wifi_tile.width - 60.0, 14.0),
+            Rect::new(cc.wifi_tile.x + 34.0, cc.wifi_tile.y + 20.0, cc.wifi_tile.width - 60.0, 13.0),
             9.5,
             p.text_secondary,
             TextAlign::Leading,
@@ -1949,12 +2061,12 @@ impl NotchView {
             bt_cx,
             bt_cy,
             11.0,
-            if self.bluetooth_enabled { p.accent } else { p.control_fill },
+            if self.bluetooth_enabled { p.control_active } else { p.control_fill },
         )?;
         surface.draw_sf_symbol(
             Rect::new(bt_cx - 6.5, bt_cy - 6.5, 13.0, 13.0),
             SfSymbol::Bluetooth,
-            if self.bluetooth_enabled { TEXT_PRIMARY } else { p.text_secondary },
+            if self.bluetooth_enabled { p.text_primary } else { p.text_secondary },
             1.35,
         )?;
         let bt_sub = if !self.bluetooth_enabled {
@@ -1966,14 +2078,14 @@ impl NotchView {
         };
         surface.draw_text_bold(
             "Bluetooth",
-            Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 4.0, cc.bluetooth_tile.width - 42.0, 16.0),
+            Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 5.0, cc.bluetooth_tile.width - 42.0, 15.0),
             11.0,
             p.text_primary,
             TextAlign::Leading,
         )?;
-        surface.draw_text(
+        surface.draw_text_ellipsis(
             bt_sub,
-            Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 19.0, cc.bluetooth_tile.width - 42.0, 14.0),
+            Rect::new(cc.bluetooth_tile.x + 34.0, cc.bluetooth_tile.y + 20.0, cc.bluetooth_tile.width - 42.0, 13.0),
             9.5,
             p.text_secondary,
             TextAlign::Leading,
@@ -2015,7 +2127,7 @@ impl NotchView {
             surface,
             drag_r,
             7.0,
-            if self.free_drag_enabled { Some(p.accent) } else { None },
+            if self.free_drag_enabled { Some(p.control_active) } else { None },
             self.is_hovered(cc.drag_badge),
             self.is_pressed(cc.drag_badge),
             p,
@@ -2024,7 +2136,7 @@ impl NotchView {
             if self.free_drag_enabled { "Drag" } else { "Lock" },
             drag_r,
             8.5,
-            if self.free_drag_enabled { TEXT_PRIMARY } else { p.text_secondary },
+            if self.free_drag_enabled { p.text_primary } else { p.text_secondary },
             TextAlign::Center,
         )?;
 
@@ -2088,7 +2200,7 @@ impl NotchView {
             ),
             ("Bri HUD", self.brightness_overlay_enabled, SfSymbol::BrightnessSun),
             ("Quiet", self.notif_suppression_enabled, SfSymbol::Bell),
-            ("Hime AI", self.ai_enabled, SfSymbol::Sparkle),
+            ("Settings", false, SfSymbol::Gear),
         ];
         for (idx, rect) in cc.quick_toggles.iter().enumerate() {
             let (label, active, symbol) = toggle_defs[idx];
@@ -2097,24 +2209,17 @@ impl NotchView {
             let r = if self.is_pressed(*rect) { 15.8 } else { 16.5 };
             let hovered = self.is_hovered(*rect);
             let bg = if active {
-                p.accent
+                p.control_active
             } else if hovered {
                 p.control_hover
             } else {
                 p.control_fill
             };
             surface.fill_circle(cx, cy, r, bg)?;
-            surface.stroke_circle(
-                cx,
-                cy,
-                r,
-                if active { p.accent } else { p.hairline_border },
-                1.0,
-            )?;
             surface.draw_sf_symbol(
                 Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0),
                 symbol,
-                if active { TEXT_PRIMARY } else { p.text_secondary },
+                if active { p.text_primary } else { p.text_secondary },
                 1.35,
             )?;
             surface.draw_text(
@@ -2310,25 +2415,24 @@ impl NotchView {
             );
             let is_today = is_current_month && day == self.calendar_today_day;
             if is_today {
-                surface.fill_circle(cx, cy, (row_h * 0.45).min(11.0), p.accent)?;
-                surface.draw_text_bold(&day.to_string(), cell_rect, 10.0, TEXT_PRIMARY, TextAlign::Center)?;
+                surface.fill_circle(cx, cy, (row_h * 0.45).min(11.0), p.control_active)?;
+                surface.draw_text_bold(&day.to_string(), cell_rect, 10.0, p.text_primary, TextAlign::Center)?;
             } else {
                 surface.draw_text(&day.to_string(), cell_rect, 10.0, p.text_primary, TextAlign::Center)?;
             }
         }
 
-        // Hairline vertical separator
-        let sep_x = cal.grid_rect.x + cal.grid_rect.width + 6.0;
-        surface.draw_line(
-            sep_x,
-            cal.grid_rect.y - 18.0,
-            sep_x,
-            cal.grid_rect.y + cal.grid_rect.height,
-            p.divider,
-            1.0,
-        )?;
+        Ok(())
+    }
 
-        // Right column: Pomodoro Timer
+    fn render_pomodoro(
+        &self,
+        surface: &NativeSurface,
+        pomo: &PomodoroLayout,
+        p: &AdaptivePalette,
+    ) -> Result<()> {
+        self.render_adaptive_card(surface, pomo.panel_rect, 12.0, p)?;
+
         let status_label = if self.pomodoro.finished {
             "Time's up!"
         } else if self.pomodoro.running {
@@ -2340,72 +2444,73 @@ impl NotchView {
         };
         surface.draw_text(
             status_label,
-            Rect::new(cal.pomo_panel.x, cal.pomo_panel.y + 4.0, cal.pomo_panel.width, 16.0),
-            10.0,
-            p.text_secondary,
+            Rect::new(pomo.panel_rect.x, pomo.panel_rect.y + 10.0, pomo.panel_rect.width, 18.0),
+            11.0,
+            if self.pomodoro.finished { p.status_red } else { p.text_secondary },
             TextAlign::Center,
         )?;
+
         surface.draw_text_bold(
             &self.pomodoro.formatted(),
-            Rect::new(cal.pomo_panel.x, cal.pomo_panel.y + 26.0, cal.pomo_panel.width, 40.0),
-            26.0,
+            Rect::new(pomo.panel_rect.x, pomo.panel_rect.y + 34.0, pomo.panel_rect.width, 56.0),
+            42.0,
             if self.pomodoro.finished { p.status_red } else { p.text_primary },
             TextAlign::Center,
         )?;
 
-        // Primary Start/Pause button + Reset (`SfSymbol::Refresh`)
-        let play_r = self.press_rect(cal.pomo_play_btn);
+        // Primary Start/Pause pill + Reset (`SfSymbol::Refresh`)
+        let play_r = self.press_rect(pomo.play_btn);
         let play_primary = !self.pomodoro.running;
         self.render_plain_button(
             surface,
             play_r,
-            14.0,
-            if play_primary { Some(p.accent) } else { None },
-            self.is_hovered(cal.pomo_play_btn),
-            self.is_pressed(cal.pomo_play_btn),
+            16.0,
+            if play_primary { Some(p.control_active) } else { None },
+            self.is_hovered(pomo.play_btn),
+            self.is_pressed(pomo.play_btn),
             p,
         )?;
-        let play_fg = if play_primary { TEXT_PRIMARY } else { p.text_primary };
+        let play_fg = p.text_primary;
         surface.draw_sf_symbol(
-            Rect::new(play_r.x + 12.0, play_r.y + 9.0, 12.0, 12.0),
+            Rect::new(play_r.x + 18.0, play_r.y + 10.0, 14.0, 14.0),
             if self.pomodoro.running { SfSymbol::Pause } else { SfSymbol::Play },
             play_fg,
-            1.3,
+            1.4,
         )?;
         surface.draw_text_bold(
             if self.pomodoro.running { "Pause" } else { "Start" },
-            Rect::new(play_r.x + 22.0, play_r.y, (play_r.width - 26.0).max(24.0), play_r.height),
-            11.0,
+            Rect::new(play_r.x + 28.0, play_r.y, (play_r.width - 36.0).max(40.0), play_r.height),
+            12.0,
             play_fg,
             TextAlign::Center,
         )?;
 
-        let reset_r = self.press_rect(cal.pomo_reset_btn);
+        let reset_r = self.press_rect(pomo.reset_btn);
         self.render_plain_icon_hover(
             surface,
             reset_r,
-            14.0,
-            self.is_hovered(cal.pomo_reset_btn),
-            self.is_pressed(cal.pomo_reset_btn),
+            16.0,
+            self.is_hovered(pomo.reset_btn),
+            self.is_pressed(pomo.reset_btn),
             false,
             p,
         )?;
         surface.draw_sf_symbol(
-            Rect::new(reset_r.x + 8.0, reset_r.y + 8.0, 14.0, 14.0),
+            Rect::new(reset_r.x + (reset_r.width - 15.0) * 0.5, reset_r.y + (reset_r.height - 15.0) * 0.5, 15.0, 15.0),
             SfSymbol::Refresh,
             p.text_secondary,
             1.4,
         )?;
 
         // Preset buttons (5m, 15m, 25m, 50m)
-        for (mins, rect) in &cal.preset_btns {
+        for (mins, rect) in &pomo.preset_btns {
             let active = self.pomodoro.preset_mins == *mins;
             let btn_r = self.press_rect(*rect);
             self.render_plain_button(
                 surface,
                 btn_r,
-                6.0,
-                if active { Some(p.accent) } else { None },
+                8.0,
+                if active { Some(p.control_active) } else { None },
                 self.is_hovered(*rect),
                 self.is_pressed(*rect),
                 p,
@@ -2413,8 +2518,8 @@ impl NotchView {
             surface.draw_text(
                 &format!("{}m", mins),
                 btn_r,
-                9.5,
-                if active { TEXT_PRIMARY } else { p.text_secondary },
+                10.5,
+                if active { p.text_primary } else { p.text_secondary },
                 TextAlign::Center,
             )?;
         }
@@ -2452,7 +2557,7 @@ impl NotchView {
         )?;
 
         // Title + Artist + optional album
-        surface.draw_text_bold(
+        surface.draw_text_bold_ellipsis(
             title,
             Rect::new(mus.title_rect.x, mus.title_rect.y, mus.title_rect.width, 18.0),
             13.0,
@@ -2468,7 +2573,7 @@ impl NotchView {
         } else {
             artist.to_string()
         };
-        surface.draw_text(
+        surface.draw_text_ellipsis(
             &sub_text,
             Rect::new(mus.title_rect.x, mus.title_rect.y + 18.0, mus.title_rect.width, 16.0),
             10.5,
@@ -2492,7 +2597,7 @@ impl NotchView {
             surface,
             lyr_r,
             9.0,
-            if self.music_show_lyrics { Some(p.accent) } else { None },
+            if self.music_show_lyrics { Some(p.control_active) } else { None },
             self.is_hovered(mus.lyrics_btn),
             self.is_pressed(mus.lyrics_btn),
             p,
@@ -2501,7 +2606,7 @@ impl NotchView {
             "Lyrics",
             lyr_r,
             10.0,
-            if self.music_show_lyrics { TEXT_PRIMARY } else { p.text_primary },
+            p.text_primary,
             TextAlign::Center,
         )?;
 
@@ -3096,7 +3201,7 @@ impl NotchView {
                 1.3,
             )?;
 
-            surface.draw_text_bold(
+            surface.draw_text_bold_ellipsis(
                 &item.name,
                 Rect::new(row.x + 38.0, row.y + 4.0, row.width - 116.0, row.height - 8.0),
                 10.5,
@@ -3148,7 +3253,7 @@ impl NotchView {
             surface,
             btn_r,
             10.0,
-            Some(p.accent),
+            Some(p.control_active),
             self.is_hovered(ai.open_drawer_btn),
             self.is_pressed(ai.open_drawer_btn),
             p,
@@ -3156,14 +3261,14 @@ impl NotchView {
         surface.draw_sf_symbol(
             Rect::new(btn_r.x + 12.0, btn_r.y + 9.0, 14.0, 14.0),
             SfSymbol::Sparkle,
-            TEXT_PRIMARY,
+            p.text_primary,
             1.4,
         )?;
         surface.draw_text_bold(
             "Open Hime AI Drawer",
             Rect::new(btn_r.x + 26.0, btn_r.y, btn_r.width - 32.0, btn_r.height),
             11.0,
-            TEXT_PRIMARY,
+            p.text_primary,
             TextAlign::Center,
         )?;
         Ok(())
@@ -3248,33 +3353,11 @@ impl NotchView {
                 })
             }
             NotchPanel::Calendar => {
-                let left_w = (inner_w * 0.57).round();
-                let right_x = inner_x + left_w + 14.0;
-                let right_w = (inner_x + inner_w - right_x).max(110.0);
-
-                let month_title = Rect::new(inner_x, body_y, left_w - 78.0, 20.0);
-                let prev_month_btn = Rect::new(inner_x + left_w - 76.0, body_y, 18.0, 18.0);
-                let next_month_btn = Rect::new(inner_x + left_w - 54.0, body_y, 18.0, 18.0);
-                let today_btn = Rect::new(inner_x + left_w - 34.0, body_y, 34.0, 18.0);
-                let grid_rect = Rect::new(inner_x, body_y + 24.0, left_w, (body_h - 26.0).max(120.0));
-
-                let pomo_panel = Rect::new(right_x, body_y, right_w, body_h);
-                let pomo_play_btn = Rect::new(right_x, body_y + 82.0, right_w - 36.0, 30.0);
-                let pomo_reset_btn = Rect::new(right_x + right_w - 30.0, body_y + 82.0, 30.0, 30.0);
-
-                let presets = [5u16, 15, 25, 50];
-                let p_gap = 4.0;
-                let p_w = (right_w - p_gap * 3.0) / 4.0;
-                let preset_btns = presets
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &m)| {
-                        (
-                            m,
-                            Rect::new(right_x + i as f32 * (p_w + p_gap), body_y + 124.0, p_w, 24.0),
-                        )
-                    })
-                    .collect();
+                let month_title = Rect::new(inner_x, body_y, (inner_w - 94.0).max(80.0), 22.0);
+                let prev_month_btn = Rect::new(inner_x + inner_w - 88.0, body_y + 1.0, 20.0, 20.0);
+                let next_month_btn = Rect::new(inner_x + inner_w - 64.0, body_y + 1.0, 20.0, 20.0);
+                let today_btn = Rect::new(inner_x + inner_w - 40.0, body_y + 1.0, 40.0, 20.0);
+                let grid_rect = Rect::new(inner_x, body_y + 28.0, inner_w, (body_h - 30.0).max(120.0));
 
                 BodyLayout::Calendar(CalendarLayout {
                     month_title,
@@ -3282,9 +3365,39 @@ impl NotchView {
                     next_month_btn,
                     today_btn,
                     grid_rect,
-                    pomo_panel,
-                    pomo_play_btn,
-                    pomo_reset_btn,
+                })
+            }
+            NotchPanel::Pomodoro => {
+                let panel_rect = Rect::new(inner_x, body_y, inner_w, body_h);
+                let play_w = 128.0_f32;
+                let reset_w = 38.0_f32;
+                let ctrl_gap = 10.0_f32;
+                let ctrl_x = inner_x + ((inner_w - (play_w + reset_w + ctrl_gap)) * 0.5).max(0.0);
+                let btn_row_y = body_y + 104.0;
+                let play_btn = Rect::new(ctrl_x, btn_row_y, play_w, 34.0);
+                let reset_btn = Rect::new(ctrl_x + play_w + ctrl_gap, btn_row_y, reset_w, 34.0);
+
+                let presets = [5u16, 15, 25, 50];
+                let p_w = 64.0_f32;
+                let p_gap = 10.0_f32;
+                let total_p_w = p_w * 4.0 + p_gap * 3.0;
+                let presets_x = inner_x + ((inner_w - total_p_w) * 0.5).max(0.0);
+                let preset_y = body_y + 154.0;
+                let preset_btns = presets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &m)| {
+                        (
+                            m,
+                            Rect::new(presets_x + i as f32 * (p_w + p_gap), preset_y, p_w, 28.0),
+                        )
+                    })
+                    .collect();
+
+                BodyLayout::Pomodoro(PomodoroLayout {
+                    panel_rect,
+                    play_btn,
+                    reset_btn,
                     preset_btns,
                 })
             }
@@ -3479,6 +3592,7 @@ struct ExpandedLayout {
 enum BodyLayout {
     CommandCenter(CommandCenterLayout),
     Calendar(CalendarLayout),
+    Pomodoro(PomodoroLayout),
     Music(MusicLayout),
     Wifi(WifiLayout),
     Shortcuts(ShortcutsLayout),
@@ -3511,9 +3625,12 @@ struct CalendarLayout {
     next_month_btn: Rect,
     today_btn: Rect,
     grid_rect: Rect,
-    pomo_panel: Rect,
-    pomo_play_btn: Rect,
-    pomo_reset_btn: Rect,
+}
+
+struct PomodoroLayout {
+    panel_rect: Rect,
+    play_btn: Rect,
+    reset_btn: Rect,
     preset_btns: Vec<(u16, Rect)>,
 }
 
@@ -3805,7 +3922,7 @@ mod tests {
         let (qx, qy) = rect_center(cc.quick_toggles[0]);
         assert_eq!(notch.hit_test_click(qx, qy, surf), Some(NotchAction::ToggleDockMode));
         let (qx4, qy4) = rect_center(cc.quick_toggles[4]);
-        assert_eq!(notch.hit_test_click(qx4, qy4, surf), Some(NotchAction::ToggleHimeAi));
+        assert_eq!(notch.hit_test_click(qx4, qy4, surf), Some(NotchAction::OpenSettings));
 
         // Volume slider midpoint -> ~0.5
         let vx = cc.volume_track.x + cc.volume_track.width * 0.5;
@@ -3840,8 +3957,20 @@ mod tests {
         let BodyLayout::Calendar(cal) = layout.body else {
             panic!("expected Calendar layout");
         };
+        assert!(cal.grid_rect.width > 300.0);
+        let (nmx, nmy) = rect_center(cal.next_month_btn);
+        assert_eq!(notch.hit_test_click(nmx, nmy, surf), Some(NotchAction::CalendarNextMonth));
 
-        let (px, py) = rect_center(cal.pomo_play_btn);
+        // Dedicated Pomodoro panel
+        notch.set_panel(NotchPanel::Pomodoro);
+        settle(&mut notch);
+        let outer_p = notch.computed_rect(surf.width, surf.height);
+        let layout_p = notch.compute_expanded_layout(outer_p);
+        let BodyLayout::Pomodoro(pomo) = layout_p.body else {
+            panic!("expected Pomodoro layout");
+        };
+
+        let (px, py) = rect_center(pomo.play_btn);
         let act = notch.hit_test_click(px, py, surf).unwrap();
         assert_eq!(act, NotchAction::PomodoroStartPause);
         notch.apply_action(&act);
@@ -3850,11 +3979,17 @@ mod tests {
         notch.tick(2.0);
         assert_eq!(notch.pomodoro.remaining_secs, 25 * 60 - 2);
 
-        let (rx, ry) = rect_center(cal.pomo_reset_btn);
+        let (rx, ry) = rect_center(pomo.reset_btn);
         let rst = notch.hit_test_click(rx, ry, surf).unwrap();
         notch.apply_action(&rst);
         assert!(!notch.pomodoro.running);
         assert_eq!(notch.pomodoro.remaining_secs, 25 * 60);
+
+        let (p50x, p50y) = rect_center(pomo.preset_btns[3].1);
+        let p50 = notch.hit_test_click(p50x, p50y, surf).unwrap();
+        assert_eq!(p50, NotchAction::PomodoroPreset(50));
+        notch.apply_action(&p50);
+        assert_eq!(notch.pomodoro.remaining_secs, 50 * 60);
     }
 
     #[test]
@@ -3946,6 +4081,7 @@ mod tests {
             NotchPanel::Status,
             NotchPanel::CommandCenter,
             NotchPanel::Calendar,
+            NotchPanel::Pomodoro,
             NotchPanel::Music,
             NotchPanel::Wifi,
             NotchPanel::Shortcuts,
@@ -4192,5 +4328,56 @@ mod tests {
         assert!(!notch.handle_header_scroll_at(clk_x, clk_y, surf, 0.0, 0.0));
         let (body_x, body_y) = (outer.x + outer.width * 0.5, outer.y + outer.height - 40.0);
         assert!(!notch.handle_header_scroll_at(body_x, body_y, surf, 1.0, 0.0));
+    }
+
+    #[test]
+    fn available_panels_excludes_wifi_and_shortcuts_and_includes_pomodoro() {
+        let notch = NotchView::new(NotchEdge::Top);
+        let panels = notch.available_panels();
+        assert!(!panels.contains(&NotchPanel::Wifi));
+        assert!(!panels.contains(&NotchPanel::Shortcuts));
+        assert!(panels.contains(&NotchPanel::CommandCenter));
+        assert!(panels.contains(&NotchPanel::Calendar));
+        assert!(panels.contains(&NotchPanel::Pomodoro));
+    }
+
+    #[test]
+    fn scroll_step_quantizes_one_step_per_notch_and_auto_expands_from_collapsed() {
+        let mut notch = NotchView::new(NotchEdge::Top);
+        let surf = Rect::new(0.0, 0.0, 560.0, 320.0);
+        settle(&mut notch);
+        assert!(!notch.is_expanded);
+
+        // Vertical scroll on collapsed notch does not expand.
+        let collapsed = notch.computed_rect(surf.width, surf.height);
+        let (cx, cy) = rect_center(collapsed);
+        assert!(!notch.handle_scroll_step(cx, cy, surf, 0.0, -1.0));
+        assert!(!notch.is_expanded);
+
+        // Left/right scroll on collapsed notch auto-expands and switches exactly 1 menu.
+        assert!(notch.handle_scroll_step(cx, cy, surf, 1.0, 0.0));
+        assert!(notch.is_expanded);
+        assert_eq!(notch.active_panel, NotchPanel::Calendar);
+
+        // Immediate second scroll during cooldown is ignored (never skips multiple menus).
+        settle(&mut notch);
+        let outer = notch.computed_rect(surf.width, surf.height);
+        let layout = notch.compute_expanded_layout(outer);
+        let (clk_x, clk_y) = rect_center(layout.header_clock);
+        // Settle took > 0.14s, so trigger a scroll and immediately send another before cooldown expires.
+        assert!(notch.handle_scroll_step(clk_x, clk_y, surf, 1.0, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Pomodoro);
+        assert!(!notch.handle_scroll_step(clk_x, clk_y, surf, 1.0, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Pomodoro);
+
+        // Still blocked at 0.20s (280ms cooldown), then after cooldown elapses, fractional deltas accumulate to 1 step.
+        notch.tick(0.2);
+        assert!(!notch.handle_scroll_step(clk_x, clk_y, surf, 1.0, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Pomodoro);
+        notch.tick(0.1);
+        assert!(!notch.handle_scroll_step(clk_x, clk_y, surf, 0.4, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Pomodoro);
+        assert!(notch.handle_scroll_step(clk_x, clk_y, surf, 0.6, 0.0));
+        assert_eq!(notch.active_panel, NotchPanel::Music);
     }
 }

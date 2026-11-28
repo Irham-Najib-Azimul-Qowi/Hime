@@ -17,19 +17,21 @@ use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
-    D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1DCRenderTarget, ID2D1Device,
     ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1Layer, ID2D1PathGeometry,
-    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1_CAP_STYLE_ROUND, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -39,10 +41,15 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -54,30 +61,32 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, SelectObject, SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HRGN, RGN_OR,
+    DeleteObject, GetObjectW, SelectObject, SetWindowRgn, ValidateRect, AC_SRC_ALPHA, AC_SRC_OVER,
+    BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC,
+    HGDIOBJ, HRGN, RGN_OR,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-use windows::Win32::UI::Shell::ExtractIconExW;
+use windows::Win32::UI::Shell::{ExtractIconExW, SHDefExtractIconW, SHFILEINFOW, SHGFI_SYSICONINDEX};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DrawIconEx, GetClassLongPtrW,
-    GetIconInfo, GetWindowLongW, LoadCursorW, PostMessageW, RegisterClassExW, SendMessageTimeoutW,
-    SetCursor, SetWindowLongW, SetWindowPos, ShowWindow, UpdateLayeredWindow, CS_HREDRAW,
-    CS_VREDRAW, DI_NORMAL, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, HICON, HTCLIENT, HWND_TOPMOST,
-    ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetIconInfo, GetWindowLongW, LoadCursorW, PostMessageW, PrivateExtractIconsW, RegisterClassExW,
+    SendMessageTimeoutW, SetCursor, SetWindowLongW, SetWindowPos, ShowWindow, UpdateLayeredWindow,
+    CS_HREDRAW, CS_VREDRAW, DI_NORMAL, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, HICON, HTCLIENT,
+    HWND_TOPMOST, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, SMTO_ABORTIFHUNG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_DROPFILES, WM_GETICON, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::theme::{
-    AdaptivePalette, Color, ColorThemeMode, ThemePolarity, FONT_FAMILY, STATUS_LIVE_AMBER,
-    STATUS_LIVE_GREEN, STATUS_LIVE_RED, STATUS_MUTED, SYSTEM_BLUE, SYSTEM_BLUE_TINT, TRANSPARENT,
+    AdaptivePalette, Color, ColorThemeMode, GlassThemePreset, ThemePolarity, FONT_FAMILY,
+    FONT_FAMILY_FALLBACKS, STATUS_LIVE_AMBER, STATUS_LIVE_GREEN, STATUS_LIVE_RED, STATUS_MUTED,
+    SYSTEM_BLUE, SYSTEM_BLUE_TINT, TRANSPARENT,
 };
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("HimeIslandNativeSurface");
@@ -367,8 +376,12 @@ pub fn edge_contour_points(
 }
 
 /// Extracts a 32-bit premultiplied BGRA icon from a Win32 `HWND` or executable path.
+///
+/// Prefers high-resolution (`>= 96px` / `256px` Jumbo) shell and PE icon resources over
+/// low-resolution 32px window icons to prevent upscaling blur on Dock hover magnification.
 pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Option<IconRgba> {
-    let target_size = size.clamp(16, 128);
+    let target_size = size.clamp(16, 256);
+    let extract_size = target_size.max(96);
     unsafe {
         let mut owned_icon = false;
         let mut hicon = HICON::default();
@@ -414,18 +427,15 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
             }
         }
 
-        if hicon.0.is_null() && !exe_path.is_empty() {
-            let wide_path = to_wide_null(exe_path);
-            let mut large_icon = HICON::default();
-            let count = ExtractIconExW(
-                PCWSTR(wide_path.as_ptr()),
-                0,
-                Some(&mut large_icon),
-                None,
-                1,
-            );
-            if count > 0 && !large_icon.0.is_null() {
-                hicon = large_icon;
+        // If the window only provided a low-res icon (e.g. 32x32) and we have an exe_path,
+        // prefer extracting a crisp >=96px/256px icon from the executable/shell image list.
+        let win_hicon_dim = (!hicon.0.is_null())
+            .then(|| hicon_pixel_size(hicon))
+            .flatten()
+            .unwrap_or(0);
+        if !exe_path.is_empty() && (hicon.0.is_null() || win_hicon_dim < target_size.min(64)) {
+            if let Some(hi_res) = extract_high_res_exe_icon(exe_path, extract_size) {
+                hicon = hi_res;
                 owned_icon = true;
             }
         }
@@ -448,6 +458,159 @@ pub fn extract_window_or_exe_icon(hwnd: isize, exe_path: &str, size: u32) -> Opt
                 None
             }
         })
+    }
+}
+
+unsafe fn hicon_pixel_size(hicon: HICON) -> Option<u32> {
+    let mut info = ICONINFO::default();
+    if GetIconInfo(hicon, &mut info).is_err() {
+        return None;
+    }
+    let mut dim = None;
+    if !info.hbmColor.0.is_null() {
+        let mut bmp = BITMAP::default();
+        if GetObjectW(
+            info.hbmColor.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some((&mut bmp as *mut BITMAP).cast()),
+        ) > 0
+        {
+            dim = Some((bmp.bmWidth.max(bmp.bmHeight)).max(0) as u32);
+        }
+        let _ = DeleteObject(info.hbmColor.into());
+    }
+    if !info.hbmMask.0.is_null() {
+        if dim.is_none() {
+            let mut bmp = BITMAP::default();
+            if GetObjectW(
+                info.hbmMask.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some((&mut bmp as *mut BITMAP).cast()),
+            ) > 0
+            {
+                dim = Some((bmp.bmWidth.max(bmp.bmHeight / 2)).max(0) as u32);
+            }
+        }
+        let _ = DeleteObject(info.hbmMask.into());
+    }
+    dim
+}
+
+unsafe fn extract_high_res_exe_icon(exe_path: &str, requested_size: u32) -> Option<HICON> {
+    let extract_size = requested_size.clamp(96, 256);
+    let wide_path = to_wide_null(exe_path);
+
+    // 1. Try Shell Jumbo ImageList (SHIL_JUMBO = 256x256) for crisp modern app icons.
+    if let Some(jumbo) = extract_jumbo_shell_icon(&wide_path) {
+        return Some(jumbo);
+    }
+
+    // 2. Try PrivateExtractIconsW at >=96px (reads large PE icon group entries directly).
+    if wide_path.len() <= 260 {
+        let mut path_buf = [0u16; 260];
+        path_buf[..wide_path.len()].copy_from_slice(&wide_path);
+        let mut private_icon = HICON::default();
+        let mut icon_id: u32 = 0;
+        let extracted_count = PrivateExtractIconsW(
+            &path_buf,
+            0,
+            extract_size as i32,
+            extract_size as i32,
+            Some(std::slice::from_mut(&mut private_icon)),
+            Some(&mut icon_id),
+            0,
+        );
+        if extracted_count > 0 && !private_icon.0.is_null() {
+            return Some(private_icon);
+        }
+    }
+
+    // 3. Try SHDefExtractIconW at >=96px.
+    let mut def_large = HICON::default();
+    if SHDefExtractIconW(
+        PCWSTR(wide_path.as_ptr()),
+        0,
+        0,
+        Some(&mut def_large),
+        None,
+        extract_size,
+    )
+    .is_ok()
+        && !def_large.0.is_null()
+    {
+        return Some(def_large);
+    }
+
+    // 4. Final fallback: ExtractIconExW.
+    let mut large_icon = HICON::default();
+    let count = ExtractIconExW(
+        PCWSTR(wide_path.as_ptr()),
+        0,
+        Some(&mut large_icon),
+        None,
+        1,
+    );
+    if count > 0 && !large_icon.0.is_null() {
+        return Some(large_icon);
+    }
+    None
+}
+
+unsafe fn extract_jumbo_shell_icon(wide_path: &[u16]) -> Option<HICON> {
+    const SHIL_JUMBO: i32 = 4;
+    const ILD_TRANSPARENT: u32 = 0x0000_0001;
+    const IID_IIMAGELIST: GUID = GUID::from_u128(0x46eb5926_582e_4017_9fdf_e8998daa0950);
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHGetFileInfoW(
+            psz_path: *const u16,
+            dw_file_attributes: u32,
+            psfi: *mut SHFILEINFOW,
+            cb_file_info: u32,
+            u_flags: u32,
+        ) -> usize;
+        fn SHGetImageList(
+            i_image_list: i32,
+            riid: *const GUID,
+            ppv: *mut *mut std::ffi::c_void,
+        ) -> HRESULT;
+    }
+
+    let mut sfi = SHFILEINFOW::default();
+    let res = SHGetFileInfoW(
+        wide_path.as_ptr(),
+        0,
+        &mut sfi,
+        std::mem::size_of::<SHFILEINFOW>() as u32,
+        SHGFI_SYSICONINDEX.0,
+    );
+    if res == 0 || sfi.iIcon < 0 {
+        return None;
+    }
+
+    let mut img_list_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    if SHGetImageList(SHIL_JUMBO, &IID_IIMAGELIST, &mut img_list_ptr).is_err()
+        || img_list_ptr.is_null()
+    {
+        return None;
+    }
+    let img_list = WicComPtr(img_list_ptr);
+    let vtbl = *(img_list.0 as *const *const usize);
+    // IImageList::GetIcon (slot 10)
+    let get_icon: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        i32,
+        u32,
+        *mut HICON,
+    ) -> HRESULT = std::mem::transmute(*vtbl.add(10));
+    let mut hicon = HICON::default();
+    if get_icon(img_list.0, sfi.iIcon, ILD_TRANSPARENT, &mut hicon).is_ok()
+        && !hicon.0.is_null()
+    {
+        Some(hicon)
+    } else {
+        None
     }
 }
 
@@ -763,21 +926,17 @@ fn extract_uwp_package_icon(exe_path: &str, target_size: u32) -> Option<IconRgba
     }
     let exe_dir = Path::new(exe_path).parent()?;
     let png_path = find_best_uwp_asset_png(exe_dir)?;
-    let size = target_size.clamp(32, 64);
+    let size = target_size.clamp(32, 256);
     decode_image_bgra_premul(&png_path, size, size)
 }
 
-unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
-    let mut info = ICONINFO::default();
-    if GetIconInfo(hicon, &mut info).is_err() {
-        return None;
-    }
-    if !info.hbmColor.0.is_null() {
-        let _ = DeleteObject(info.hbmColor.into());
-    }
-    if !info.hbmMask.0.is_null() {
-        let _ = DeleteObject(info.hbmMask.into());
-    }
+unsafe fn icon_to_bgra_premul(hicon: HICON, target_size: u32) -> Option<IconRgba> {
+    let native_dim = hicon_pixel_size(hicon).unwrap_or(target_size);
+    let draw_size = if native_dim > target_size {
+        native_dim.min(256)
+    } else {
+        target_size
+    };
 
     let mem_dc = CreateCompatibleDC(None);
     if mem_dc.0.is_null() {
@@ -787,8 +946,8 @@ unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size as i32,
-            biHeight: -(size as i32),
+            biWidth: draw_size as i32,
+            biHeight: -(draw_size as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -802,7 +961,7 @@ unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
         return None;
     };
     let old = SelectObject(mem_dc, dib.into());
-    let byte_len = (size * size * 4) as usize;
+    let byte_len = (draw_size * draw_size * 4) as usize;
     std::ptr::write_bytes(bits as *mut u8, 0, byte_len);
 
     let drawn = DrawIconEx(
@@ -810,8 +969,8 @@ unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
         0,
         0,
         hicon,
-        size as i32,
-        size as i32,
+        draw_size as i32,
+        draw_size as i32,
         0,
         None,
         DI_NORMAL,
@@ -846,11 +1005,55 @@ unsafe fn icon_to_bgra_premul(hicon: HICON, size: u32) -> Option<IconRgba> {
         }
     }
 
+    let final_bgra = if draw_size != target_size {
+        downsample_bgra_premul(&out, draw_size, target_size)
+    } else {
+        out
+    };
+
     Some(IconRgba {
-        width: size,
-        height: size,
-        bgra_premul: out,
+        width: target_size,
+        height: target_size,
+        bgra_premul: final_bgra,
     })
+}
+
+fn downsample_bgra_premul(src: &[u8], src_dim: u32, dst_dim: u32) -> Vec<u8> {
+    if src_dim == dst_dim || src_dim == 0 || dst_dim == 0 {
+        return src.to_vec();
+    }
+    let mut dst = vec![0u8; (dst_dim * dst_dim * 4) as usize];
+    let scale = src_dim as f32 / dst_dim as f32;
+    for dy in 0..dst_dim {
+        let sy0 = ((dy as f32) * scale).floor() as u32;
+        let sy1 = (((dy + 1) as f32) * scale).ceil().min(src_dim as f32) as u32;
+        let sy1 = sy1.max(sy0 + 1).min(src_dim);
+        for dx in 0..dst_dim {
+            let sx0 = ((dx as f32) * scale).floor() as u32;
+            let sx1 = (((dx + 1) as f32) * scale).ceil().min(src_dim as f32) as u32;
+            let sx1 = sx1.max(sx0 + 1).min(src_dim);
+            let mut sum = [0u32; 4];
+            let mut count = 0u32;
+            for sy in sy0..sy1 {
+                let row = (sy * src_dim) as usize;
+                for sx in sx0..sx1 {
+                    let idx = (row + sx as usize) * 4;
+                    sum[0] += src[idx] as u32;
+                    sum[1] += src[idx + 1] as u32;
+                    sum[2] += src[idx + 2] as u32;
+                    sum[3] += src[idx + 3] as u32;
+                    count += 1;
+                }
+            }
+            let out_idx = ((dy * dst_dim + dx) * 4) as usize;
+            let c = count.max(1);
+            dst[out_idx] = (sum[0] / c) as u8;
+            dst[out_idx + 1] = (sum[1] / c) as u8;
+            dst[out_idx + 2] = (sum[2] / c) as u8;
+            dst[out_idx + 3] = (sum[3] / c) as u8;
+        }
+    }
+    dst
 }
 
 /// Hime mascot eye expression states.
@@ -1479,12 +1682,14 @@ pub struct NativeSurface {
     d2d_target: ID2D1RenderTarget,
     backend: SurfaceBackend,
     brush_cache: RefCell<HashMap<u32, ID2D1SolidColorBrush>>,
-    text_format_cache: RefCell<HashMap<(u32, u8, bool), IDWriteTextFormat>>,
+    text_format_cache: RefCell<HashMap<(u32, u8, bool, bool), IDWriteTextFormat>>,
     bitmap_cache: RefCell<BitmapCache>,
     glass_bitmap_cache: RefCell<GlassBitmapCache>,
     backdrop: RefCell<Option<BackdropState>>,
     backdrop_gen: Cell<u64>,
     color_theme_mode: Cell<ColorThemeMode>,
+    glass_theme: Cell<GlassThemePreset>,
+    glass_opacity: Cell<f32>,
     system_light_theme: Cell<Option<bool>>,
     last_acrylic_tint: Cell<Option<u32>>,
     cached_layer: RefCell<Option<ID2D1Layer>>,
@@ -1601,6 +1806,8 @@ impl NativeSurface {
                 backdrop: RefCell::new(None),
                 backdrop_gen: Cell::new(0),
                 color_theme_mode: Cell::new(ColorThemeMode::Auto),
+                glass_theme: Cell::new(GlassThemePreset::default()),
+                glass_opacity: Cell::new(1.0),
                 system_light_theme: Cell::new(None),
                 last_acrylic_tint: Cell::new(None),
                 cached_layer: RefCell::new(None),
@@ -1608,6 +1815,10 @@ impl NativeSurface {
                 last_region_key: RefCell::new(None),
                 region_is_empty: RefCell::new(false),
             };
+            surf.d2d_target
+                .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            surf.d2d_target
+                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             if surf.is_gpu_acrylic() {
                 surf.sync_acrylic_accent();
             }
@@ -1635,10 +1846,16 @@ impl NativeSurface {
         if !self.is_gpu_acrylic() {
             return;
         }
-        let tint = match self.palette().polarity {
-            ThemePolarity::DarkGlass => 0x38_14_12_10,
-            ThemePolarity::LightGlass => 0x32_FA_F8_F6,
+        let polarity = self.palette().polarity;
+        let base_alpha = self.glass_theme.get().gpu_acrylic_alpha(polarity) as f32;
+        let alpha = (base_alpha * self.glass_opacity.get())
+            .round()
+            .clamp(12.0, 255.0) as u32;
+        let rgb = match polarity {
+            ThemePolarity::DarkGlass => 0x00_14_12_10,
+            ThemePolarity::LightGlass => 0x00_FA_F8_F6,
         };
+        let tint = (alpha << 24) | rgb;
         if self.last_acrylic_tint.get() != Some(tint) && apply_dwm_acrylic_blur(self.hwnd, tint) {
             self.last_acrylic_tint.set(Some(tint));
         }
@@ -1668,6 +1885,42 @@ impl NativeSurface {
     /// Returns the active [`ColorThemeMode`].
     pub fn color_theme_mode(&self) -> ColorThemeMode {
         self.color_theme_mode.get()
+    }
+
+    /// Sets the unified [`GlassThemePreset`] across Main Notch, Side Notches, Dock, and Settings.
+    pub fn set_glass_theme(&self, preset: GlassThemePreset) {
+        let mode = preset.to_color_theme_mode();
+        let changed = self.glass_theme.get() != preset || self.color_theme_mode.get() != mode;
+        if changed {
+            self.glass_theme.set(preset);
+            self.color_theme_mode.set(mode);
+            self.glass_bitmap_cache.borrow_mut().clear();
+            if self.is_gpu_acrylic() {
+                self.sync_acrylic_accent();
+            }
+        }
+    }
+
+    /// Returns the active [`GlassThemePreset`].
+    pub fn glass_theme(&self) -> GlassThemePreset {
+        self.glass_theme.get()
+    }
+
+    /// Sets the backdrop/glass opacity multiplier (`0.20..=1.0`) across all surfaces.
+    pub fn set_glass_opacity(&self, opacity: f32) {
+        let clamped = opacity.clamp(0.20, 1.0);
+        if (self.glass_opacity.get() - clamped).abs() > 1e-4 {
+            self.glass_opacity.set(clamped);
+            self.glass_bitmap_cache.borrow_mut().clear();
+            if self.is_gpu_acrylic() {
+                self.sync_acrylic_accent();
+            }
+        }
+    }
+
+    /// Returns the active backdrop/glass opacity multiplier (`0.20..=1.0`).
+    pub fn glass_opacity(&self) -> f32 {
+        self.glass_opacity.get()
     }
 
     /// Supplies a captured 32-bit premultiplied BGRA backdrop buffer behind this surface for
@@ -1825,19 +2078,25 @@ impl NativeSurface {
     }
 
     /// Updates the window clip region. In `LayeredSoftware` mode, `ULW_ALPHA` handles smooth edges
-    /// and soft drop shadows; in `GpuAcrylic` mode, `SetWindowRgn` strictly bounds DWM Acrylic blur.
+    /// and soft drop shadows; in `GpuAcrylic` mode, `SetWindowRgn` + `DWMWA_WINDOW_CORNER_PREFERENCE`
+    /// strictly bound DWM Acrylic blur so all 4 corners remain cleanly rounded with zero dark artifacts.
     pub fn set_rounded_region(&self, rect: Rect, radius: f32) {
         let scale = (self.dpi / 96.0).max(0.5);
         let is_empty = rect.width <= 0.0 || rect.height <= 0.0;
         let (left, top, right, bottom, diam) = if is_empty {
             (0, 0, 0, 0, 0)
         } else {
+            let diam_px = if radius > 0.0 {
+                ((radius * 2.0 + 1.5) * scale).round().max(0.0) as i32
+            } else {
+                0
+            };
             (
                 (rect.x * scale).round() as i32,
                 (rect.y * scale).round() as i32,
-                ((rect.x + rect.width) * scale).round() as i32 + 1,
-                ((rect.y + rect.height) * scale).round() as i32 + 1,
-                ((radius * 2.0) * scale).round().max(0.0) as i32,
+                ((rect.x + rect.width) * scale).round() as i32,
+                ((rect.y + rect.height) * scale).round() as i32,
+                diam_px,
             )
         };
         let key = RegionKey::Rounded {
@@ -1876,9 +2135,13 @@ impl NativeSurface {
             }
             let left = (r.x * scale).round() as i32;
             let top = (r.y * scale).round() as i32;
-            let right = ((r.x + r.width) * scale).round() as i32 + 1;
-            let bottom = ((r.y + r.height) * scale).round() as i32 + 1;
-            let diam = ((rad * 2.0) * scale).round().max(0.0) as i32;
+            let right = ((r.x + r.width) * scale).round() as i32;
+            let bottom = ((r.y + r.height) * scale).round() as i32;
+            let diam = if rad > 0.0 {
+                ((rad * 2.0 + 1.5) * scale).round().max(0.0) as i32
+            } else {
+                0
+            };
             for v in [left, top, right, bottom, diam] {
                 hash ^= v as u64;
                 hash = hash.wrapping_mul(0x1000_0000_01b3);
@@ -1899,6 +2162,19 @@ impl NativeSurface {
     fn apply_gpu_acrylic_regions(&self, rects: &[(Rect, f32)], is_empty: bool, key: RegionKey) {
         let scale = (self.dpi / 96.0).max(0.5);
         unsafe {
+            let corner_pref: DWM_WINDOW_CORNER_PREFERENCE =
+                if !is_empty && rects.len() == 1 && rects[0].1 > 0.0 {
+                    DWMWCP_ROUND
+                } else {
+                    DWMWCP_DONOTROUND
+                };
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&corner_pref as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
+                std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
+
             let final_rgn: Option<HRGN> = if is_empty {
                 let r = CreateRectRgn(0, 0, 0, 0);
                 (!r.is_invalid()).then_some(r)
@@ -1910,9 +2186,13 @@ impl NativeSurface {
                     }
                     let left = (r.x * scale).round() as i32;
                     let top = (r.y * scale).round() as i32;
-                    let right = ((r.x + r.width) * scale).round() as i32 + 1;
-                    let bottom = ((r.y + r.height) * scale).round() as i32 + 1;
-                    let diam = ((rad * 2.0) * scale).round().max(0.0) as i32;
+                    let right = ((r.x + r.width) * scale).round() as i32;
+                    let bottom = ((r.y + r.height) * scale).round() as i32;
+                    let diam = if rad > 0.0 {
+                        ((rad * 2.0 + 1.5) * scale).round().max(0.0) as i32
+                    } else {
+                        0
+                    };
                     let part = CreateRoundRectRgn(left, top, right, bottom, diam, diam);
                     if part.is_invalid() {
                         continue;
@@ -1955,6 +2235,10 @@ impl NativeSurface {
                         bottom: self.height as i32,
                     };
                     let _ = dc_rt.BindDC(hdc, &rect);
+                    self.d2d_target
+                        .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    self.d2d_target
+                        .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                     self.d2d_target.BeginDraw();
                     self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
                 }
@@ -1985,6 +2269,10 @@ impl NativeSurface {
                             }
                         }
                     }
+                    self.d2d_target
+                        .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    self.d2d_target
+                        .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                     self.d2d_target.BeginDraw();
                     self.d2d_target.Clear(Some(&TRANSPARENT.to_d2d()));
                 }
@@ -2099,7 +2387,7 @@ impl NativeSurface {
         color: Color,
         align: TextAlign,
     ) -> Result<()> {
-        self.draw_text_weighted(text, rect, font_size, color, align, false)
+        self.draw_text_weighted(text, rect, font_size, color, align, false, false)
     }
 
     /// Draws bold UTF-8 text inside `rect` using DirectWrite.
@@ -2111,7 +2399,31 @@ impl NativeSurface {
         color: Color,
         align: TextAlign,
     ) -> Result<()> {
-        self.draw_text_weighted(text, rect, font_size, color, align, true)
+        self.draw_text_weighted(text, rect, font_size, color, align, true, false)
+    }
+
+    /// Draws single-line UTF-8 text inside `rect` with DirectWrite character-level `...` ellipsis truncation.
+    pub fn draw_text_ellipsis(
+        &self,
+        text: &str,
+        rect: Rect,
+        font_size: f32,
+        color: Color,
+        align: TextAlign,
+    ) -> Result<()> {
+        self.draw_text_weighted(text, rect, font_size, color, align, false, true)
+    }
+
+    /// Draws single-line bold UTF-8 text inside `rect` with DirectWrite character-level `...` ellipsis truncation.
+    pub fn draw_text_bold_ellipsis(
+        &self,
+        text: &str,
+        rect: Rect,
+        font_size: f32,
+        color: Color,
+        align: TextAlign,
+    ) -> Result<()> {
+        self.draw_text_weighted(text, rect, font_size, color, align, true, true)
     }
 
     fn draw_text_weighted(
@@ -2122,18 +2434,24 @@ impl NativeSurface {
         color: Color,
         align: TextAlign,
         bold: bool,
+        ellipsis: bool,
     ) -> Result<()> {
         unsafe {
             let brush = self.create_brush(color)?;
-            let format = self.create_text_format_weighted(font_size, align, bold)?;
+            let format = self.create_text_format_weighted(font_size, align, bold, ellipsis)?;
             let wide: Vec<u16> = text.encode_utf16().collect();
             let d2d_rect = rect.to_d2d();
+            let options = if ellipsis {
+                D2D1_DRAW_TEXT_OPTIONS_CLIP
+            } else {
+                Default::default()
+            };
             self.d2d_target.DrawText(
                 &wide,
                 &format,
                 &d2d_rect,
                 &brush,
-                Default::default(),
+                options,
                 Default::default(),
             );
             Ok(())
@@ -2436,15 +2754,18 @@ impl NativeSurface {
                 return Ok(());
             }
 
-            // Headless / no-backdrop fallback: clean flat adaptive glass + 1px optical rim (no diagonal gradient).
+            // Headless / no-backdrop fallback: clean flat adaptive glass + subtle optical rim.
             let palette = self.palette();
-            let (base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            let opacity = self.glass_opacity.get();
+            let theme_mul = self.glass_theme.get().tint_alpha_multiplier();
+            base_fill = base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.95));
             let ops = edge_contour_points(rect, ear_w, radius, edge, flares);
             let geo = self.build_contour_geometry(&ops)?;
             let fill_brush = self.create_brush(base_fill)?;
             self.d2d_target.FillGeometry(&geo, &fill_brush, None);
             let border_brush = self.create_brush(border_col)?;
-            self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+            self.d2d_target.DrawGeometry(&geo, &border_brush, 0.75, None);
             Ok(())
         }
     }
@@ -2590,6 +2911,8 @@ impl NativeSurface {
             // GpuAcrylic (real-time DWM blur beneath) or no-backdrop fallback:
             let palette = self.palette();
             let (mut base_fill, border_col) = resolve_fallback_glass_colors(&palette, style);
+            let theme_mul = self.glass_theme.get().tint_alpha_multiplier();
+            let opacity = self.glass_opacity.get();
             if self.is_gpu_acrylic() {
                 // Keep surface fill light so live GPU DWM Acrylic shines through cleanly.
                 let gpu_alpha = match style.variant {
@@ -2598,7 +2921,11 @@ impl NativeSurface {
                     LiquidGlassVariant::Elevated => 0.18,
                     LiquidGlassVariant::Tinted(_) => 0.34,
                 };
-                base_fill = base_fill.with_alpha(gpu_alpha);
+                base_fill =
+                    base_fill.with_alpha((gpu_alpha * theme_mul * opacity).clamp(0.02, 0.55));
+            } else {
+                base_fill =
+                    base_fill.with_alpha((base_fill.a * theme_mul * opacity).clamp(0.14, 0.95));
             }
             let rr = D2D1_ROUNDED_RECT {
                 rect: rect.to_d2d(),
@@ -2622,16 +2949,16 @@ impl NativeSurface {
                     radiusY: (radius - 1.25).max(0.0),
                 };
                 let rim_alpha = if palette.polarity == ThemePolarity::LightGlass {
-                    0.50
+                    0.36
                 } else {
-                    0.12
+                    0.09
                 };
                 let inner_brush = self.create_brush(Color::rgba(1.0, 1.0, 1.0, rim_alpha))?;
                 self.d2d_target
-                    .DrawRoundedRectangle(&inner_rr, &inner_brush, 0.85, None);
+                    .DrawRoundedRectangle(&inner_rr, &inner_brush, 0.75, None);
             }
 
-            // Crisp 1px outer hairline border
+            // Subtle outer hairline border
             let border_rr = D2D1_ROUNDED_RECT {
                 rect: Rect::new(
                     rect.x + 0.5,
@@ -2645,7 +2972,7 @@ impl NativeSurface {
             };
             let border_brush = self.create_brush(border_col)?;
             self.d2d_target
-                .DrawRoundedRectangle(&border_rr, &border_brush, 1.0, None);
+                .DrawRoundedRectangle(&border_rr, &border_brush, 0.75, None);
             Ok(())
         }
     }
@@ -2683,7 +3010,7 @@ impl NativeSurface {
             }
         };
         let border = match tint {
-            Some(c) => c.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.40).with_alpha(0.45),
+            Some(c) => c.lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.40).with_alpha(0.28),
             None => palette.hairline_border,
         };
         self.fill_rounded_rect(rect, radius, fill)?;
@@ -2696,7 +3023,7 @@ impl NativeSurface {
             ),
             (radius - 0.5).max(0.0),
             border,
-            1.0,
+            0.75,
         )?;
         Ok(())
     }
@@ -2747,10 +3074,11 @@ impl NativeSurface {
             return Ok(true);
         }
 
-        // Rasterize interior blur & bevel refraction at half-resolution (matching `blurred_bgra`)
-        // for <0.3ms 60fps hover transitions, then seal with a crisp 1px D2D vector outline.
-        let gw = (px_w / 2).max(1);
-        let gh = (px_h / 2).max(1);
+        // Rasterize interior blur & bevel refraction at full native pixel resolution so Notch,
+        // Side Notches, Dock, and Settings share identical crisp edges without upscaling blur.
+        let gw = px_w.max(1);
+        let gh = px_h.max(1);
+        let opacity = self.glass_opacity.get();
 
         let palette = AdaptivePalette::resolve(
             self.color_theme_mode.get(),
@@ -2764,6 +3092,7 @@ impl NativeSurface {
             px_y as i32,
             gw,
             gh,
+            opacity,
             style,
             edge_params,
         );
@@ -2783,6 +3112,7 @@ impl NativeSurface {
                 gw,
                 gh,
                 scale,
+                opacity,
                 style,
                 polarity,
                 edge_params,
@@ -2839,7 +3169,7 @@ impl NativeSurface {
             let mut layer_params = D2D1_LAYER_PARAMETERS {
                 contentBounds: dest,
                 geometricMask: std::mem::ManuallyDrop::new(Some(clip_geo.into())),
-                maskAntialiasMode: Default::default(),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                 maskTransform: windows_numerics::Matrix3x2::identity(),
                 opacity: 1.0,
                 opacityBrush: std::mem::ManuallyDrop::new(None),
@@ -2866,18 +3196,18 @@ impl NativeSurface {
             );
         }
 
-        // Crisp 1px D2D vector optical rim/outline at native DPI
+        // Subtle D2D vector optical rim/outline at native DPI
         let border_col = match style.variant {
             LiquidGlassVariant::Tinted(tint) => tint
                 .lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.45)
-                .with_alpha(0.45),
+                .with_alpha(0.28),
             _ => palette.hairline_border,
         };
         let border_brush = self.create_brush(border_col)?;
         if let Some((ear_w, er, edge, flares)) = edge_params {
             let ops = edge_contour_points(rect, ear_w, er, edge, flares);
             let geo = self.build_contour_geometry(&ops)?;
-            self.d2d_target.DrawGeometry(&geo, &border_brush, 1.0, None);
+            self.d2d_target.DrawGeometry(&geo, &border_brush, 0.75, None);
         } else {
             let border_rr = D2D1_ROUNDED_RECT {
                 rect: Rect::new(
@@ -2891,7 +3221,7 @@ impl NativeSurface {
                 radiusY: (r - 0.5).max(0.0),
             };
             self.d2d_target
-                .DrawRoundedRectangle(&border_rr, &border_brush, 1.0, None);
+                .DrawRoundedRectangle(&border_rr, &border_brush, 0.75, None);
         }
         Ok(true)
     }
@@ -2982,27 +3312,91 @@ impl NativeSurface {
                     layerOptions: Default::default(),
                 };
                 self.d2d_target.PushLayer(&layer_params, &layer);
-                self.d2d_target.DrawBitmap(
-                    &bitmap,
-                    Some(&dest),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
+                self.draw_bitmap_high_quality(&bitmap, dest, width, height);
                 self.d2d_target.PopLayer();
                 std::mem::ManuallyDrop::drop(&mut layer_params.geometricMask);
                 std::mem::ManuallyDrop::drop(&mut layer_params.opacityBrush);
             } else {
-                self.d2d_target.DrawBitmap(
-                    &bitmap,
-                    Some(&dest),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    None,
-                );
+                self.draw_bitmap_high_quality(&bitmap, dest, width, height);
             }
             Ok(())
         }
+    }
+
+    /// Draws a premultiplied BGRA bitmap centered and aspect-fitted inside `rect` with optional rounded clipping.
+    pub fn draw_bgra_bitmap_aspect_fit(
+        &self,
+        rect: Rect,
+        width: u32,
+        height: u32,
+        bgra_premul: &[u8],
+        corner_radius: f32,
+    ) -> Result<()> {
+        if width == 0 || height == 0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let scale_x = rect.width / width as f32;
+        let scale_y = rect.height / height as f32;
+        let s = scale_x.min(scale_y);
+        let fit_w = width as f32 * s;
+        let fit_h = height as f32 * s;
+        let fit_rect = Rect::new(
+            rect.x + (rect.width - fit_w) * 0.5,
+            rect.y + (rect.height - fit_h) * 0.5,
+            fit_w,
+            fit_h,
+        );
+        self.draw_bgra_bitmap(fit_rect, width, height, bgra_premul, corner_radius)
+    }
+
+    unsafe fn draw_bitmap_high_quality(
+        &self,
+        bitmap: &ID2D1Bitmap,
+        dest: D2D_RECT_F,
+        src_w: u32,
+        src_h: u32,
+    ) {
+        if let Ok(d2d_ctx) = self.d2d_target.cast::<ID2D1DeviceContext>() {
+            let dst_w = (dest.right - dest.left).max(0.0);
+            let dst_h = (dest.bottom - dest.top).max(0.0);
+            if src_w > 0 && src_h > 0 && dst_w > 0.0 && dst_h > 0.0 {
+                let mut prev = windows_numerics::Matrix3x2::identity();
+                d2d_ctx.GetTransform(&mut prev);
+                let sx = dst_w / src_w as f32;
+                let sy = dst_h / src_h as f32;
+                let xform = windows_numerics::Matrix3x2 {
+                    M11: prev.M11 * sx,
+                    M12: prev.M12 * sx,
+                    M21: prev.M21 * sy,
+                    M22: prev.M22 * sy,
+                    M31: prev.M31 + dest.left * prev.M11 + dest.top * prev.M21,
+                    M32: prev.M32 + dest.left * prev.M12 + dest.top * prev.M22,
+                };
+                d2d_ctx.SetTransform(&xform);
+                let src_rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: src_w as f32,
+                    bottom: src_h as f32,
+                };
+                d2d_ctx.DrawImage(
+                    bitmap,
+                    None,
+                    Some(&src_rect),
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                    D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                );
+                d2d_ctx.SetTransform(&prev);
+                return;
+            }
+        }
+        self.d2d_target.DrawBitmap(
+            bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            None,
+        );
     }
 
     /// Draws a crisp vector Wi-Fi icon centered at `(cx, cy)`.
@@ -3169,7 +3563,7 @@ impl NativeSurface {
         let sw = if stroke_width > 0.0 {
             stroke_width.max(0.8)
         } else {
-            (s * 0.11).clamp(1.2, 2.4)
+            (s * 0.105).clamp(1.2, 2.2)
         };
 
         match symbol {
@@ -3833,30 +4227,35 @@ impl NativeSurface {
     ) -> Result<()> {
         let s = size.max(8.0);
         if is_playing {
-            let bar_w = (s * 0.22).max(2.0);
-            let bar_h = s * 0.76;
+            let bar_w = (s * 0.21).max(2.0);
+            let bar_h = s * 0.74;
+            let bar_r = (bar_w * 0.35).max(1.1);
             self.fill_rounded_rect(
                 Rect::new(cx - bar_w * 1.4, cy - bar_h * 0.5, bar_w, bar_h),
-                1.0,
+                bar_r,
                 color,
             )?;
             self.fill_rounded_rect(
                 Rect::new(cx + bar_w * 0.4, cy - bar_h * 0.5, bar_w, bar_h),
-                1.0,
+                bar_r,
                 color,
             )?;
             return Ok(());
         }
         unsafe {
             let brush = self.create_brush(color)?;
+            let round_cap = self.create_round_cap_stroke()?;
             let geo = self.d2d_factory.CreatePathGeometry()?;
             let sink = geo.Open()?;
-            sink.BeginFigure(pt(cx - s * 0.28, cy - s * 0.38), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(pt(cx + s * 0.38, cy));
-            sink.AddLine(pt(cx - s * 0.28, cy + s * 0.38));
+            // Slight optical shift right (+0.04*s) so triangle feels visually centered.
+            sink.BeginFigure(pt(cx - s * 0.24, cy - s * 0.34), D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(pt(cx + s * 0.34, cy));
+            sink.AddLine(pt(cx - s * 0.24, cy + s * 0.34));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
             sink.Close()?;
             self.d2d_target.FillGeometry(&geo, &brush, None);
+            self.d2d_target
+                .DrawGeometry(&geo, &brush, (s * 0.07).max(1.0), Some(&round_cap));
             Ok(())
         }
     }
@@ -3972,36 +4371,42 @@ impl NativeSurface {
         }
     }
 
-    /// Draws a notification bell icon centered at `(cx, cy)`.
     /// Draws a classic SF Symbols-style notification bell outline centered at `(cx, cy)`.
     pub fn draw_bell_icon(&self, cx: f32, cy: f32, size: f32, color: Color) -> Result<()> {
         let s = size.max(8.0);
         let sw = (s * 0.095).max(1.2);
         // Top finial stem
-        self.draw_line(cx, cy - s * 0.38, cx, cy - s * 0.31, color, sw)?;
-        // Classic flared bell body (smooth dome -> straight waist -> flared rim)
-        let body = [
-            (cx - s * 0.34, cy + s * 0.18),
-            (cx - s * 0.25, cy + s * 0.07),
-            (cx - s * 0.23, cy - s * 0.08),
-            (cx - s * 0.19, cy - s * 0.20),
-            (cx - s * 0.10, cy - s * 0.28),
-            (cx, cy - s * 0.31),
-            (cx + s * 0.10, cy - s * 0.28),
-            (cx + s * 0.19, cy - s * 0.20),
-            (cx + s * 0.23, cy - s * 0.08),
-            (cx + s * 0.25, cy + s * 0.07),
-            (cx + s * 0.34, cy + s * 0.18),
-        ];
-        self.draw_polyline(&body, true, color, sw)?;
-        // Bottom clapper arc
-        let clapper = [
-            (cx - s * 0.09, cy + s * 0.25),
-            (cx - s * 0.05, cy + s * 0.33),
-            (cx + s * 0.05, cy + s * 0.33),
-            (cx + s * 0.09, cy + s * 0.25),
-        ];
-        self.draw_polyline(&clapper, false, color, sw)?;
+        self.draw_line(cx, cy - s * 0.38, cx, cy - s * 0.30, color, sw)?;
+        // Smooth cubic Bezier bell dome + flared rim
+        unsafe {
+            let brush = self.create_brush(color)?;
+            let round_cap = self.create_round_cap_stroke()?;
+            let geo = self.d2d_factory.CreatePathGeometry()?;
+            let sink = geo.Open()?;
+            sink.BeginFigure(pt(cx - s * 0.34, cy + s * 0.18), D2D1_FIGURE_BEGIN_HOLLOW);
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx - s * 0.23, cy + s * 0.07),
+                point2: pt(cx - s * 0.24, cy - s * 0.30),
+                point3: pt(cx, cy - s * 0.30),
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                point1: pt(cx + s * 0.24, cy - s * 0.30),
+                point2: pt(cx + s * 0.23, cy + s * 0.07),
+                point3: pt(cx + s * 0.34, cy + s * 0.18),
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink.Close()?;
+            self.d2d_target
+                .DrawGeometry(&geo, &brush, sw, Some(&round_cap));
+            // Smooth clapper arc
+            let clapper = self.build_quadratic_arc(
+                pt(cx - s * 0.10, cy + s * 0.24),
+                pt(cx, cy + s * 0.39),
+                pt(cx + s * 0.10, cy + s * 0.24),
+            )?;
+            self.d2d_target
+                .DrawGeometry(&clapper, &brush, sw, Some(&round_cap));
+        }
         Ok(())
     }
 
@@ -4085,6 +4490,7 @@ impl NativeSurface {
         font_size: f32,
         align: TextAlign,
         bold: bool,
+        ellipsis: bool,
     ) -> Result<IDWriteTextFormat> {
         let clamped_size = font_size.max(1.0);
         let font_size_tenths = (clamped_size * 10.0).round() as u32;
@@ -4093,12 +4499,12 @@ impl NativeSurface {
             TextAlign::Center => 1,
             TextAlign::Trailing => 2,
         };
-        let key = (font_size_tenths, align_key, bold);
+        let key = (font_size_tenths, align_key, bold, ellipsis);
         if let Some(cached) = self.text_format_cache.borrow().get(&key) {
             return Ok(cached.clone());
         }
 
-        let family = to_wide_null(FONT_FAMILY);
+        let family = to_wide_null(resolve_ui_font_family(&self.dwrite_factory));
         let locale = to_wide_null("en-US");
         let weight = if bold {
             DWRITE_FONT_WEIGHT_BOLD
@@ -4121,6 +4527,17 @@ impl NativeSurface {
         };
         format.SetTextAlignment(dwrite_align)?;
         format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        if ellipsis {
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+            if let Ok(ellipsis_sign) = self.dwrite_factory.CreateEllipsisTrimmingSign(&format) {
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                };
+                let _ = format.SetTrimming(&trimming, Some(&ellipsis_sign));
+            }
+        }
         self.text_format_cache
             .borrow_mut()
             .insert(key, format.clone());
@@ -4205,6 +4622,10 @@ impl NativeSurface {
                 }
             }
             self.d2d_target.SetDpi(self.dpi, self.dpi);
+            self.d2d_target
+                .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            self.d2d_target
+                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             Ok(())
         }
     }
@@ -4381,6 +4802,30 @@ fn get_window_dpi(hwnd: HWND) -> f32 {
     96.0
 }
 
+fn resolve_ui_font_family(dwrite_factory: &IDWriteFactory) -> &'static str {
+    static RESOLVED_FONT: OnceLock<&'static str> = OnceLock::new();
+    *RESOLVED_FONT.get_or_init(|| unsafe {
+        let mut coll: Option<IDWriteFontCollection> = None;
+        if dwrite_factory.GetSystemFontCollection(&mut coll, false).is_ok() {
+            if let Some(collection) = coll {
+                for &candidate in &FONT_FAMILY_FALLBACKS {
+                    let wide = to_wide_null(candidate);
+                    let mut index = 0_u32;
+                    let mut exists = windows::core::BOOL(0);
+                    if collection
+                        .FindFamilyName(PCWSTR(wide.as_ptr()), &mut index, &mut exists)
+                        .is_ok()
+                        && exists.as_bool()
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        FONT_FAMILY
+    })
+}
+
 fn to_wide_null(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
@@ -4422,7 +4867,7 @@ fn resolve_fallback_glass_colors(
     let border = match style.variant {
         LiquidGlassVariant::Tinted(tint) => tint
             .lerp(Color::from_rgb_u8(0xFF, 0xFF, 0xFF), 0.45)
-            .with_alpha(0.45),
+            .with_alpha(0.28),
         _ => palette.hairline_border,
     };
     (base_fill, border)
@@ -4872,6 +5317,7 @@ fn rasterize_liquid_glass(
     gw: u32,
     gh: u32,
     scale: f32,
+    opacity: f32,
     style: LiquidGlassStyle,
     polarity: ThemePolarity,
     edge_params: Option<(f32, f32, EdgeSide, bool)>,
@@ -4891,12 +5337,19 @@ fn rasterize_liquid_glass(
     let flat_hh = (hh - depth - 1.5).max(0.0);
     let can_skip_center_sdf = edge_params.is_none() && flat_hw > 0.0 && flat_hh > 0.0;
 
-    let (refract_reach, tone_mix) = match style.variant {
+    let opacity = opacity.clamp(0.20, 1.0);
+    let glass_alpha = if opacity >= 0.999 {
+        1.0
+    } else {
+        (0.20 + 0.80 * opacity).clamp(0.20, 1.0)
+    };
+    let (refract_reach, base_tone_mix) = match style.variant {
         LiquidGlassVariant::Regular => (depth * 0.55, 0.18_f32),
         LiquidGlassVariant::Clear => (depth * 0.72, 0.06_f32),
         LiquidGlassVariant::Elevated => (depth * 0.42, 0.24_f32),
         LiquidGlassVariant::Tinted(_) => (depth * 0.50, 0.22_f32),
     };
+    let tone_mix = (base_tone_mix * opacity).clamp(0.02, 0.65);
     let tone_target = match polarity {
         ThemePolarity::LightGlass => [0.955_f32, 0.962_f32, 0.978_f32],
         ThemePolarity::DarkGlass => [0.075_f32, 0.078_f32, 0.095_f32],
@@ -4960,10 +5413,10 @@ fn rasterize_liquid_glass(
                     }
                 }
                 let idx = ((iy as usize) * (gw as usize) + (ix as usize)) * 4;
-                out[idx] = (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
-                out[idx + 3] = 255;
+                out[idx] = (rgb[2].clamp(0.0, 1.0) * glass_alpha * 255.0).round() as u8;
+                out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * glass_alpha * 255.0).round() as u8;
+                out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * glass_alpha * 255.0).round() as u8;
+                out[idx + 3] = (glass_alpha * 255.0).round() as u8;
                 continue;
             }
 
@@ -5061,11 +5514,12 @@ fn rasterize_liquid_glass(
                 }
             }
 
+            let out_a = cov * glass_alpha;
             let idx = ((iy as usize) * (gw as usize) + (ix as usize)) * 4;
-            out[idx] = (rgb[2].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
-            out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
-            out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * cov * 255.0).round() as u8;
-            out[idx + 3] = (cov * 255.0).round() as u8;
+            out[idx] = (rgb[2].clamp(0.0, 1.0) * out_a * 255.0).round() as u8;
+            out[idx + 1] = (rgb[1].clamp(0.0, 1.0) * out_a * 255.0).round() as u8;
+            out[idx + 2] = (rgb[0].clamp(0.0, 1.0) * out_a * 255.0).round() as u8;
+            out[idx + 3] = (out_a * 255.0).round() as u8;
         }
     }
     out
@@ -5079,6 +5533,7 @@ fn glass_cache_key(
     px_y: i32,
     px_w: u32,
     px_h: u32,
+    opacity: f32,
     style: LiquidGlassStyle,
     edge_params: Option<(f32, f32, EdgeSide, bool)>,
 ) -> u64 {
@@ -5096,6 +5551,7 @@ fn glass_cache_key(
     mix(px_y as u64);
     mix(px_w as u64);
     mix(px_h as u64);
+    mix((opacity.clamp(0.20, 1.0) * 100.0).round() as u64);
     mix((style.corner_radius * 10.0).round() as u64);
     mix(u64::from(style.hovered));
     mix(u64::from(style.pressed));
@@ -5382,6 +5838,80 @@ mod tests {
             assert_eq!(ic.bgra_premul.len(), 32 * 32 * 4);
             assert!(ic.bgra_premul.chunks_exact(4).any(|px| px[3] > 0));
         }
+    }
+
+    #[test]
+    fn extract_window_or_exe_icon_supports_high_res_128px() {
+        let icon = extract_window_or_exe_icon(0, r"C:\Windows\explorer.exe", 128)
+            .or_else(|| extract_window_or_exe_icon(0, r"C:\Windows\System32\notepad.exe", 128));
+        if let Some(ic) = icon {
+            assert_eq!(ic.width, 128);
+            assert_eq!(ic.height, 128);
+            assert_eq!(ic.bgra_premul.len(), 128 * 128 * 4);
+            assert!(ic.bgra_premul.chunks_exact(4).any(|px| px[3] > 0));
+        }
+    }
+
+    #[test]
+    fn draw_text_ellipsis_and_aspect_fit_bitmap_render_cleanly() {
+        let surface = match NativeSurface::new("HimeEllipsisTest", -2000, -2000, 160, 60) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let px = vec![0x80_u8; 32 * 16 * 4];
+        surface.begin_draw();
+        surface
+            .draw_text_ellipsis(
+                "Very long single-line window title that must truncate cleanly with ellipsis",
+                Rect::new(8.0, 8.0, 90.0, 20.0),
+                12.0,
+                theme::TEXT_PRIMARY,
+                TextAlign::Leading,
+            )
+            .expect("draw_text_ellipsis");
+        surface
+            .draw_text_bold_ellipsis(
+                "Bold long title truncation",
+                Rect::new(8.0, 30.0, 90.0, 20.0),
+                12.0,
+                theme::TEXT_PRIMARY,
+                TextAlign::Leading,
+            )
+            .expect("draw_text_bold_ellipsis");
+        surface
+            .draw_bgra_bitmap_aspect_fit(Rect::new(104.0, 8.0, 44.0, 44.0), 32, 16, &px, 6.0)
+            .expect("draw_bgra_bitmap_aspect_fit");
+        surface.end_draw_and_present().expect("present");
+        assert_eq!(surface.text_format_cache.borrow().len(), 2);
+        assert_eq!(surface.bitmap_cache.borrow().entries.len(), 1);
+    }
+
+    #[test]
+    fn set_glass_theme_updates_mode_and_gpu_acrylic() {
+        let surface = match NativeSurface::new_gpu_acrylic("HimeGlassThemeTest", -2000, -2000, 200, 120) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        surface.set_glass_theme(GlassThemePreset::DarkFrosted);
+        assert_eq!(surface.glass_theme(), GlassThemePreset::DarkFrosted);
+        assert_eq!(surface.color_theme_mode(), ColorThemeMode::Dark);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::DarkGlass);
+
+        surface.set_glass_theme(GlassThemePreset::LightFrosted);
+        assert_eq!(surface.glass_theme(), GlassThemePreset::LightFrosted);
+        assert_eq!(surface.color_theme_mode(), ColorThemeMode::Light);
+        assert_eq!(surface.theme_polarity(), ThemePolarity::LightGlass);
+
+        surface.set_glass_theme(GlassThemePreset::ClearGlass);
+        assert_eq!(surface.glass_theme(), GlassThemePreset::ClearGlass);
+        assert_eq!(surface.color_theme_mode(), ColorThemeMode::Auto);
+
+        surface.set_rounded_region(Rect::new(0.0, 0.0, 200.0, 120.0), 16.0);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(Rect::new(0.0, 0.0, 200.0, 120.0), LiquidGlassStyle::regular(16.0))
+            .expect("glass panel");
+        surface.end_draw_and_present().expect("present");
     }
 
     #[test]
@@ -5830,6 +6360,50 @@ mod tests {
             alpha_at(52, 114) > 150,
             "Left glass center alpha={}",
             alpha_at(52, 114)
+        );
+    }
+
+    #[test]
+    fn set_glass_opacity_clamps_and_scales_surface_alpha() {
+        let surface = match NativeSurface::new("HimeGlassOpacityTest", -2000, -2000, 160, 80) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        assert!((surface.glass_opacity() - 1.0).abs() < 1e-4);
+
+        surface.set_glass_opacity(0.05);
+        assert!((surface.glass_opacity() - 0.20).abs() < 1e-4);
+        surface.set_glass_opacity(2.5);
+        assert!((surface.glass_opacity() - 1.0).abs() < 1e-4);
+
+        let bgra = vec![0x80_u8; 160 * 80 * 4];
+        surface.set_backdrop_pixels(160, 80, &bgra);
+
+        surface.set_glass_opacity(1.0);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(
+                Rect::new(10.0, 10.0, 140.0, 60.0),
+                LiquidGlassStyle::regular(14.0).without_shadow(),
+            )
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+        let alpha_full = surface.test_pixel_bgra(80, 40).unwrap()[3];
+
+        surface.set_glass_opacity(0.25);
+        surface.begin_draw();
+        surface
+            .draw_liquid_glass_panel(
+                Rect::new(10.0, 10.0, 140.0, 60.0),
+                LiquidGlassStyle::regular(14.0).without_shadow(),
+            )
+            .unwrap();
+        surface.end_draw_and_present().unwrap();
+        let alpha_low = surface.test_pixel_bgra(80, 40).unwrap()[3];
+
+        assert!(
+            alpha_full > alpha_low && alpha_low >= 30,
+            "expected glass opacity to scale alpha: full={alpha_full}, low={alpha_low}"
         );
     }
 }

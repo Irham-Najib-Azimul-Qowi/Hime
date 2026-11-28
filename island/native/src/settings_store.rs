@@ -15,9 +15,12 @@ const SETTINGS_FILE: &str = "settings.json";
 
 pub const DEFAULT_ROUTER_URL: &str = "http://127.0.0.1:20128/v1";
 pub const DEFAULT_ROUTER_MODEL: &str = "hime-combo";
+pub const DEFAULT_GLASS_OPACITY: f32 = 0.78;
+pub const MIN_GLASS_OPACITY: f32 = 0.20;
+pub const MAX_GLASS_OPACITY: f32 = 1.0;
 
 /// Canonical native shell settings persisted in `%APPDATA%\ai.hime.desktop\settings.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NativeSettings {
     /// `"fixed"` | `"smart"` | `"peek"`
@@ -47,6 +50,10 @@ pub struct NativeSettings {
     pub brightness_overlay_enabled: bool,
     /// `"auto"` | `"dark"` | `"light"`
     pub color_theme: String,
+    /// `"clear-glass"` | `"dark-frosted"` | `"light-frosted"` | `"acrylic"` | `"auto"`
+    pub glass_theme: String,
+    /// Liquid Glass surface opacity (`0.20..=1.0`, default `0.78`).
+    pub glass_opacity: f32,
 
     pub hime_ai_enabled: bool,
     pub hime_router_url: String,
@@ -76,6 +83,8 @@ impl Default for NativeSettings {
             volume_overlay_enabled: true,
             brightness_overlay_enabled: true,
             color_theme: "auto".to_string(),
+            glass_theme: "clear-glass".to_string(),
+            glass_opacity: DEFAULT_GLASS_OPACITY,
             hime_ai_enabled: true,
             hime_router_url: DEFAULT_ROUTER_URL.to_string(),
             hime_router_model: DEFAULT_ROUTER_MODEL.to_string(),
@@ -92,6 +101,8 @@ impl NativeSettings {
         out.dock_mode = normalize_dock_mode(&out.dock_mode).to_string();
         out.dock_size = normalize_dock_size(&out.dock_size).to_string();
         out.color_theme = normalize_color_theme(&out.color_theme).to_string();
+        out.glass_theme = normalize_glass_theme(&out.glass_theme).to_string();
+        out.glass_opacity = clamp_glass_opacity(out.glass_opacity);
         if out.hime_router_url.trim().is_empty() {
             out.hime_router_url = DEFAULT_ROUTER_URL.to_string();
         } else {
@@ -158,6 +169,19 @@ impl NativeSettings {
         }
         .to_string();
         &self.color_theme
+    }
+
+    /// Cycles `glass_theme`: `"clear-glass"` -> `"dark-frosted"` -> `"light-frosted"` -> `"acrylic"` -> `"auto"` -> `"clear-glass"`.
+    pub fn cycle_glass_theme(&mut self) -> &str {
+        self.glass_theme = match normalize_glass_theme(&self.glass_theme) {
+            "clear-glass" => "dark-frosted",
+            "dark-frosted" => "light-frosted",
+            "light-frosted" => "acrylic",
+            "acrylic" => "auto",
+            _ => "clear-glass",
+        }
+        .to_string();
+        &self.glass_theme
     }
 }
 
@@ -336,6 +360,17 @@ impl SettingsStore {
         )
         .map(|s| normalize_color_theme(&s).to_string())
         .unwrap_or(def.color_theme);
+        let glass_theme = read_str(
+            map,
+            &["bloom-glass-theme", "hime-glass-theme", "glass_theme"],
+        )
+        .map(|s| normalize_glass_theme(&s).to_string())
+        .unwrap_or(def.glass_theme);
+        let glass_opacity = clamp_glass_opacity(read_f32(
+            map,
+            &["bloom-theme-opacity", "glass_opacity"],
+            def.glass_opacity,
+        ));
 
         let hime_ai_enabled = read_bool(
             map,
@@ -370,6 +405,8 @@ impl SettingsStore {
             volume_overlay_enabled,
             brightness_overlay_enabled,
             color_theme,
+            glass_theme,
+            glass_opacity,
             hime_ai_enabled,
             hime_router_url,
             hime_router_model,
@@ -448,6 +485,11 @@ impl SettingsStore {
             Value::String(s.color_theme.clone()),
         );
         map.insert("bloom-color-theme".into(), Value::String(s.color_theme));
+        map.insert("bloom-glass-theme".into(), Value::String(s.glass_theme));
+        let rounded_opacity = ((s.glass_opacity as f64) * 1000.0).round() / 1000.0;
+        if let Some(num) = serde_json::Number::from_f64(rounded_opacity) {
+            map.insert("bloom-theme-opacity".into(), Value::Number(num));
+        }
 
         map.insert(
             "bloom-assistant-enabled".into(),
@@ -504,6 +546,40 @@ pub fn normalize_color_theme(raw: &str) -> &'static str {
         "light" => "light",
         _ => "auto",
     }
+}
+
+pub fn normalize_glass_theme(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dark-frosted" | "dark_frosted" | "dark" => "dark-frosted",
+        "light-frosted" | "light_frosted" | "light" => "light-frosted",
+        "acrylic" => "acrylic",
+        "auto" => "auto",
+        _ => "clear-glass",
+    }
+}
+
+pub fn clamp_glass_opacity(raw: f32) -> f32 {
+    if raw.is_finite() {
+        raw.clamp(MIN_GLASS_OPACITY, MAX_GLASS_OPACITY)
+    } else {
+        DEFAULT_GLASS_OPACITY
+    }
+}
+
+fn read_f32(map: &Map<String, Value>, keys: &[&str], default: f32) -> f32 {
+    for key in keys {
+        if let Some(val) = map.get(*key) {
+            if let Some(n) = val.as_f64() {
+                return n as f32;
+            }
+            if let Some(s) = val.as_str() {
+                if let Ok(parsed) = s.trim().parse::<f32>() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    default
 }
 
 fn read_str(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
@@ -625,6 +701,8 @@ mod tests {
             volume_overlay_enabled: true,
             brightness_overlay_enabled: false,
             color_theme: "dark".to_string(),
+            glass_theme: "acrylic".to_string(),
+            glass_opacity: 0.65,
             hime_ai_enabled: true,
             hime_router_url: "http://127.0.0.1:20128/v1".to_string(),
             hime_router_model: "gemini-2.5-flash".to_string(),
@@ -738,5 +816,43 @@ mod tests {
 
         let invalid = SettingsStore::from_json_str(r#"{"dock_size":"giant"}"#).unwrap();
         assert_eq!(invalid.dock_size, "medium");
+    }
+
+    #[test]
+    fn glass_theme_normalizes_cycles_and_reads_legacy_key() {
+        let mut ns = NativeSettings::default();
+        assert_eq!(ns.glass_theme, "clear-glass");
+        assert_eq!(ns.cycle_glass_theme(), "dark-frosted");
+        assert_eq!(ns.cycle_glass_theme(), "light-frosted");
+        assert_eq!(ns.cycle_glass_theme(), "acrylic");
+        assert_eq!(ns.cycle_glass_theme(), "auto");
+        assert_eq!(ns.cycle_glass_theme(), "clear-glass");
+
+        let legacy =
+            SettingsStore::from_json_str(r#"{"bloom-glass-theme":"DARK-FROSTED"}"#).unwrap();
+        assert_eq!(legacy.glass_theme, "dark-frosted");
+
+        let invalid =
+            SettingsStore::from_json_str(r#"{"bloom-glass-theme":"neon-blur"}"#).unwrap();
+        assert_eq!(invalid.glass_theme, "clear-glass");
+    }
+
+    #[test]
+    fn glass_opacity_clamps_and_persists_bloom_theme_opacity() {
+        assert!((NativeSettings::default().glass_opacity - 0.78).abs() < 1e-4);
+
+        let low = SettingsStore::from_json_str(r#"{"bloom-theme-opacity":0.05}"#).unwrap();
+        assert!((low.glass_opacity - 0.20).abs() < 1e-4);
+
+        let high = SettingsStore::from_json_str(r#"{"bloom-theme-opacity":"1.45"}"#).unwrap();
+        assert!((high.glass_opacity - 1.0).abs() < 1e-4);
+
+        let path = temp_settings_path("glass-opacity");
+        let mut s = NativeSettings::default();
+        s.glass_opacity = 0.52;
+        SettingsStore::save_to_path(&path, &s).unwrap();
+        let reloaded = SettingsStore::load_from_path(&path).unwrap();
+        assert!((reloaded.glass_opacity - 0.52).abs() < 1e-3);
+        let _ = fs::remove_file(&path);
     }
 }
